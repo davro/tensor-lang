@@ -13,7 +13,7 @@ source python-env/bin/activate
 #pip install numpy
 
 # Install required packages
-#pip install -r requirements.txt
+pip install -r requirements.txt
 #pip freeze > requirements.txt
 
 # Test Runner for all tests
