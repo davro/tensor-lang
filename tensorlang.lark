@@ -1,0 +1,46 @@
+%import common.WS
+%ignore WS
+
+// Program Structure
+start: program
+program: (statement)*
+statement: let_binding | expr
+
+// Bindings
+let_binding: "let" NAME [":" type] "=" expr
+
+// Expressions
+expr: tensor_literal 
+    | fill_call 
+    | matmul_call 
+    | add_call 
+    | minus_call
+    | mult_call
+    | div_call
+    | relu_call  
+    | NAME
+
+// Types
+type: "Tensor" "[" dtype "," shape "]"
+dtype: "f32" | "f64"
+shape: "(" NUMBER ("," NUMBER)* ")"
+
+// Expression Definitions
+tensor_literal: "[" (NUMBER ("," NUMBER)* | inner_array ("," inner_array)*) "]"
+inner_array: "[" NUMBER ("," NUMBER)* "]"
+
+fill_call: "fill" "(" NUMBER "," shape ")"
+matmul_call: "matmul" "(" NAME "," NAME ")"
+add_call: "add" "(" NAME "," NAME ")"
+minus_call: "minus" "(" NAME "," NAME ")"
+mult_call: "mult" "(" NAME "," NAME ")"
+div_call: "div" "(" NAME "," NAME ")"
+relu_call: "relu" "(" NAME ")"
+
+// Tokens 
+NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
+NUMBER: /-?\d+(\.\d+)?/
+
+// Comments
+%ignore /\/\/[^\n]*/         // Single-line comments
+%ignore /\/\*[\s\S]*?\*\//   // Multi-line comments
