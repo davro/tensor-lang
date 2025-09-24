@@ -11,7 +11,7 @@ from functools import reduce
 # ================================================================
 #                      TensorLang version
 # ================================================================
-version = "0.2.0"
+version = "0.2.1"
 
 # ================================================================
 #                 GRAMMAR lark + TensorLang file
@@ -174,6 +174,32 @@ try:
             print(f"Fill value: {value}, shape: {shape}")
             return {'type': 'fill', 'value': value, 'shape': shape}
 
+        elif tree.data == 'sum_call':
+            tensor_name = None
+            axis = None
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Sum args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'sum', 'tensor': tensor_name, 'axis': axis}
+
+        elif tree.data == 'mean_call':
+            tensor_name = None
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Mean args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'mean', 'tensor': tensor_name, 'axis': axis}
+            
+
         print(f"Unrecognized expr type: {tree.data}")
         return None
 
@@ -202,44 +228,80 @@ try:
                         shape = (rows, cols) if rows > 1 else (cols,)
                     env[name] = {'dtype': 'f32', 'shape': shape}
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
-                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'fill']:
+
+                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'fill', 'sum', 'mean']:
                     if expr['type'] == 'fill':
                         env[name] = {'dtype': 'f32', 'shape': expr['shape']}
                         print(f"Assigned type from fill: {env[name]}")
-                    else:
-                        arg_names = expr['args']
-                        args = [env.get(arg_name) for arg_name in arg_names]
-                        print(f"Checking args for {name}: {args}")
-                        if not all(args):
-                            print(f"Type error: Undefined args for {name}")
+                    elif expr['type'] in ['sum', 'mean']:
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
                             return False, env
-                        if expr['type'] == 'matmul':
-                            if args[0]['shape'][1] != args[1]['shape'][0]:
-                                print(f"Type error: Matmul shape mismatch for {name}, {args[0]['shape']} x {args[1]['shape']}")
+                        
+                        input_shape = env[tensor_name]['shape']
+                        axis = expr.get('axis')
+                        
+                        if axis is None:
+                            # Full reduction - result is scalar (shape = ())
+                            output_shape = ()
+                        else:
+                            # Reduction along specific axis
+                            if axis < 0 or axis >= len(input_shape):
+                                print(f"Type error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                                 return False, env
-                            env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
-                            print(f"Assigned type for {name}: {env[name]}")
-                        elif expr['type'] in ['add', 'minus', 'mult', 'div']:
-                            shape1, shape2 = args[0]['shape'], args[1]['shape']
-                            # Broadcasting rules: shapes are compatible if equal or one is 1
-                            if len(shape1) < len(shape2):
-                                shape1, shape2 = shape2, shape1  # Ensure shape1 is the larger shape
-                            if len(shape2) == 0:  # Scalar case
-                                output_shape = shape1
-                            else:
-                                output_shape = []
-                                for d1, d2 in zip(shape1[-len(shape2):], shape2):
-                                    if d1 == d2 or d2 == 1:
-                                        output_shape.append(d1)
-                                    else:
-                                        print(f"Type error: {expr['type']} shape mismatch for {name}, {shape1} != {shape2}")
+                            # Remove the reduced dimension
+                            output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
+                            if not output_shape:  # If all dimensions reduced, result is scalar
+                                output_shape = ()
+                        
+                        env[name] = {'dtype': 'f32', 'shape': output_shape}
+                        print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
+                    else:
+                        # Handle other operations (matmul, add, etc.)
+                        if expr['type'] in ['sum', 'mean']:
+                            # This is handled above, but keeping this check for safety
+                            pass
+                        else:
+                            arg_names = expr.get('args', [])
+                            if arg_names:  # Only process if there are args
+                                args = [env.get(arg_name) for arg_name in arg_names]
+                                print(f"Checking args for {name}: {args}")
+                                if not all(args):
+                                    print(f"Type error: Undefined args for {name}")
+                                    return False, env
+                                    
+                                if expr['type'] == 'matmul':
+                                    if args[0]['shape'][1] != args[1]['shape'][0]:
+                                        print(f"Type error: Matmul shape mismatch for {name}, {args[0]['shape']} x {args[1]['shape']}")
                                         return False, env
-                                output_shape = shape1[:-len(shape2)] + tuple(output_shape)
-                            env[name] = {'dtype': 'f32', 'shape': output_shape}
-                            print(f"Assigned type for {name}: {env[name]}")
-                        elif expr['type'] == 'relu':
-                            env[name] = {'dtype': 'f32', 'shape': args[0]['shape']}
-                            print(f"Assigned type for {name}: {env[name]}")
+                                    env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
+                                    print(f"Assigned type for {name}: {env[name]}")
+
+                                elif expr['type'] in ['add', 'minus', 'mult', 'div']:
+                                    shape1, shape2 = args[0]['shape'], args[1]['shape']
+                                    # Broadcasting rules: shapes are compatible if equal or one is 1
+                                    if len(shape1) < len(shape2):
+                                        shape1, shape2 = shape2, shape1  # Ensure shape1 is the larger shape
+                                    if len(shape2) == 0:  # Scalar case
+                                        output_shape = shape1
+                                    else:
+                                        output_shape = []
+                                        for d1, d2 in zip(shape1[-len(shape2):], shape2):
+                                            if d1 == d2 or d2 == 1:
+                                                output_shape.append(d1)
+                                            else:
+                                                print(f"Type error: {expr['type']} shape mismatch for {name}, {shape1} != {shape2}")
+                                                return False, env
+                                        output_shape = shape1[:-len(shape2)] + tuple(output_shape)
+                                    env[name] = {'dtype': 'f32', 'shape': output_shape}
+                                    print(f"Assigned type for {name}: {env[name]}")
+
+                                elif expr['type'] == 'relu':
+                                    env[name] = {'dtype': 'f32', 'shape': args[0]['shape']}
+                                    print(f"Assigned type for {name}: {env[name]}")
+
+
                 else:
                     print(f"Type error: Unrecognized expr type for {name}: {expr['type']}")
                     return False, env
@@ -248,9 +310,10 @@ try:
     def prod(lst):
         return reduce(lambda x, y: x * y, lst, 1)
 
-    ###################################
-    # Parser / Compiler implementation
-    ###################################
+
+    # ================================================================
+    #                Parser / Compiler implementation
+    # ================================================================
 
     # Build the AST 
     ast, output_tensor = build_ast(parse_tree)
@@ -290,13 +353,17 @@ try:
                 expr = node['expr']
                 print(f"Generating kernel for {name} ({expr['type']})")
 
+                # ========================================
                 # Tensor Literal
+                # ========================================
                 if expr['type'] == 'tensor_literal':
                     shape = tuple(int(dim) for dim in env[name]['shape'])
                     tensors[name] = np.array(expr['data'], dtype=np.float32).reshape(shape)
                     print(f"Initialized tensor {name} with shape {shape}")
 
+                # ========================================
                 # MATMUL
+                # ========================================
                 elif expr['type'] == 'matmul':
                     arg1, arg2 = expr['args']
                     m, n = int(env[arg1]['shape'][0]), int(env[arg1]['shape'][1])
@@ -323,7 +390,9 @@ extern "C" void launch_matmul_{name}(float* A, float* B, float* C, int M, int N,
                     kernels.append(('matmul', name, arg1, arg2, m, n, p))
                     cuda_code += kernel
 
-                # ADD 
+                # ========================================
+                # ADD
+                # ======================================== 
                 elif expr['type'] == 'add':
                     arg1, arg2 = expr['args']
                     shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
@@ -368,7 +437,9 @@ extern "C" void launch_add_{name}(float* A, float* B, float* C, int rows, int co
 
                     cuda_code += kernel
 
+                # ========================================
                 # MINUS
+                # ========================================
                 elif expr['type'] == 'minus':
                     arg1, arg2 = expr['args']
                     shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
@@ -413,7 +484,9 @@ extern "C" void launch_minus_{name}(float* A, float* B, float* C, int rows, int 
 
                     cuda_code += kernel
 
+                # ========================================
                 # MULT
+                # ========================================
                 elif expr['type'] == 'mult':
                     arg1, arg2 = expr['args']
                     shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
@@ -458,7 +531,9 @@ extern "C" void launch_mult_{name}(float* A, float* B, float* C, int rows, int c
 
                     cuda_code += kernel
 
+                # ========================================
                 # DIV
+                # ========================================
                 elif expr['type'] == 'div':
                     arg1, arg2 = expr['args']
                     shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
@@ -503,7 +578,9 @@ extern "C" void launch_div_{name}(float* A, float* B, float* C, int rows, int co
 
                     cuda_code += kernel
 
-                # RELU
+                # ========================================
+                # ReLU - Rectified linear unit
+                # ========================================
                 elif expr['type'] == 'relu':
                     arg1 = expr['args'][0]
                     size = int(np.prod([int(dim) for dim in env[arg1]['shape']]))
@@ -525,7 +602,211 @@ extern "C" void launch_relu_{name}(float* input, float* output, int size) {{
                     cuda_code += kernel
 
 
+
+                # ========================================
+                # SUM
+                # ========================================
+                elif expr['type'] == 'sum':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    print(f"DEBUG SUM: tensor={tensor_name}, axis={axis}, shape={input_shape}")
+                    
+                    if axis is None:
+                        print("DEBUG: Taking sum_full path")
+                        # Full reduction to scalar
+                        size = int(np.prod([int(dim) for dim in input_shape]))
+                        kernel = f"""
+__global__ void sum_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : 0.0f;
+    __syncthreads();
+    
+    // Reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result for this block to global memory
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_sum_{name}(float* input, float* output, int size) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    sum_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('sum_full', name, tensor_name, None, size))
+                    else:
+                        # Reduction along specific axis
+                        print(f"DEBUG: Taking axis-specific path, axis={axis}")
+                        if len(input_shape) == 2 and axis == 1:
+                            print("DEBUG: Using sum_axis kernel (axis=1)")
+                            # Sum along columns (each row sums to one value)
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void sum_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            sum += input[row * cols + col];
+        }}
+        output[row] = sum;
+    }}
+}}
+extern "C" void launch_sum_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    sum_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('sum_axis', name, tensor_name, None, rows, cols, axis))
+                        elif len(input_shape) == 2 and axis == 0:
+                            # Sum along rows (each column sums to one value)
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void sum_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            sum += input[row * cols + col];
+        }}
+        output[col] = sum;
+    }}
+}}
+extern "C" void launch_sum_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    sum_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('sum_axis0', name, tensor_name, None, rows, cols, axis))
+
+                    cuda_code += kernel
+
+                # ========================================
+                # MEAN
+                # ========================================
+                elif expr['type'] == 'mean':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if axis is None:
+                        # Full mean to scalar
+                        size = int(np.prod([int(dim) for dim in input_shape]))
+                        kernel = f"""
+__global__ void mean_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : 0.0f;
+    __syncthreads();
+    
+    // Reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result for this block to global memory
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_mean_{name}(float* input, float* output, int size) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    mean_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    
+    // Divide by size to get mean
+    float mean_val;
+    cudaMemcpy(&mean_val, output, sizeof(float), cudaMemcpyDeviceToHost);
+    mean_val /= size;
+    cudaMemcpy(output, &mean_val, sizeof(float), cudaMemcpyHostToDevice);
+}}
+"""
+                        kernels.append(('mean_full', name, tensor_name, None, size))
+                    else:
+                        # Mean along specific axis
+                        if len(input_shape) == 2 and axis == 1:
+                            # Mean along columns
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void mean_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            sum += input[row * cols + col];
+        }}
+        output[row] = sum / cols;
+    }}
+}}
+extern "C" void launch_mean_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    mean_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('mean_axis', name, tensor_name, None, rows, cols, axis))
+                        elif len(input_shape) == 2 and axis == 0:
+                            # Mean along rows
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void mean_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            sum += input[row * cols + col];
+        }}
+        output[col] = sum / rows;
+    }}
+}}
+extern "C" void launch_mean_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    mean_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))                    
+
+                    cuda_code += kernel
+
+
+                # ========================================
                 # FILL
+                # ========================================
                 elif expr['type'] == 'fill':
                     size = int(np.prod([int(dim) for dim in expr['shape']]))
                     kernel = f"""
@@ -544,6 +825,8 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
 """
                     kernels.append(('fill', name, None, None, size, expr['value']))
                     cuda_code += kernel
+
+
 
         if kernels:
 
@@ -624,6 +907,28 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                     elif op_type == 'relu':
                         size = dims[0]
                         getattr(lib, f'launch_relu_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+
+
+                    elif op_type == 'sum_full':
+                        size = dims[0]
+                        getattr(lib, f'launch_sum_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'sum_axis':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_sum_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'sum_axis0':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_sum_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'mean_full':
+                        size = dims[0]
+                        getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'mean_axis':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'mean_axis0':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+
+
                     elif op_type == 'fill':
                         size, value = dims
                         getattr(lib, f'launch_fill_{name}')(c_void_p(int(gpu_allocs[name])), c_float(value), c_int(size))

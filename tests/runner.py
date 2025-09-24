@@ -20,35 +20,49 @@ except FileNotFoundError:
 
 def parse_result(log_content):
     """Extract and clean all results from the log using regex."""
-    result_pattern = r"Result (\w+) \(([\w]+)\):\n(\[.*?(?=\n[A-Z]|$))"
+    # More flexible pattern to capture everything after "Result variable (operation):"
+    result_pattern = r"Result (\w+) \(([\w]+)\):\n(.*?)(?=\n[A-Z]|\nResult|\nTensorLang|\nFreed|$)"
     results = {}
     for match in re.finditer(result_pattern, log_content, re.DOTALL):
-
         variable, operation, result_str = match.groups()
-        print(f"{variable} ( RAW ) : {result_str}")  # Debug output
+        print(f"{variable} ( RAW ) : {repr(result_str)}")  # Debug output
 
-        # Clean the result string: replace spaces with commas within brackets
-        cleaned_result = re.sub(r'\s+', ',', result_str.strip())
+        result_str = result_str.strip()
+        
+        # Check if it's a scalar (just a number, possibly with newlines)
+        scalar_match = re.match(r'^([\d\.\-\+e]+)\s*$', result_str, re.DOTALL)
+        if scalar_match:
+            try:
+                result = float(scalar_match.group(1))
+                results[variable] = result
+                print(f"{variable} (SCALAR): {result}")  # Debug output
+            except ValueError as e:
+                print(f"Error parsing scalar result for {variable}: {e}")
+        else:
+            # Handle array results (existing logic)
+            # Clean the result string: replace spaces with commas within brackets
+            cleaned_result = re.sub(r'\s+', ',', result_str.strip())
 
-        # Ensure commas between sublists and valid syntax
-        cleaned_result = re.sub(r'\]\s*\[', '],[', cleaned_result)
+            # Ensure commas between sublists and valid syntax
+            cleaned_result = re.sub(r'\]\s*\[', '],[', cleaned_result)
 
-        # Remove any trailing commas or brackets
-        cleaned_result = cleaned_result.rstrip(',')
-        cleaned_result = cleaned_result.replace('[,', '[').replace(',]', ']')
-        print(f"{variable} (CLEAN) : {cleaned_result}")  # Debug output
-        print("")
-        try:
-            result = eval(cleaned_result)  # Safely evaluate the cleaned string
-            results[variable] = result
-        except SyntaxError as e:
-            print(f"Error parsing result for {variable}: {e}")
+            # Remove any trailing commas or brackets
+            cleaned_result = cleaned_result.rstrip(',')
+            cleaned_result = cleaned_result.replace('[,', '[').replace(',]', ']')
+            print(f"{variable} (ARRAY) : {cleaned_result}")  # Debug output
+            
+            try:
+                result = eval(cleaned_result)  # Safely evaluate the cleaned string
+                results[variable] = result
+            except SyntaxError as e:
+                print(f"Error parsing array result for {variable}: {e}")
+        
+        print("")  # Empty line for readability
         
     return results
 
 def run_test(test_file):
     """Run a single test and compare with expected result."""
-    #log_file = TEST_DIR / f"{Path(test_file).stem}.log"
     log_file = f"cache/tests/{test_file}/{Path(test_file).stem}.log"
 
     # Change to root directory to ensure tensorlang.lark is found
@@ -56,7 +70,6 @@ def run_test(test_file):
     os.chdir(ROOT_DIR)
     test_passed = False
     try:
-        #cmd = ["python3", "tensorlang.py", str(TEST_DIR / test_file)]
         cmd = ["python3", "tensorlang.py", str(f"tests/{test_file}")]
         process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, text=True)
         
@@ -87,9 +100,18 @@ def run_test(test_file):
                 print(f"FAIL for {test_file}: No result found for expected variable {variable}.")
                 return False
             result = results[variable]
-            if not np.allclose(result, expected, rtol=1e-5, atol=1e-8):
-                print(f"FAIL for {test_file}: Expected {expected} for {variable}, got {result}")
-                return False
+            
+            # Handle comparison for both scalars and arrays
+            if isinstance(expected, (int, float)) and isinstance(result, (int, float)):
+                # Scalar comparison
+                if not np.isclose(result, expected, rtol=1e-5, atol=1e-8):
+                    print(f"FAIL for {test_file}: Expected {expected} for {variable}, got {result}")
+                    return False
+            else:
+                # Array comparison
+                if not np.allclose(result, expected, rtol=1e-5, atol=1e-8):
+                    print(f"FAIL for {test_file}: Expected {expected} for {variable}, got {result}")
+                    return False
 
         for variable, result in results.items():
             if variable in expected_results:
@@ -99,11 +121,7 @@ def run_test(test_file):
             print(f"FAIL for {test_file}: No expected variables matched the results.\n")
             return False
 
-        print("") # empty line between test cases
-
-        # Remove log file only if the test passed
-        #if test_passed and os.path.exists(log_file):
-        #    os.remove(log_file)
+        print("")  # empty line between test cases
 
         return True
     finally:

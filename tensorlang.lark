@@ -17,18 +17,19 @@ expr: tensor_literal
     | minus_call
     | mult_call
     | div_call
-    | relu_call  
+    | relu_call
+    | sum_call
+    | mean_call
     | NAME
 
 // Types
 type: "Tensor" "[" dtype "," shape "]"
 dtype: "f32" | "f64"
-shape: "(" NUMBER ("," NUMBER)* ")"
+shape: "(" NUMBER ("," NUMBER)* [","] ")"
 
 // Expression Definitions
 tensor_literal: "[" (NUMBER ("," NUMBER)* | inner_array ("," inner_array)*) "]"
 inner_array: "[" NUMBER ("," NUMBER)* "]"
-
 fill_call: "fill" "(" NUMBER "," shape ")"
 matmul_call: "matmul" "(" NAME "," NAME ")"
 add_call: "add" "(" NAME "," NAME ")"
@@ -36,6 +37,10 @@ minus_call: "minus" "(" NAME "," NAME ")"
 mult_call: "mult" "(" NAME "," NAME ")"
 div_call: "div" "(" NAME "," NAME ")"
 relu_call: "relu" "(" NAME ")"
+
+// Reduction operations
+sum_call: "sum" "(" NAME ")" | "sum" "(" NAME "," "axis" "=" NUMBER ")"
+mean_call: "mean" "(" NAME ["," "axis" "=" NUMBER] ")"
 
 // Tokens 
 NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
