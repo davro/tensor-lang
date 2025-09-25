@@ -18,6 +18,9 @@ expr: tensor_literal
     | mult_call
     | div_call
     | relu_call
+    | sigmoid_call
+    | tanh_call
+    | softmax_call
     | sum_call
     | mean_call
     | NAME
@@ -38,8 +41,13 @@ mult_call: "mult" "(" NAME "," NAME ")"
 div_call: "div" "(" NAME "," NAME ")"
 relu_call: "relu" "(" NAME ")"
 
+// New activation functions
+sigmoid_call: "sigmoid" "(" NAME ")"
+tanh_call: "tanh" "(" NAME ")"
+softmax_call: "softmax" "(" NAME ["," "axis" "=" NUMBER] ")"
+
 // Reduction operations
-sum_call: "sum" "(" NAME ")" | "sum" "(" NAME "," "axis" "=" NUMBER ")"
+sum_call: "sum" "(" NAME ["," "axis" "=" NUMBER] ")"
 mean_call: "mean" "(" NAME ["," "axis" "=" NUMBER] ")"
 
 // Tokens 

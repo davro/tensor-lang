@@ -154,6 +154,35 @@ try:
             print(f"ReLU args: {args}")
             return {'type': 'relu', 'args': args}
 
+
+        elif tree.data == 'sigmoid_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Sigmoid args: {args}")
+            return {'type': 'sigmoid', 'args': args}
+
+        elif tree.data == 'tanh_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Tanh args: {args}")
+            return {'type': 'tanh', 'args': args}
+
+        elif tree.data == 'softmax_call':
+            tensor_name = None
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            # Default to last axis if not specified
+            print(f"Softmax args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'softmax', 'tensor': tensor_name, 'axis': axis}
+
+
+
+
+
         elif tree.data == 'tensor_literal':
             data = []
             is_1d = True
@@ -229,10 +258,13 @@ try:
                     env[name] = {'dtype': 'f32', 'shape': shape}
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
 
-                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'fill', 'sum', 'mean']:
+                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'fill', 'sum', 'mean']:
+                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean']:
+
                     if expr['type'] == 'fill':
                         env[name] = {'dtype': 'f32', 'shape': expr['shape']}
                         print(f"Assigned type from fill: {env[name]}")
+                    
                     elif expr['type'] in ['sum', 'mean']:
                         tensor_name = expr['tensor']
                         if tensor_name not in env:
@@ -257,8 +289,21 @@ try:
                         
                         env[name] = {'dtype': 'f32', 'shape': output_shape}
                         print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
+
+                    elif expr['type'] == 'softmax':
+                        print(f"DEBUG: Processing softmax type checking for {name}")
+                        tensor_name = expr['tensor']
+                        print(f"DEBUG: Softmax tensor_name = {tensor_name}")
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for softmax")
+                            return False, env
+                        
+                        # Softmax preserves input shape
+                        env[name] = {'dtype': 'f32', 'shape': env[tensor_name]['shape']}
+                        print(f"Assigned type for {name} (softmax): {env[name]}")
+
                     else:
-                        # Handle other operations (matmul, add, etc.)
+                        # Handle other operations (matmul, add, minus, mult, div, relu, sigmoid, tanh etc.)
                         if expr['type'] in ['sum', 'mean']:
                             # This is handled above, but keeping this check for safety
                             pass
@@ -301,6 +346,9 @@ try:
                                     env[name] = {'dtype': 'f32', 'shape': args[0]['shape']}
                                     print(f"Assigned type for {name}: {env[name]}")
 
+                                elif expr['type'] in ['sigmoid', 'tanh']:  # Move this here
+                                    env[name] = {'dtype': 'f32', 'shape': args[0]['shape']}
+                                    print(f"Assigned type for {name}: {env[name]}")
 
                 else:
                     print(f"Type error: Unrecognized expr type for {name}: {expr['type']}")
@@ -434,7 +482,6 @@ extern "C" void launch_add_{name}(float* A, float* B, float* C, int rows, int co
 }}
 """
                         kernels.append(('add_broadcast', name, arg1, arg2, rows, cols))
-
                     cuda_code += kernel
 
                 # ========================================
@@ -481,7 +528,6 @@ extern "C" void launch_minus_{name}(float* A, float* B, float* C, int rows, int 
 }}
 """
                         kernels.append(('minus_broadcast', name, arg1, arg2, rows, cols))
-
                     cuda_code += kernel
 
                 # ========================================
@@ -528,7 +574,6 @@ extern "C" void launch_mult_{name}(float* A, float* B, float* C, int rows, int c
 }}
 """
                         kernels.append(('mult_broadcast', name, arg1, arg2, rows, cols))
-
                     cuda_code += kernel
 
                 # ========================================
@@ -575,7 +620,6 @@ extern "C" void launch_div_{name}(float* A, float* B, float* C, int rows, int co
 }}
 """
                         kernels.append(('div_broadcast', name, arg1, arg2, rows, cols))
-
                     cuda_code += kernel
 
                 # ========================================
@@ -600,6 +644,140 @@ extern "C" void launch_relu_{name}(float* input, float* output, int size) {{
 """
                     kernels.append(('relu', name, arg1, None, size))
                     cuda_code += kernel
+
+                # ========================================
+                # SIGMOID
+                # ========================================
+                elif expr['type'] == 'sigmoid':
+                    arg1 = expr['args'][0]
+                    size = int(np.prod([int(dim) for dim in env[arg1]['shape']]))
+                    kernel = f"""
+__global__ void sigmoid_kernel_{name}(float* input, float* output, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        output[idx] = 1.0f / (1.0f + expf(-input[idx]));
+    }}
+}}
+extern "C" void launch_sigmoid_{name}(float* input, float* output, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    sigmoid_kernel_{name}<<<grid, block>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                    kernels.append(('sigmoid', name, arg1, None, size))
+                    cuda_code += kernel
+
+                # ========================================
+                # TANH
+                # ========================================
+                elif expr['type'] == 'tanh':
+                    arg1 = expr['args'][0]
+                    size = int(np.prod([int(dim) for dim in env[arg1]['shape']]))
+                    kernel = f"""
+__global__ void tanh_kernel_{name}(float* input, float* output, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        output[idx] = tanhf(input[idx]);
+    }}
+}}
+extern "C" void launch_tanh_{name}(float* input, float* output, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    tanh_kernel_{name}<<<grid, block>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                    kernels.append(('tanh', name, arg1, None, size))
+                    cuda_code += kernel
+
+                # ========================================
+                # SOFTMAX
+                # ========================================
+                elif expr['type'] == 'softmax':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if axis is None:
+                        # Default to last axis
+                        axis = len(input_shape) - 1
+                    
+                    if len(input_shape) == 2 and axis == 1:
+                        # Softmax along rows (most common case)
+                        rows, cols = int(input_shape[0]), int(input_shape[1])
+                        kernel = f"""
+__global__ void softmax_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        // Find max for numerical stability
+        float max_val = input[row * cols];
+        for (int col = 1; col < cols; col++) {{
+            max_val = fmaxf(max_val, input[row * cols + col]);
+        }}
+        
+        // Compute exp(x - max) and sum
+        float sum_exp = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            float exp_val = expf(input[row * cols + col] - max_val);
+            output[row * cols + col] = exp_val;
+            sum_exp += exp_val;
+        }}
+        
+        // Normalize by sum
+        for (int col = 0; col < cols; col++) {{
+            output[row * cols + col] /= sum_exp;
+        }}
+    }}
+}}
+extern "C" void launch_softmax_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    softmax_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('softmax', name, tensor_name, None, rows, cols, axis))
+
+                    elif len(input_shape) == 1:
+                        # 1D softmax
+                        size = int(input_shape[0])
+                        kernel = f"""
+__global__ void softmax_1d_kernel_{name}(float* input, float* output, int size) {{
+    if (threadIdx.x == 0 && blockIdx.x == 0) {{
+        // Find max for numerical stability
+        float max_val = input[0];
+        for (int i = 1; i < size; i++) {{
+            max_val = fmaxf(max_val, input[i]);
+        }}
+        
+        // Compute exp(x - max) and sum
+        float sum_exp = 0.0f;
+        for (int i = 0; i < size; i++) {{
+            float exp_val = expf(input[i] - max_val);
+            output[i] = exp_val;
+            sum_exp += exp_val;
+        }}
+        
+        // Normalize by sum
+        for (int i = 0; i < size; i++) {{
+            output[i] /= sum_exp;
+        }}
+    }}
+}}
+extern "C" void launch_softmax_{name}(float* input, float* output, int size) {{
+    dim3 block(1);
+    dim3 grid(1);
+    softmax_1d_kernel_{name}<<<grid, block>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('softmax_1d', name, tensor_name, None, size))
+                    cuda_code += kernel
+
+
+
+
 
 
 
@@ -699,7 +877,6 @@ extern "C" void launch_sum_{name}(float* input, float* output, int rows, int col
 }}
 """
                             kernels.append(('sum_axis0', name, tensor_name, None, rows, cols, axis))
-
                     cuda_code += kernel
 
                 # ========================================
@@ -799,8 +976,7 @@ extern "C" void launch_mean_{name}(float* input, float* output, int rows, int co
     cudaDeviceSynchronize();
 }}
 """
-                            kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))                    
-
+                            kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))
                     cuda_code += kernel
 
 
@@ -907,6 +1083,20 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                     elif op_type == 'relu':
                         size = dims[0]
                         getattr(lib, f'launch_relu_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+
+
+                    elif op_type == 'sigmoid':
+                        size = dims[0]
+                        getattr(lib, f'launch_sigmoid_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'tanh':
+                        size = dims[0]
+                        getattr(lib, f'launch_tanh_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'softmax':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_softmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'softmax_1d':
+                        size = dims[0]
+                        getattr(lib, f'launch_softmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
 
 
                     elif op_type == 'sum_full':
