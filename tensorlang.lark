@@ -23,6 +23,9 @@ expr: tensor_literal
     | softmax_call
     | sum_call
     | mean_call
+    | greater_call
+    | less_call
+    | equal_call
     | NAME
 
 // Types
@@ -41,10 +44,15 @@ mult_call: "mult" "(" NAME "," NAME ")"
 div_call: "div" "(" NAME "," NAME ")"
 relu_call: "relu" "(" NAME ")"
 
-// New activation functions
+// Activation functions
 sigmoid_call: "sigmoid" "(" NAME ")"
 tanh_call: "tanh" "(" NAME ")"
 softmax_call: "softmax" "(" NAME ["," "axis" "=" NUMBER] ")"
+
+// Comparison operations
+greater_call: "greater" "(" NAME "," NAME ")"
+less_call: "less" "(" NAME "," NAME ")"
+equal_call: "equal" "(" NAME "," NAME ")"
 
 // Reduction operations
 sum_call: "sum" "(" NAME ["," "axis" "=" NUMBER] ")"

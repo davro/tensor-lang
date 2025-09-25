@@ -182,6 +182,23 @@ try:
 
 
 
+        elif tree.data == 'greater_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Greater args: {args}")
+            return {'type': 'greater', 'args': args}
+
+        elif tree.data == 'less_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Less args: {args}")
+            return {'type': 'less', 'args': args}
+
+        elif tree.data == 'equal_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Equal args: {args}")
+            return {'type': 'equal', 'args': args}
+
+
+
 
         elif tree.data == 'tensor_literal':
             data = []
@@ -259,8 +276,8 @@ try:
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
 
                 #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'fill', 'sum', 'mean']:
-                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean']:
-
+                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean']:
+                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'greater', 'less', 'equal']:
                     if expr['type'] == 'fill':
                         env[name] = {'dtype': 'f32', 'shape': expr['shape']}
                         print(f"Assigned type from fill: {env[name]}")
@@ -301,6 +318,7 @@ try:
                         # Softmax preserves input shape
                         env[name] = {'dtype': 'f32', 'shape': env[tensor_name]['shape']}
                         print(f"Assigned type for {name} (softmax): {env[name]}")
+
 
                     else:
                         # Handle other operations (matmul, add, minus, mult, div, relu, sigmoid, tanh etc.)
@@ -349,6 +367,27 @@ try:
                                 elif expr['type'] in ['sigmoid', 'tanh']:  # Move this here
                                     env[name] = {'dtype': 'f32', 'shape': args[0]['shape']}
                                     print(f"Assigned type for {name}: {env[name]}")
+
+                                elif expr['type'] in ['greater', 'less', 'equal']:
+                                    shape1, shape2 = args[0]['shape'], args[1]['shape']
+                                    # Broadcasting rules: shapes are compatible if equal or one is 1
+                                    if len(shape1) < len(shape2):
+                                        shape1, shape2 = shape2, shape1  # Ensure shape1 is the larger shape
+                                    if len(shape2) == 0:  # Scalar case
+                                        output_shape = shape1
+                                    else:
+                                        output_shape = []
+                                        for d1, d2 in zip(shape1[-len(shape2):], shape2):
+                                            if d1 == d2 or d2 == 1:
+                                                output_shape.append(d1)
+                                            else:
+                                                print(f"Type error: {expr['type']} shape mismatch for {name}, {shape1} != {shape2}")
+                                                return False, env
+                                        output_shape = shape1[:-len(shape2)] + tuple(output_shape)
+                                    # Note: Comparisons return float tensors (0.0 or 1.0) for CUDA compatibility
+                                    env[name] = {'dtype': 'f32', 'shape': output_shape}
+                                    print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
+
 
                 else:
                     print(f"Type error: Unrecognized expr type for {name}: {expr['type']}")
@@ -779,6 +818,148 @@ extern "C" void launch_softmax_{name}(float* input, float* output, int size) {{
 
 
 
+                # GREATER
+                elif expr['type'] == 'greater':
+                    arg1, arg2 = expr['args']
+                    shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    if shape1 == shape2:
+                        # Element-wise greater
+                        size = int(np.prod([int(dim) for dim in output_shape]))
+                        kernel = f"""
+__global__ void greater_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = (A[idx] > B[idx]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_greater_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    greater_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('greater', name, arg1, arg2, size))
+                    else:
+                        # Broadcasting greater (e.g., (4,5) > (5,) -> (4,5))
+                        rows, cols = output_shape
+                        kernel = f"""
+__global__ void greater_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = (A[i * cols + j] > B[j]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_greater_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    greater_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('greater_broadcast', name, arg1, arg2, rows, cols))
+                    
+                    cuda_code += kernel
+
+                # LESS
+                elif expr['type'] == 'less':
+                    arg1, arg2 = expr['args']
+                    shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    if shape1 == shape2:
+                        # Element-wise less
+                        size = int(np.prod([int(dim) for dim in output_shape]))
+                        kernel = f"""
+__global__ void less_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = (A[idx] < B[idx]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_less_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    less_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('less', name, arg1, arg2, size))
+                    else:
+                        # Broadcasting less
+                        rows, cols = output_shape
+                        kernel = f"""
+__global__ void less_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = (A[i * cols + j] < B[j]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_less_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    less_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('less_broadcast', name, arg1, arg2, rows, cols))
+                    
+                    cuda_code += kernel
+
+                # EQUAL
+                elif expr['type'] == 'equal':
+                    arg1, arg2 = expr['args']
+                    shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    if shape1 == shape2:
+                        # Element-wise equal
+                        size = int(np.prod([int(dim) for dim in output_shape]))
+                        kernel = f"""
+__global__ void equal_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = (fabsf(A[idx] - B[idx]) < 1e-6f) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_equal_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    equal_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('equal', name, arg1, arg2, size))
+                    else:
+                        # Broadcasting equal
+                        rows, cols = output_shape
+                        kernel = f"""
+__global__ void equal_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = (fabsf(A[i * cols + j] - B[j]) < 1e-6f) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_equal_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    equal_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('equal_broadcast', name, arg1, arg2, rows, cols))
+                    
+                    cuda_code += kernel
+
+
+
+
+
 
 
                 # ========================================
@@ -1097,6 +1278,32 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                     elif op_type == 'softmax_1d':
                         size = dims[0]
                         getattr(lib, f'launch_softmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+
+
+                    elif op_type == 'greater':
+                        size = dims[0]
+                        getattr(lib, f'launch_greater_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])),  # Should be 'data'
+                            c_void_p(int(gpu_allocs[arg2])),  # Should be 'zeros' 
+                            c_void_p(int(gpu_allocs[name])),  # Should be 'mask'
+                            c_int(size)
+                        )
+
+                    elif op_type == 'greater_broadcast':
+                        rows, cols = dims
+                        getattr(lib, f'launch_greater_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'less':
+                        size = dims[0]
+                        getattr(lib, f'launch_less_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'less_broadcast':
+                        rows, cols = dims
+                        getattr(lib, f'launch_less_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'equal':
+                        size = dims[0]
+                        getattr(lib, f'launch_equal_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'equal_broadcast':
+                        rows, cols = dims
+                        getattr(lib, f'launch_equal_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
 
 
                     elif op_type == 'sum_full':
