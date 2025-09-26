@@ -25,8 +25,7 @@ def parse_result(log_content):
     results = {}
     for match in re.finditer(result_pattern, log_content, re.DOTALL):
         variable, operation, result_str = match.groups()
-        print(f"{variable} ( RAW ) : {repr(result_str)}")  # Debug output
-
+        ##print(f"{variable} ( RAW ) : {repr(result_str)}")  # Debug output
         result_str = result_str.strip()
         
         # Check if it's a scalar (just a number, possibly with newlines)
@@ -35,7 +34,7 @@ def parse_result(log_content):
             try:
                 result = float(scalar_match.group(1))
                 results[variable] = result
-                print(f"{variable} (SCALAR): {result}")  # Debug output
+                ##print(f"{variable} (SCALAR): {result}")  # Debug output
             except ValueError as e:
                 print(f"Error parsing scalar result for {variable}: {e}")
         else:
@@ -49,7 +48,7 @@ def parse_result(log_content):
             # Remove any trailing commas or brackets
             cleaned_result = cleaned_result.rstrip(',')
             cleaned_result = cleaned_result.replace('[,', '[').replace(',]', ']')
-            print(f"{variable} (ARRAY) : {cleaned_result}")  # Debug output
+            ##print(f"{variable} (ARRAY) : {cleaned_result}")  # Debug output
             
             try:
                 result = eval(cleaned_result)  # Safely evaluate the cleaned string
@@ -57,7 +56,7 @@ def parse_result(log_content):
             except SyntaxError as e:
                 print(f"Error parsing array result for {variable}: {e}")
         
-        print("")  # Empty line for readability
+        ##print("")  # Empty line for readability
         
     return results
 
@@ -76,9 +75,9 @@ def run_test(test_file):
         with open(log_file, 'w') as f:
             f.write(process.stdout)
         print(f"+------------------------------------------------------------------------------+")
-        print(f"|------------------------------------------------------------------------------+")
+        #print(f"|------------------------------------------------------------------------------+")
         print(f"| TestCase: {test_file}")
-        print(f"|------------------------------------------------------------------------------+")
+        #print(f"|------------------------------------------------------------------------------+")
         print(f"+------------------------------------------------------------------------------+")
 
         if process.returncode != 0:

@@ -23,9 +23,14 @@ expr: tensor_literal
     | softmax_call
     | sum_call
     | mean_call
+    | max_call
+    | min_call
+    | argmax_call
+    | argmin_call
     | greater_call
     | less_call
     | equal_call
+    | slice_expr
     | NAME
 
 // Types
@@ -54,9 +59,18 @@ greater_call: "greater" "(" NAME "," NAME ")"
 less_call: "less" "(" NAME "," NAME ")"
 equal_call: "equal" "(" NAME "," NAME ")"
 
+// Tensor slicing
+slice_expr: NAME "[" slice_spec ("," slice_spec)* "]"
+slice_spec: slice_range | NUMBER | ":"
+slice_range: NUMBER ":" NUMBER | ":" NUMBER | NUMBER ":"
+
 // Reduction operations
 sum_call: "sum" "(" NAME ["," "axis" "=" NUMBER] ")"
 mean_call: "mean" "(" NAME ["," "axis" "=" NUMBER] ")"
+max_call: "max" "(" NAME ["," "axis" "=" NUMBER] ")"
+min_call: "min" "(" NAME ["," "axis" "=" NUMBER] ")"
+argmax_call: "argmax" "(" NAME ["," "axis" "=" NUMBER] ")"
+argmin_call: "argmin" "(" NAME ["," "axis" "=" NUMBER] ")"
 
 // Tokens 
 NAME: /[a-zA-Z_][a-zA-Z0-9_]*/

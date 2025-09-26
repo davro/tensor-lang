@@ -1,4 +1,32 @@
 {
+  "max_full.tl": {
+    "result": 5.0
+  },
+
+  "min_full.tl": {
+    "result": 1.0
+  },
+
+  "max_axis.tl": {
+    "result": [4.0, 6.0]
+  },
+
+  "min_axis.tl": {
+    "result": [2.0, 1.0, 1.0]
+  },
+
+  "argmax.tl": {
+    "result": [1.0, 2.0]
+  },
+
+  "argmin.tl": {
+    "result": [1.0, 2.0]
+  },
+
+  "minmax_pipeline.tl": {
+    "overall_max": 0.7100998759269714
+  },
+  
 
   "activations.tl": {
     "final_leaky": [
@@ -33,6 +61,36 @@
 
   "masking_pipeline.tl": {
     "filtered": [0.0, 2.0, 0.0, 4.0]
+  },
+
+  "slice_1d.tl": {
+    "result": [2.0, 3.0, 4.0]
+  },
+
+  "slice_2d_rows.tl": {
+    "result": [
+      [1.0, 2.0, 3.0],
+      [4.0, 5.0, 6.0]
+    ]
+  },
+
+  "slice_2d_cols.tl": {
+    "result": [
+      [2.0, 3.0],
+      [5.0, 6.0],
+      [8.0, 9.0]
+    ]
+  },
+
+  "slice_submatrix.tl": {
+    "result": [
+      [6.0, 7.0],
+      [10.0, 11.0]
+    ]
+  },
+
+  "slice_pipeline.tl": {
+    "result": [10.0, 16.0]
   },
 
   "sigmoid.tl": {

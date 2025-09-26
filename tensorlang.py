@@ -246,8 +246,118 @@ try:
             return {'type': 'mean', 'tensor': tensor_name, 'axis': axis}
             
 
+
+
+        elif tree.data == 'max_call':
+            tensor_name = None
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Max args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'max', 'tensor': tensor_name, 'axis': axis}
+
+        elif tree.data == 'min_call':
+            tensor_name = None
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Min args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'min', 'tensor': tensor_name, 'axis': axis}
+
+        elif tree.data == 'argmax_call':
+            tensor_name = None
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Argmax args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'argmax', 'tensor': tensor_name, 'axis': axis}
+
+        elif tree.data == 'argmin_call':
+            tensor_name = None
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Argmin args: tensor={tensor_name}, axis={axis}")
+            return {'type': 'argmin', 'tensor': tensor_name, 'axis': axis}
+
+
+
+
+        elif tree.data == 'slice_expr':
+            tensor_name = None
+            slice_specs = []
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Tree):
+                    if child.data == 'slice_spec':
+                        spec = build_slice_spec(child)
+                        slice_specs.append(spec)
+            
+            print(f"Slice args: tensor={tensor_name}, specs={slice_specs}")
+            return {'type': 'slice', 'tensor': tensor_name, 'specs': slice_specs}
+
+
         print(f"Unrecognized expr type: {tree.data}")
         return None
+
+
+    def build_slice_spec(tree):
+        """Parse slice specification like 0:2, :, 1:, etc."""
+        if tree.data == 'slice_spec':
+            # Handle the slice_spec wrapper
+            if len(tree.children) == 1:
+                child = tree.children[0]
+                if isinstance(child, Tree) and child.data == 'slice_range':
+                    return build_slice_spec(child)  # Recursive call for slice_range
+                elif isinstance(child, Token):
+                    if child.type == 'NUMBER':
+                        return {'type': 'index', 'value': int(float(child.value))}
+                    elif child.value == ':':
+                        return {'type': 'full_slice'}
+        elif tree.data == 'slice_range':
+            # Handle slice_range: start:end
+            if len(tree.children) == 2:
+                left, right = tree.children
+                if isinstance(left, Token) and isinstance(right, Token):
+                    if left.value == ':':
+                        # :end
+                        end = int(float(right.value))
+                        return {'type': 'slice', 'start': None, 'end': end}
+                    elif right.value == ':':
+                        # start:
+                        start = int(float(left.value))
+                        return {'type': 'slice', 'start': start, 'end': None}
+                    elif left.type == 'NUMBER' and right.type == 'NUMBER':
+                        # start:end
+                        start = int(float(left.value))
+                        end = int(float(right.value))
+                        return {'type': 'slice', 'start': start, 'end': end}
+        
+        # Default fallback
+        return {'type': 'full_slice'}
+
 
     # Type checker
     def type_checker(ast):
@@ -275,14 +385,110 @@ try:
                     env[name] = {'dtype': 'f32', 'shape': shape}
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
 
-                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'fill', 'sum', 'mean']:
-                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean']:
-                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'greater', 'less', 'equal']:
+                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'greater', 'less', 'equal', 'slice']:
+                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'slice']:
+
                     if expr['type'] == 'fill':
                         env[name] = {'dtype': 'f32', 'shape': expr['shape']}
                         print(f"Assigned type from fill: {env[name]}")
                     
                     elif expr['type'] in ['sum', 'mean']:
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        axis = expr.get('axis')
+                        if axis is None:
+                            # Full reduction - result is scalar (shape = ())
+                            output_shape = ()
+                        else:
+                            # Reduction along specific axis
+                            if axis < 0 or axis >= len(input_shape):
+                                print(f"Type error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
+                                return False, env
+                            # Remove the reduced dimension
+                            output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
+                            if not output_shape:  # If all dimensions reduced, result is scalar
+                                output_shape = ()
+                        
+                        env[name] = {'dtype': 'f32', 'shape': output_shape}
+                        print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
+
+                    elif expr['type'] == 'softmax':
+                        print(f"DEBUG: Processing softmax type checking for {name}")
+                        tensor_name = expr['tensor']
+                        print(f"DEBUG: Softmax tensor_name = {tensor_name}")
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
+                            return False, env
+                        
+                        # Softmax preserves input shape
+                        env[name] = {'dtype': 'f32', 'shape': env[tensor_name]['shape']}
+                        print(f"Assigned type for {name} (softmax): {env[name]}")
+
+
+                    elif expr['type'] == 'slice':
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        slice_specs = expr['specs']
+                        
+                        # Calculate output shape based on slice specifications
+                        output_shape = []
+                        for i, spec in enumerate(slice_specs):
+                            if i >= len(input_shape):
+                                print(f"Type error: Slice dimension {i} exceeds tensor dimensions {len(input_shape)}")
+                                return False, env
+                                
+                            dim_size = input_shape[i]
+                            
+                            if spec['type'] == 'index':
+                                # Single index removes dimension
+                                continue  # Don't add to output_shape
+                            elif spec['type'] == 'full_slice':
+                                # Full slice preserves dimension
+                                output_shape.append(dim_size)
+                            elif spec['type'] == 'slice':
+                                start = spec.get('start', 0)
+                                end = spec.get('end', dim_size)
+                                
+                                # Handle negative indices and bounds checking
+                                if start is None:
+                                    start = 0
+                                if end is None:
+                                    end = dim_size
+                                if start < 0:
+                                    start = max(0, dim_size + start)
+                                if end < 0:
+                                    end = max(0, dim_size + end)
+                                    
+                                start = min(start, dim_size)
+                                end = min(end, dim_size)
+                                
+                                slice_length = max(0, end - start)
+                                output_shape.append(slice_length)
+                        
+                        # Handle remaining dimensions (implicit full slices)
+                        for i in range(len(slice_specs), len(input_shape)):
+                            output_shape.append(input_shape[i])
+                        
+                        # Convert to tuple, handle scalar case
+                        if not output_shape:
+                            output_shape = ()  # Scalar result
+                        else:
+                            output_shape = tuple(output_shape)
+                        
+                        env[name] = {'dtype': 'f32', 'shape': output_shape}
+                        print(f"Assigned type for {name} (slice): {env[name]}")
+
+
+                    # Add this case after sum/mean in the type checker:
+                    elif expr['type'] in ['max', 'min', 'argmax', 'argmin']:
                         tensor_name = expr['tensor']
                         if tensor_name not in env:
                             print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
@@ -306,18 +512,6 @@ try:
                         
                         env[name] = {'dtype': 'f32', 'shape': output_shape}
                         print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
-
-                    elif expr['type'] == 'softmax':
-                        print(f"DEBUG: Processing softmax type checking for {name}")
-                        tensor_name = expr['tensor']
-                        print(f"DEBUG: Softmax tensor_name = {tensor_name}")
-                        if tensor_name not in env:
-                            print(f"Type error: Undefined tensor {tensor_name} for softmax")
-                            return False, env
-                        
-                        # Softmax preserves input shape
-                        env[name] = {'dtype': 'f32', 'shape': env[tensor_name]['shape']}
-                        print(f"Assigned type for {name} (softmax): {env[name]}")
 
 
                     else:
@@ -387,6 +581,7 @@ try:
                                     # Note: Comparisons return float tensors (0.0 or 1.0) for CUDA compatibility
                                     env[name] = {'dtype': 'f32', 'shape': output_shape}
                                     print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
+
 
 
                 else:
@@ -1160,6 +1355,451 @@ extern "C" void launch_mean_{name}(float* input, float* output, int rows, int co
                             kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))
                     cuda_code += kernel
 
+                # ========================================
+                # SLICE
+                # ========================================
+                elif expr['type'] == 'slice':
+                    tensor_name = expr['tensor']
+                    slice_specs = expr['specs']
+                    input_shape = env[tensor_name]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    # For now, implement common 2D slicing cases
+                    if len(input_shape) == 2 and len(slice_specs) <= 2:
+                        rows, cols = int(input_shape[0]), int(input_shape[1])
+                        
+                        # Parse slice specifications
+                        row_spec = slice_specs[0] if len(slice_specs) > 0 else {'type': 'full_slice'}
+                        col_spec = slice_specs[1] if len(slice_specs) > 1 else {'type': 'full_slice'}
+                        
+                        # Calculate slice bounds
+                        if row_spec['type'] == 'slice':
+                            row_start = row_spec.get('start', 0) or 0
+                            row_end = row_spec.get('end', rows) or rows
+                        elif row_spec['type'] == 'index':
+                            row_start = row_spec['value']
+                            row_end = row_spec['value'] + 1
+                        else:  # full_slice
+                            row_start, row_end = 0, rows
+                            
+                        if col_spec['type'] == 'slice':
+                            col_start = col_spec.get('start', 0) or 0
+                            col_end = col_spec.get('end', cols) or cols
+                        elif col_spec['type'] == 'index':
+                            col_start = col_spec['value']
+                            col_end = col_spec['value'] + 1
+                        else:  # full_slice
+                            col_start, col_end = 0, cols
+                        
+                        # Bounds checking
+                        row_start = max(0, min(row_start, rows))
+                        row_end = max(row_start, min(row_end, rows))
+                        col_start = max(0, min(col_start, cols))
+                        col_end = max(col_start, min(col_end, cols))
+                        
+                        out_rows = row_end - row_start
+                        out_cols = col_end - col_start
+                        
+                        kernel = f"""
+__global__ void slice_kernel_{name}(float* input, float* output, 
+                                   int in_rows, int in_cols,
+                                   int row_start, int row_end,
+                                   int col_start, int col_end,
+                                   int out_rows, int out_cols) {{
+    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_row < out_rows && out_col < out_cols) {{
+        int in_row = row_start + out_row;
+        int in_col = col_start + out_col;
+        
+        int in_idx = in_row * in_cols + in_col;
+        int out_idx = out_row * out_cols + out_col;
+        
+        output[out_idx] = input[in_idx];
+    }}
+}}
+extern "C" void launch_slice_{name}(float* input, float* output,
+                                   int in_rows, int in_cols,
+                                   int row_start, int row_end,
+                                   int col_start, int col_end,
+                                   int out_rows, int out_cols) {{
+    dim3 block(16, 16);
+    dim3 grid((out_cols + block.x - 1) / block.x, (out_rows + block.y - 1) / block.y);
+    slice_kernel_{name}<<<grid, block>>>(input, output, in_rows, in_cols,
+                                        row_start, row_end, col_start, col_end,
+                                        out_rows, out_cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('slice_2d', name, tensor_name, None, rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols))
+                    
+                    elif len(input_shape) == 1 and len(slice_specs) == 1:
+                        # 1D slicing
+                        size = int(input_shape[0])
+                        spec = slice_specs[0]
+                        
+                        if spec['type'] == 'slice':
+                            start = spec.get('start', 0) or 0
+                            end = spec.get('end', size) or size
+                        elif spec['type'] == 'index':
+                            start = spec['value']
+                            end = spec['value'] + 1
+                        else:  # full_slice
+                            start, end = 0, size
+                            
+                        start = max(0, min(start, size))
+                        end = max(start, min(end, size))
+                        out_size = end - start
+                        
+                        kernel = f"""
+__global__ void slice_1d_kernel_{name}(float* input, float* output, int start, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        output[idx] = input[start + idx];
+    }}
+}}
+extern "C" void launch_slice_{name}(float* input, float* output, int start, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    slice_1d_kernel_{name}<<<grid, block>>>(input, output, start, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('slice_1d', name, tensor_name, None, start, out_size))
+                    
+                    cuda_code += kernel
+
+                # ========================================
+                # MAX
+                # ========================================
+                elif expr['type'] == 'max':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if axis is None:
+                        # Full reduction to scalar
+                        size = int(np.prod([int(dim) for dim in input_shape]))
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#define FLT_MAX 3.402823466e+38f
+
+__global__ void max_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : -FLT_MAX;
+    __syncthreads();
+    
+    // Reduction in shared memory using max
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        }}
+        __syncthreads();
+    }}
+    
+    // Use atomicMax for the final reduction (requires int conversion)
+    if (tid == 0) {{
+        float* addr = output;
+        int* int_addr = (int*)addr;
+        int old_val, new_val;
+        do {{
+            old_val = *int_addr;
+            new_val = __float_as_int(fmaxf(__int_as_float(old_val), sdata[0]));
+        }} while (atomicCAS(int_addr, old_val, new_val) != old_val);
+    }}
+}}
+extern "C" void launch_max_{name}(float* input, float* output, int size) {{
+    // Initialize output to -FLT_MAX
+    float neg_max = -FLT_MAX;
+    cudaMemcpy(output, &neg_max, sizeof(float), cudaMemcpyHostToDevice);
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    max_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('max_full', name, tensor_name, None, size))
+                    else:
+                        # Reduction along specific axis
+                        if len(input_shape) == 2 and axis == 1:
+                            # Max along columns (each row max to one value)
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void max_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float max_val = input[row * cols];
+        for (int col = 1; col < cols; col++) {{
+            max_val = fmaxf(max_val, input[row * cols + col]);
+        }}
+        output[row] = max_val;
+    }}
+}}
+extern "C" void launch_max_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    max_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('max_axis', name, tensor_name, None, rows, cols, axis))
+                        elif len(input_shape) == 2 and axis == 0:
+                            # Max along rows (each column max to one value)
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void max_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float max_val = input[col];
+        for (int row = 1; row < rows; row++) {{
+            max_val = fmaxf(max_val, input[row * cols + col]);
+        }}
+        output[col] = max_val;
+    }}
+}}
+extern "C" void launch_max_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    max_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('max_axis0', name, tensor_name, None, rows, cols, axis))
+                    
+                    cuda_code += kernel
+
+                # ========================================
+                # MIN (similar to MAX but with min operations)
+                # ========================================
+                elif expr['type'] == 'min':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if axis is None:
+                        # Full reduction to scalar
+                        size = int(np.prod([int(dim) for dim in input_shape]))
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#define FLT_MAX 3.402823466e+38f
+
+__global__ void min_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : FLT_MAX;
+    __syncthreads();
+    
+    // Reduction in shared memory using min
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] = fminf(sdata[tid], sdata[tid + s]);
+        }}
+        __syncthreads();
+    }}
+    
+    // Use atomicMin-like operation for final reduction
+    if (tid == 0) {{
+        float* addr = output;
+        int* int_addr = (int*)addr;
+        int old_val, new_val;
+        do {{
+            old_val = *int_addr;
+            new_val = __float_as_int(fminf(__int_as_float(old_val), sdata[0]));
+        }} while (atomicCAS(int_addr, old_val, new_val) != old_val);
+    }}
+}}
+extern "C" void launch_min_{name}(float* input, float* output, int size) {{
+    // Initialize output to FLT_MAX
+    float pos_max = FLT_MAX;
+    cudaMemcpy(output, &pos_max, sizeof(float), cudaMemcpyHostToDevice);
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    min_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('min_full', name, tensor_name, None, size))
+                    else:
+                        # Similar axis-specific implementations as max...
+                        if len(input_shape) == 2 and axis == 1:
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void min_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float min_val = input[row * cols];
+        for (int col = 1; col < cols; col++) {{
+            min_val = fminf(min_val, input[row * cols + col]);
+        }}
+        output[row] = min_val;
+    }}
+}}
+extern "C" void launch_min_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    min_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('min_axis', name, tensor_name, None, rows, cols, axis))
+                        elif len(input_shape) == 2 and axis == 0:
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void min_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float min_val = input[col];
+        for (int row = 1; row < rows; row++) {{
+            min_val = fminf(min_val, input[row * cols + col]);
+        }}
+        output[col] = min_val;
+    }}
+}}
+extern "C" void launch_min_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    min_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('min_axis0', name, tensor_name, None, rows, cols, axis))
+                    
+                    cuda_code += kernel
+
+                # ========================================
+                # ARGMAX (returns indices of maximum values)
+                # ========================================
+                elif expr['type'] == 'argmax':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if axis is None:
+                        # Full argmax to scalar index
+                        size = int(np.prod([int(dim) for dim in input_shape]))
+                        kernel = f"""
+__global__ void argmax_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    extern __shared__ int indices[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data and indices into shared memory
+    if (i < size) {{
+        sdata[tid] = input[i];
+        indices[tid] = i;
+    }} else {{
+        sdata[tid] = -FLT_MAX;
+        indices[tid] = -1;
+    }}
+    __syncthreads();
+    
+    // Reduction in shared memory - keep track of both value and index
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            if (sdata[tid + s] > sdata[tid]) {{
+                sdata[tid] = sdata[tid + s];
+                indices[tid] = indices[tid + s];
+            }}
+        }}
+        __syncthreads();
+    }}
+    
+    // Write index result for this block
+    if (tid == 0) {{
+        atomicMax((int*)output, indices[0]);  // This is a simplification
+        // In practice, need proper atomic argmax operation
+        output[0] = (float)indices[0];
+    }}
+}}
+extern "C" void launch_argmax_{name}(float* input, float* output, int size) {{
+    dim3 block(256);
+    dim3 grid(1);  // Single block for simplicity in full reduction
+    int shared_size = block.x * (sizeof(float) + sizeof(int));
+    argmax_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('argmax_full', name, tensor_name, None, size))
+                    else:
+                        # Axis-specific argmax (simplified for 2D case)
+                        if len(input_shape) == 2 and axis == 1:
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+__global__ void argmax_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float max_val = input[row * cols];
+        int max_idx = 0;
+        for (int col = 1; col < cols; col++) {{
+            if (input[row * cols + col] > max_val) {{
+                max_val = input[row * cols + col];
+                max_idx = col;
+            }}
+        }}
+        output[row] = (float)max_idx;
+    }}
+}}
+extern "C" void launch_argmax_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    argmax_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('argmax_axis', name, tensor_name, None, rows, cols, axis))
+                    
+                    cuda_code += kernel
+
+                # ========================================
+                # ARGMIN (similar to argmax but for minimum)
+                # ========================================
+                elif expr['type'] == 'argmin':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if len(input_shape) == 2 and axis == 1:
+                        rows, cols = int(input_shape[0]), int(input_shape[1])
+                        kernel = f"""
+__global__ void argmin_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float min_val = input[row * cols];
+        int min_idx = 0;
+        for (int col = 1; col < cols; col++) {{
+            if (input[row * cols + col] < min_val) {{
+                min_val = input[row * cols + col];
+                min_idx = col;
+            }}
+        }}
+        output[row] = (float)min_idx;
+    }}
+}}
+extern "C" void launch_argmin_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    argmin_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('argmin_axis', name, tensor_name, None, rows, cols, axis))
+                    
+                    cuda_code += kernel
+
+
 
                 # ========================================
                 # FILL
@@ -1236,49 +1876,124 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
 
                     if op_type == 'matmul':
                         m, n, p = dims
-                        getattr(lib, f'launch_matmul_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(m), c_int(n), c_int(p))
+                        getattr(lib, f'launch_matmul_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(m), c_int(n), c_int(p)
+                        )
+
                     elif op_type == 'add':
                         size = dims[0]
-                        getattr(lib, f'launch_add_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_add_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'add_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_add_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_add_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'minus':
                         size = dims[0]
-                        getattr(lib, f'launch_minus_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_minus_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'minus_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_minus_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_minus_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'mult':
                         size = dims[0]
-                        getattr(lib, f'launch_mult_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_mult_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'mult_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_mult_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_mult_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'div':
                         size = dims[0]
-                        getattr(lib, f'launch_div_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_div_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'div_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_div_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_div_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'relu':
                         size = dims[0]
-                        getattr(lib, f'launch_relu_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
-
+                        getattr(lib, f'launch_relu_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
 
                     elif op_type == 'sigmoid':
                         size = dims[0]
-                        getattr(lib, f'launch_sigmoid_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_sigmoid_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'tanh':
                         size = dims[0]
-                        getattr(lib, f'launch_tanh_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_tanh_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'softmax':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_softmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_softmax_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'softmax_1d':
                         size = dims[0]
-                        getattr(lib, f'launch_softmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
-
+                        getattr(lib, f'launch_softmax_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
 
                     elif op_type == 'greater':
                         size = dims[0]
@@ -1291,20 +2006,64 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
 
                     elif op_type == 'greater_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_greater_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_greater_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'less':
                         size = dims[0]
-                        getattr(lib, f'launch_less_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_less_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'less_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_less_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_less_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), 
+                            c_int(cols)
+                        )
+
                     elif op_type == 'equal':
                         size = dims[0]
-                        getattr(lib, f'launch_equal_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_equal_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'equal_broadcast':
                         rows, cols = dims
-                        getattr(lib, f'launch_equal_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_equal_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[arg2])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
 
+                    elif op_type == 'slice_2d':
+                        rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols = dims
+                        getattr(lib, f'launch_slice_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(rows), c_int(cols),
+                            c_int(row_start), c_int(row_end), c_int(col_start), c_int(col_end),
+                            c_int(out_rows), c_int(out_cols)
+                        )
+                    elif op_type == 'slice_1d':
+                        start, out_size = dims
+                        getattr(lib, f'launch_slice_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(start), c_int(out_size)
+                        )
 
                     elif op_type == 'sum_full':
                         size = dims[0]
@@ -1324,6 +2083,35 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                     elif op_type == 'mean_axis0':
                         rows, cols, axis = dims
                         getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+
+
+                    elif op_type == 'max_full':
+                        size = dims[0]
+                        getattr(lib, f'launch_max_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'max_axis':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_max_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'max_axis0':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_max_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'min_full':
+                        size = dims[0]
+                        getattr(lib, f'launch_min_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'min_axis':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_min_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'min_axis0':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_min_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'argmax_full':
+                        size = dims[0]
+                        getattr(lib, f'launch_argmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                    elif op_type == 'argmax_axis':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_argmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                    elif op_type == 'argmin_axis':
+                        rows, cols, axis = dims
+                        getattr(lib, f'launch_argmin_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
 
 
                     elif op_type == 'fill':
