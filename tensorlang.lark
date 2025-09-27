@@ -32,6 +32,8 @@ expr: tensor_literal
     | equal_call
     | linear_call
     | layer_norm_call
+    | cross_entropy_call
+    | mse_loss_call
     | slice_expr
     | NAME
 
@@ -64,6 +66,10 @@ equal_call: "equal" "(" NAME "," NAME ")"
 // Neural network layers
 linear_call: "linear" "(" NAME "," NAME "," NAME ")"
 layer_norm_call: "layer_norm" "(" NAME ["," "axis" "=" NUMBER] ["," "eps" "=" NUMBER] ")"
+
+// Loss functions
+cross_entropy_call: "cross_entropy" "(" NAME "," NAME ")"
+mse_loss_call: "mse_loss" "(" NAME "," NAME ")"
 
 // Tensor slicing
 slice_expr: NAME "[" slice_spec ("," slice_spec)* "]"

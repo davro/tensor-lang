@@ -11,7 +11,7 @@ from functools import reduce
 # ================================================================
 #                      TensorLang version
 # ================================================================
-version = "0.2.1"
+version = "0.2.2"
 
 # ================================================================
 #                 GRAMMAR lark + TensorLang file
@@ -321,9 +321,23 @@ try:
             print(f"LayerNorm args: tensor={tensor_name}, axis={axis}, eps={eps}")
             return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}
 
+        # ================================================================
+        # Cross-entropy loss and mean squared error (MSE) loss 
+        # ================================================================
+        elif tree.data == 'cross_entropy_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Cross entropy args: {args}")
+            return {'type': 'cross_entropy', 'args': args}
+
+        elif tree.data == 'mse_loss_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"MSE loss args: {args}")
+            return {'type': 'mse_loss', 'args': args}
 
 
-
+        # ================================================================
+        # Slice feature
+        # ================================================================
         elif tree.data == 'slice_expr':
             tensor_name = None
             slice_specs = []
@@ -406,8 +420,14 @@ try:
                     env[name] = {'dtype': 'f32', 'shape': shape}
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
 
-                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'linear', 'slice']:
-                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'linear', 'layer_norm', 'slice']:
+                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'linear', 'layer_norm', 'slice']:
+                elif isinstance(expr, dict) and expr['type'] in [
+                        'matmul', 'add', 'minus', 'mult', 'div', 
+                        'relu', 'sigmoid', 'tanh', 'softmax', 
+                        'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
+                        'greater', 'less', 'equal', 
+                        'linear', 'layer_norm', 'cross_entropy', 'mse_loss', 'slice'
+                    ]:
 
                     if expr['type'] == 'fill':
                         env[name] = {'dtype': 'f32', 'shape': expr['shape']}
@@ -674,6 +694,47 @@ try:
                                     
                                     env[name] = {'dtype': 'f32', 'shape': output_shape}
                                     print(f"Assigned type for {name} (linear): {env[name]}")
+
+
+                                elif expr['type'] in ['cross_entropy', 'mse_loss']:
+                                    if len(args) != 2:
+                                        print(f"Type error: {expr['type']} requires exactly 2 arguments, got {len(args)}")
+                                        return False, env
+                                    
+                                    predictions_tensor, targets_tensor = args
+                                    pred_shape = predictions_tensor['shape']
+                                    target_shape = targets_tensor['shape']
+                                    
+                                    if expr['type'] == 'cross_entropy':
+                                        # Cross entropy loss
+                                        # Predictions: (batch_size, num_classes) - softmax probabilities or logits
+                                        # Targets: (batch_size,) - class indices OR (batch_size, num_classes) - one-hot
+                                        
+                                        if len(pred_shape) == 2:
+                                            batch_size, num_classes = pred_shape
+                                            
+                                            if len(target_shape) == 1 and target_shape[0] == batch_size:
+                                                # Class indices format: targets shape (batch_size,)
+                                                output_shape = ()  # Scalar loss (mean over batch)
+                                            elif len(target_shape) == 2 and target_shape == pred_shape:
+                                                # One-hot format: targets shape (batch_size, num_classes)
+                                                output_shape = ()  # Scalar loss (mean over batch)
+                                            else:
+                                                print(f"Type error: Cross entropy target shape {target_shape} incompatible with predictions {pred_shape}")
+                                                return False, env
+                                        else:
+                                            print(f"Type error: Cross entropy predictions must be 2D (batch, classes), got {len(pred_shape)}D")
+                                            return False, env
+                                            
+                                    elif expr['type'] == 'mse_loss':
+                                        # MSE loss: predictions and targets must have same shape
+                                        if pred_shape != target_shape:
+                                            print(f"Type error: MSE loss shape mismatch. Predictions {pred_shape} != targets {target_shape}")
+                                            return False, env
+                                        output_shape = ()  # Scalar loss (mean over all elements)
+                                    
+                                    env[name] = {'dtype': 'f32', 'shape': output_shape}
+                                    print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
 
 
                 else:
@@ -1244,11 +1305,6 @@ extern "C" void launch_equal_{name}(float* A, float* B, float* C, int rows, int 
                     cuda_code += kernel
 
 
-
-
-
-
-
                 # ========================================
                 # SUM
                 # ========================================
@@ -1346,6 +1402,7 @@ extern "C" void launch_sum_{name}(float* input, float* output, int rows, int col
 """
                             kernels.append(('sum_axis0', name, tensor_name, None, rows, cols, axis))
                     cuda_code += kernel
+
 
                 # ========================================
                 # MEAN
@@ -1446,6 +1503,7 @@ extern "C" void launch_mean_{name}(float* input, float* output, int rows, int co
 """
                             kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))
                     cuda_code += kernel
+
 
                 # ========================================
                 # SLICE
@@ -1562,6 +1620,7 @@ extern "C" void launch_slice_{name}(float* input, float* output, int start, int 
                     
                     cuda_code += kernel
 
+
                 # ========================================
                 # MAX
                 # ========================================
@@ -1669,6 +1728,7 @@ extern "C" void launch_max_{name}(float* input, float* output, int rows, int col
                     
                     cuda_code += kernel
 
+
                 # ========================================
                 # MIN (similar to MAX but with min operations)
                 # ========================================
@@ -1774,6 +1834,7 @@ extern "C" void launch_min_{name}(float* input, float* output, int rows, int col
                     
                     cuda_code += kernel
 
+
                 # ========================================
                 # ARGMAX (returns indices of maximum values)
                 # ========================================
@@ -1859,6 +1920,7 @@ extern "C" void launch_argmax_{name}(float* input, float* output, int rows, int 
                     
                     cuda_code += kernel
 
+
                 # ========================================
                 # ARGMIN (similar to argmax but for minimum)
                 # ========================================
@@ -1895,6 +1957,7 @@ extern "C" void launch_argmin_{name}(float* input, float* output, int rows, int 
                     
                     cuda_code += kernel
 
+
                 # ========================================
                 # FILL
                 # ========================================
@@ -1916,12 +1979,6 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
 """
                     kernels.append(('fill', name, None, None, size, expr['value']))
                     cuda_code += kernel
-
-
-
-
-
-
 
 
                 # ========================================
@@ -2015,13 +2072,6 @@ extern "C" void launch_linear_{name}(float* input, float* weight, float* bias,
                         kernels.append(('linear_2d', name, input_name, weight_name, bias_name, batch_size, in_features, out_features))
                     
                     cuda_code += kernel
-
-
-
-
-
-
-
 
 
                 # LAYER NORMALIZATION
@@ -2180,6 +2230,158 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
                         kernels.append(('layer_norm_1d', name, tensor_name, None, size, eps))
                     
                     cuda_code += kernel
+
+
+
+
+
+
+                # CROSS ENTROPY LOSS
+                elif expr['type'] == 'cross_entropy':
+                    pred_name, target_name = expr['args']
+                    pred_shape = env[pred_name]['shape']
+                    target_shape = env[target_name]['shape']
+                    
+                    if len(pred_shape) == 2 and len(target_shape) == 1:
+                        # Class indices format: (batch, classes) vs (batch,)
+                        batch_size, num_classes = int(pred_shape[0]), int(pred_shape[1])
+                        
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void cross_entropy_kernel_{name}(float* predictions, float* targets,
+                                           float* output, int batch_size, int num_classes) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Each thread computes loss for one sample
+    float loss = 0.0f;
+    if (batch_idx < batch_size) {{
+        int target_class = (int)targets[batch_idx];
+        
+        // Clamp target class to valid range
+        target_class = max(0, min(target_class, num_classes - 1));
+        
+        // Get predicted probability for true class
+        float pred_prob = predictions[batch_idx * num_classes + target_class];
+        
+        // Clamp probability to prevent log(0)
+        pred_prob = fmaxf(pred_prob, 1e-7f);
+        pred_prob = fminf(pred_prob, 1.0f - 1e-7f);
+        
+        // Compute negative log likelihood
+        loss = -logf(pred_prob);
+    }}
+    
+    // Load into shared memory for reduction
+    sdata[tid] = (batch_idx < batch_size) ? loss : 0.0f;
+    __syncthreads();
+    
+    // Reduce to compute mean loss
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_cross_entropy_{name}(float* predictions, float* targets,
+                                           float* output, int batch_size, int num_classes) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((batch_size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    cross_entropy_kernel_{name}<<<grid, block, shared_size>>>(predictions, targets, output,
+                                                              batch_size, num_classes);
+    cudaDeviceSynchronize();
+    
+    // Divide by batch size to get mean
+    float mean_loss;
+    cudaMemcpy(&mean_loss, output, sizeof(float), cudaMemcpyDeviceToHost);
+    mean_loss /= batch_size;
+    cudaMemcpy(output, &mean_loss, sizeof(float), cudaMemcpyHostToDevice);
+}}
+"""
+                        kernels.append(('cross_entropy', name, pred_name, target_name, batch_size, num_classes))
+                    
+                    cuda_code += kernel
+
+                # MSE LOSS
+                elif expr['type'] == 'mse_loss':
+                    pred_name, target_name = expr['args']
+                    pred_shape = env[pred_name]['shape']
+                    
+                    total_elements = int(np.prod([int(dim) for dim in pred_shape]))
+                    
+                    kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void mse_loss_kernel_{name}(float* predictions, float* targets,
+                                      float* output, int total_elements) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Compute squared error for this element
+    float squared_error = 0.0f;
+    if (idx < total_elements) {{
+        float diff = predictions[idx] - targets[idx];
+        squared_error = diff * diff;
+    }}
+    
+    // Load into shared memory for reduction
+    sdata[tid] = (idx < total_elements) ? squared_error : 0.0f;
+    __syncthreads();
+    
+    // Reduce to compute sum of squared errors
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result for this block
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
+                                      float* output, int total_elements) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    mse_loss_kernel_{name}<<<grid, block, shared_size>>>(predictions, targets, output, total_elements);
+    cudaDeviceSynchronize();
+    
+    // Divide by total elements to get mean
+    float mean_loss;
+    cudaMemcpy(&mean_loss, output, sizeof(float), cudaMemcpyDeviceToHost);
+    mean_loss /= total_elements;
+    cudaMemcpy(output, &mean_loss, sizeof(float), cudaMemcpyHostToDevice);
+}}
+"""
+                    kernels.append(('mse_loss', name, pred_name, target_name, total_elements))
+                    
+                    cuda_code += kernel
+
 
 
 
@@ -2564,20 +2766,6 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
                         )
 
                     elif op_type == 'linear_1d':
-
-                        ###############################################################
-                        # # Save result for all computed tensors
-                        # output = np.zeros(shape, dtype=np.float32)
-                        # cuda.memcpy_dtoh(output, gpu_allocs[name])
-                        # tensors[name] = output
-
-                        # # Add this debug print for the hidden tensor specifically
-                        # if name == 'hidden':
-                        #     print(f"DEBUG: hidden tensor before layer_norm = {output}")
-
-                        # print(f"Result {name} ({op_type}):\n{output}")
-                        ###############################################################
-
                         input_name, weight_name, bias_name, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2]
                         getattr(lib, f'launch_linear_{name}')(
                             c_void_p(int(gpu_allocs[input_name])),
@@ -2587,15 +2775,13 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
                             c_int(in_features), c_int(out_features)
                         )
                     
-
                     elif op_type == 'linear_2d':
-
                         ###############################################################
                         # Save result for all computed tensors
                         # Debug: Check input state before kernel
-                        input_debug = np.zeros((batch_size, in_features), dtype=np.float32)
-                        cuda.memcpy_dtoh(input_debug, gpu_allocs[input_name])
-                        print(f"DEBUG LINEAR: Input before kernel = {input_debug}")
+                        #input_debug = np.zeros((batch_size, in_features), dtype=np.float32)
+                        #cuda.memcpy_dtoh(input_debug, gpu_allocs[input_name])
+                        #print(f"DEBUG LINEAR: Input before kernel = {input_debug}")
                         ###############################################################
 
                         input_name, weight_name, bias_name, batch_size, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2], dims[3]
@@ -2609,9 +2795,9 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
 
                         ###############################################################
                         # Debug: Check output immediately after kernel
-                        output_debug = np.zeros(shape, dtype=np.float32)
-                        cuda.memcpy_dtoh(output_debug, gpu_allocs[name])
-                        print(f"DEBUG LINEAR: Output immediately after kernel = {output_debug}")
+                        #output_debug = np.zeros(shape, dtype=np.float32)
+                        #cuda.memcpy_dtoh(output_debug, gpu_allocs[name])
+                        #print(f"DEBUG LINEAR: Output immediately after kernel = {output_debug}")
                         ###############################################################
 
                     elif op_type == 'layer_norm_2d':
@@ -2633,6 +2819,21 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
                             c_int(size), c_float(eps)
                         )
 
+
+                    elif op_type == 'cross_entropy':
+                        batch_size, num_classes = dims
+                        getattr(lib, f'launch_cross_entropy_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])),
+                            c_void_p(int(gpu_allocs[name])),
+                            c_int(batch_size), c_int(num_classes)
+                        )
+                    elif op_type == 'mse_loss':
+                        total_elements = dims[0]
+                        getattr(lib, f'launch_mse_loss_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])),
+                            c_void_p(int(gpu_allocs[name])),
+                            c_int(total_elements)
+                        )
 
 
 
