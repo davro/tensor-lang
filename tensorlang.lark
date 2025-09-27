@@ -30,6 +30,8 @@ expr: tensor_literal
     | greater_call
     | less_call
     | equal_call
+    | linear_call
+    | layer_norm_call
     | slice_expr
     | NAME
 
@@ -58,6 +60,10 @@ softmax_call: "softmax" "(" NAME ["," "axis" "=" NUMBER] ")"
 greater_call: "greater" "(" NAME "," NAME ")"
 less_call: "less" "(" NAME "," NAME ")"
 equal_call: "equal" "(" NAME "," NAME ")"
+
+// Neural network layers
+linear_call: "linear" "(" NAME "," NAME "," NAME ")"
+layer_norm_call: "layer_norm" "(" NAME ["," "axis" "=" NUMBER] ["," "eps" "=" NUMBER] ")"
 
 // Tensor slicing
 slice_expr: NAME "[" slice_spec ("," slice_spec)* "]"

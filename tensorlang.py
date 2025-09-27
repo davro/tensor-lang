@@ -179,9 +179,6 @@ try:
             print(f"Softmax args: tensor={tensor_name}, axis={axis}")
             return {'type': 'softmax', 'tensor': tensor_name, 'axis': axis}
 
-
-
-
         elif tree.data == 'greater_call':
             args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
             print(f"Greater args: {args}")
@@ -196,9 +193,6 @@ try:
             args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
             print(f"Equal args: {args}")
             return {'type': 'equal', 'args': args}
-
-
-
 
         elif tree.data == 'tensor_literal':
             data = []
@@ -244,9 +238,6 @@ try:
             
             print(f"Mean args: tensor={tensor_name}, axis={axis}")
             return {'type': 'mean', 'tensor': tensor_name, 'axis': axis}
-            
-
-
 
         elif tree.data == 'max_call':
             tensor_name = None
@@ -299,6 +290,36 @@ try:
             
             print(f"Argmin args: tensor={tensor_name}, axis={axis}")
             return {'type': 'argmin', 'tensor': tensor_name, 'axis': axis}
+
+        elif tree.data == 'linear_call':
+            args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+            print(f"Linear args: {args}")
+            return {'type': 'linear', 'args': args}
+
+
+
+
+        elif tree.data == 'layer_norm_call':
+            tensor_name = None
+            axis = None
+            eps = 1e-5  # Default epsilon value
+            
+            # Parse arguments
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    # Could be axis or eps - need to track which we're parsing
+                    value = float(child.value)
+                    # Check if it's a small value (likely epsilon) or larger (likely axis)
+                    if value < 0.1:  # Heuristic for epsilon
+                        eps = value
+                    else:
+                        axis = int(value)
+            
+            # Default to last axis if not specified
+            print(f"LayerNorm args: tensor={tensor_name}, axis={axis}, eps={eps}")
+            return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}
 
 
 
@@ -385,8 +406,8 @@ try:
                     env[name] = {'dtype': 'f32', 'shape': shape}
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
 
-                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'greater', 'less', 'equal', 'slice']:
-                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'slice']:
+                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'linear', 'slice']:
+                elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'linear', 'layer_norm', 'slice']:
 
                     if expr['type'] == 'fill':
                         env[name] = {'dtype': 'f32', 'shape': expr['shape']}
@@ -487,7 +508,32 @@ try:
                         print(f"Assigned type for {name} (slice): {env[name]}")
 
 
-                    # Add this case after sum/mean in the type checker:
+
+                    elif expr['type'] == 'layer_norm':
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for layer_norm")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        axis = expr.get('axis')
+                        
+                        # Default to last axis if not specified
+                        if axis is None:
+                            axis = len(input_shape) - 1
+                        
+                        # Validate axis
+                        if axis < 0 or axis >= len(input_shape):
+                            print(f"Type error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
+                            return False, env
+                        
+                        # Layer norm preserves input shape
+                        env[name] = {'dtype': 'f32', 'shape': input_shape}
+                        print(f"Assigned type for {name} (layer_norm): {env[name]}")
+                        print(f"DEBUG: layer_norm axis={axis}, input_shape={input_shape}")
+
+
+
                     elif expr['type'] in ['max', 'min', 'argmax', 'argmin']:
                         tensor_name = expr['tensor']
                         if tensor_name not in env:
@@ -582,6 +628,52 @@ try:
                                     env[name] = {'dtype': 'f32', 'shape': output_shape}
                                     print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
 
+
+                                elif expr['type'] == 'linear':
+                                    if len(args) != 3:
+                                        print(f"Type error: Linear requires exactly 3 arguments, got {len(args)}")
+                                        return False, env
+                                    
+                                    input_tensor, weight_tensor, bias_tensor = args
+                                    input_shape = input_tensor['shape']
+                                    weight_shape = weight_tensor['shape']
+                                    bias_shape = bias_tensor['shape']
+                                    
+                                    # Linear layer: input @ weight + bias
+                                    # Input: (batch_size, in_features) or (in_features,)
+                                    # Weight: (in_features, out_features)  
+                                    # Bias: (out_features,)
+                                    # Output: (batch_size, out_features) or (out_features,)
+                                    
+                                    if len(input_shape) == 1:
+                                        # 1D input case: (in_features,)
+                                        in_features = input_shape[0]
+                                        if len(weight_shape) != 2 or weight_shape[0] != in_features:
+                                            print(f"Type error: Linear weight shape mismatch. Expected (in_features={in_features}, out_features), got {weight_shape}")
+                                            return False, env
+                                        out_features = weight_shape[1]
+                                        if len(bias_shape) != 1 or bias_shape[0] != out_features:
+                                            print(f"Type error: Linear bias shape mismatch. Expected ({out_features},), got {bias_shape}")
+                                            return False, env
+                                        output_shape = (out_features,)
+                                        
+                                    elif len(input_shape) == 2:
+                                        # 2D input case: (batch_size, in_features)
+                                        batch_size, in_features = input_shape
+                                        if len(weight_shape) != 2 or weight_shape[0] != in_features:
+                                            print(f"Type error: Linear weight shape mismatch. Expected (in_features={in_features}, out_features), got {weight_shape}")
+                                            return False, env
+                                        out_features = weight_shape[1]
+                                        if len(bias_shape) != 1 or bias_shape[0] != out_features:
+                                            print(f"Type error: Linear bias shape mismatch. Expected ({out_features},), got {bias_shape}")
+                                            return False, env
+                                        output_shape = (batch_size, out_features)
+                                    else:
+                                        print(f"Type error: Linear input must be 1D or 2D tensor, got {len(input_shape)}D")
+                                        return False, env
+                                    
+                                    env[name] = {'dtype': 'f32', 'shape': output_shape}
+                                    print(f"Assigned type for {name} (linear): {env[name]}")
 
 
                 else:
@@ -1483,7 +1575,9 @@ extern "C" void launch_slice_{name}(float* input, float* output, int start, int 
                         size = int(np.prod([int(dim) for dim in input_shape]))
                         kernel = f"""
 // Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
 #define FLT_MAX 3.402823466e+38f
+#endif
 
 __global__ void max_full_kernel_{name}(float* input, float* output, int size) {{
     extern __shared__ float sdata[];
@@ -1588,7 +1682,9 @@ extern "C" void launch_max_{name}(float* input, float* output, int rows, int col
                         size = int(np.prod([int(dim) for dim in input_shape]))
                         kernel = f"""
 // Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
 #define FLT_MAX 3.402823466e+38f
+#endif
 
 __global__ void min_full_kernel_{name}(float* input, float* output, int size) {{
     extern __shared__ float sdata[];
@@ -1799,8 +1895,6 @@ extern "C" void launch_argmin_{name}(float* input, float* output, int rows, int 
                     
                     cuda_code += kernel
 
-
-
                 # ========================================
                 # FILL
                 # ========================================
@@ -1825,6 +1919,281 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
 
 
 
+
+
+
+
+
+                # ========================================
+                # LINEAR LAYER
+                # ========================================
+                elif expr['type'] == 'linear':
+                    input_name, weight_name, bias_name = expr['args']
+                    input_shape = env[input_name]['shape']
+                    weight_shape = env[weight_name]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    if len(input_shape) == 1:
+                        # 1D case: vector @ matrix + bias
+                        in_features = int(input_shape[0])
+                        out_features = int(output_shape[0])
+                        
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void linear_1d_kernel_{name}(float* input, float* weight, float* bias, 
+                                        float* output, int in_features, int out_features) {{
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_idx < out_features) {{
+        float sum = 0.0f;
+        
+        // Compute dot product: input @ weight[:, out_idx]
+        for (int in_idx = 0; in_idx < in_features; in_idx++) {{
+            sum += input[in_idx] * weight[in_idx * out_features + out_idx];
+        }}
+        
+        // Add bias
+        output[out_idx] = sum + bias[out_idx];
+    }}
+}}
+extern "C" void launch_linear_{name}(float* input, float* weight, float* bias,
+                                    float* output, int in_features, int out_features) {{
+    dim3 block(256);
+    dim3 grid((out_features + block.x - 1) / block.x);
+    linear_1d_kernel_{name}<<<grid, block>>>(input, weight, bias, output, 
+                                             in_features, out_features);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('linear_1d', name, input_name, weight_name, bias_name, in_features, out_features))
+                        
+                    elif len(input_shape) == 2:
+                        # 2D case: batch_matrix @ matrix + bias (broadcasted)
+                        batch_size, in_features = int(input_shape[0]), int(input_shape[1])
+                        out_features = int(output_shape[1])
+                        
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void linear_2d_kernel_{name}(float* input, float* weight, float* bias,
+                                        float* output, int batch_size, 
+                                        int in_features, int out_features) {{
+    int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (batch_idx < batch_size && out_idx < out_features) {{
+        float sum = 0.0f;
+        
+        // Compute dot product for this batch item and output feature
+        for (int in_idx = 0; in_idx < in_features; in_idx++) {{
+            sum += input[batch_idx * in_features + in_idx] * 
+                   weight[in_idx * out_features + out_idx];
+        }}
+        
+        // Add bias and store result
+        output[batch_idx * out_features + out_idx] = sum + bias[out_idx];
+    }}
+}}
+extern "C" void launch_linear_{name}(float* input, float* weight, float* bias,
+                                    float* output, int batch_size,
+                                    int in_features, int out_features) {{
+    dim3 block(16, 16);
+    dim3 grid((out_features + block.x - 1) / block.x, 
+              (batch_size + block.y - 1) / block.y);
+    linear_2d_kernel_{name}<<<grid, block>>>(input, weight, bias, output,
+                                             batch_size, in_features, out_features);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('linear_2d', name, input_name, weight_name, bias_name, batch_size, in_features, out_features))
+                    
+                    cuda_code += kernel
+
+
+
+
+
+
+
+
+
+                # LAYER NORMALIZATION
+                elif expr['type'] == 'layer_norm':
+                    tensor_name = expr['tensor']
+                    axis = expr.get('axis')
+                    eps = expr.get('eps', 1e-5)
+                    input_shape = env[tensor_name]['shape']
+
+                    # Default to last axis
+                    if axis is None:
+                        axis = len(input_shape) - 1
+                    
+                    print(f"DEBUG CUDA: layer_norm axis={axis}, input_shape={input_shape}")
+
+                    if len(input_shape) == 2:
+                        # 2D Layer norm - most common case
+                        if axis == 1:
+                            print("DEBUG: Using row-wise normalization kernel")
+                            # Normalize along features (each row independently)
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void layer_norm_kernel_{name}(float* input, float* output, 
+                                         int rows, int cols, float eps) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (row < rows) {{
+        // Compute mean for this row
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            sum += input[row * cols + col];
+        }}
+        float mean = sum / cols;
+        
+        // Compute variance for this row
+        float var_sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            float diff = input[row * cols + col] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / cols;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize this row
+        for (int col = 0; col < cols; col++) {{
+            float normalized = (input[row * cols + col] - mean) / std_dev;
+            output[row * cols + col] = normalized;
+        }}
+    }}
+}}
+extern "C" void launch_layer_norm_{name}(float* input, float* output,
+                                        int rows, int cols, float eps) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    layer_norm_kernel_{name}<<<grid, block>>>(input, output, rows, cols, eps);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('layer_norm_2d', name, tensor_name, None, rows, cols, eps))
+                        elif axis == 0:
+                            print("DEBUG: Using column-wise normalization kernel")
+                            # Normalize along batch dimension (each column independently)
+                            rows, cols = int(input_shape[0]), int(input_shape[1])
+                            kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void layer_norm_axis0_kernel_{name}(float* input, float* output,
+                                               int rows, int cols, float eps) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (col < cols) {{
+        // Compute mean for this column
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            sum += input[row * cols + col];
+        }}
+        float mean = sum / rows;
+        
+        // Compute variance for this column
+        float var_sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            float diff = input[row * cols + col] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / rows;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize this column
+        for (int row = 0; row < rows; row++) {{
+            float normalized = (input[row * cols + col] - mean) / std_dev;
+            output[row * cols + col] = normalized;
+        }}
+    }}
+}}
+extern "C" void launch_layer_norm_{name}(float* input, float* output,
+                                        int rows, int cols, float eps) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    layer_norm_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols, eps);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('layer_norm_axis0', name, tensor_name, None, rows, cols, eps))
+                    
+                    elif len(input_shape) == 1:
+                        # 1D Layer norm
+                        size = int(input_shape[0])
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void layer_norm_1d_kernel_{name}(float* input, float* output,
+                                            int size, float eps) {{
+    // Single block implementation for 1D case
+    if (threadIdx.x == 0 && blockIdx.x == 0) {{
+        // Compute mean
+        float sum = 0.0f;
+        for (int i = 0; i < size; i++) {{
+            sum += input[i];
+        }}
+        float mean = sum / size;
+        
+        // Compute variance
+        float var_sum = 0.0f;
+        for (int i = 0; i < size; i++) {{
+            float diff = input[i] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / size;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize
+        for (int i = 0; i < size; i++) {{
+            output[i] = (input[i] - mean) / std_dev;
+        }}
+    }}
+}}
+extern "C" void launch_layer_norm_{name}(float* input, float* output,
+                                        int size, float eps) {{
+    dim3 block(1);
+    dim3 grid(1);
+    layer_norm_1d_kernel_{name}<<<grid, block>>>(input, output, size, eps);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('layer_norm_1d', name, tensor_name, None, size, eps))
+                    
+                    cuda_code += kernel
+
+
+
+
+
+
+
+
+
+
+
+        # =========================================
+        # KERNEL COMPILATION, EXECUTION AND CACHING
+        # =========================================
         if kernels:
 
             # Ensure cache output directory exists
@@ -2053,7 +2422,8 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                     elif op_type == 'slice_2d':
                         rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols = dims
                         getattr(lib, f'launch_slice_{name}')(
-                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])),
                             c_int(rows), c_int(cols),
                             c_int(row_start), c_int(row_end), c_int(col_start), c_int(col_end),
                             c_int(out_rows), c_int(out_cols)
@@ -2061,62 +2431,210 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                     elif op_type == 'slice_1d':
                         start, out_size = dims
                         getattr(lib, f'launch_slice_{name}')(
-                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])),
                             c_int(start), c_int(out_size)
                         )
 
                     elif op_type == 'sum_full':
                         size = dims[0]
-                        getattr(lib, f'launch_sum_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_sum_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'sum_axis':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_sum_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_sum_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'sum_axis0':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_sum_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_sum_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'mean_full':
                         size = dims[0]
-                        getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_mean_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'mean_axis':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_mean_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'mean_axis0':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_mean_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
-
+                        getattr(lib, f'launch_mean_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
 
                     elif op_type == 'max_full':
                         size = dims[0]
-                        getattr(lib, f'launch_max_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_max_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'max_axis':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_max_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_max_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'max_axis0':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_max_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_max_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'min_full':
                         size = dims[0]
-                        getattr(lib, f'launch_min_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_min_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'min_axis':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_min_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_min_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'min_axis0':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_min_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_min_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'argmax_full':
                         size = dims[0]
-                        getattr(lib, f'launch_argmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(size))
+                        getattr(lib, f'launch_argmax_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(size)
+                        )
+
                     elif op_type == 'argmax_axis':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_argmax_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
+                        getattr(lib, f'launch_argmax_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
+
                     elif op_type == 'argmin_axis':
                         rows, cols, axis = dims
-                        getattr(lib, f'launch_argmin_{name}')(c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])), c_int(rows), c_int(cols))
-
+                        getattr(lib, f'launch_argmin_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), 
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_int(rows), c_int(cols)
+                        )
 
                     elif op_type == 'fill':
                         size, value = dims
-                        getattr(lib, f'launch_fill_{name}')(c_void_p(int(gpu_allocs[name])), c_float(value), c_int(size))
+                        getattr(lib, f'launch_fill_{name}')(
+                            c_void_p(int(gpu_allocs[name])), 
+                            c_float(value), c_int(size)
+                        )
+
+                    elif op_type == 'linear_1d':
+
+                        ###############################################################
+                        # # Save result for all computed tensors
+                        # output = np.zeros(shape, dtype=np.float32)
+                        # cuda.memcpy_dtoh(output, gpu_allocs[name])
+                        # tensors[name] = output
+
+                        # # Add this debug print for the hidden tensor specifically
+                        # if name == 'hidden':
+                        #     print(f"DEBUG: hidden tensor before layer_norm = {output}")
+
+                        # print(f"Result {name} ({op_type}):\n{output}")
+                        ###############################################################
+
+                        input_name, weight_name, bias_name, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2]
+                        getattr(lib, f'launch_linear_{name}')(
+                            c_void_p(int(gpu_allocs[input_name])),
+                            c_void_p(int(gpu_allocs[weight_name])),
+                            c_void_p(int(gpu_allocs[bias_name])),
+                            c_void_p(int(gpu_allocs[name])),
+                            c_int(in_features), c_int(out_features)
+                        )
+                    
+
+                    elif op_type == 'linear_2d':
+
+                        ###############################################################
+                        # Save result for all computed tensors
+                        # Debug: Check input state before kernel
+                        input_debug = np.zeros((batch_size, in_features), dtype=np.float32)
+                        cuda.memcpy_dtoh(input_debug, gpu_allocs[input_name])
+                        print(f"DEBUG LINEAR: Input before kernel = {input_debug}")
+                        ###############################################################
+
+                        input_name, weight_name, bias_name, batch_size, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2], dims[3]
+                        getattr(lib, f'launch_linear_{name}')(
+                            c_void_p(int(gpu_allocs[input_name])),
+                            c_void_p(int(gpu_allocs[weight_name])),
+                            c_void_p(int(gpu_allocs[bias_name])),
+                            c_void_p(int(gpu_allocs[name])),
+                            c_int(batch_size), c_int(in_features), c_int(out_features)
+                        )
+
+                        ###############################################################
+                        # Debug: Check output immediately after kernel
+                        output_debug = np.zeros(shape, dtype=np.float32)
+                        cuda.memcpy_dtoh(output_debug, gpu_allocs[name])
+                        print(f"DEBUG LINEAR: Output immediately after kernel = {output_debug}")
+                        ###############################################################
+
+                    elif op_type == 'layer_norm_2d':
+                        rows, cols, eps = dims
+                        getattr(lib, f'launch_layer_norm_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(rows), c_int(cols), c_float(eps)
+                        )
+                    elif op_type == 'layer_norm_axis0':
+                        rows, cols, eps = dims
+                        getattr(lib, f'launch_layer_norm_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(rows), c_int(cols), c_float(eps)
+                        )
+                    elif op_type == 'layer_norm_1d':
+                        size, eps = dims
+                        getattr(lib, f'launch_layer_norm_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(size), c_float(eps)
+                        )
+
+
+
 
                     # Save result for all computed tensors
                     output = np.zeros(shape, dtype=np.float32)

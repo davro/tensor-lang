@@ -1,32 +1,46 @@
 {
-  "max_full.tl": {
-    "result": 5.0
+  "layer_norm_1d.tl": {
+    "result": [-1.41421, -0.707105, 0.0, 0.707105, 1.41421]
   },
 
-  "min_full.tl": {
-    "result": 1.0
+  "linear_1d.tl": {
+    "result": [1.2, 1.85]
   },
 
-  "max_axis.tl": {
-    "result": [4.0, 6.0]
+  "layer_norm_2d.tl": {
+    "result": [
+      [-1.2247449, 0.0, 1.2247449],
+      [-1.2247449, 0.0, 1.2247449]
+    ]
   },
 
-  "min_axis.tl": {
-    "result": [2.0, 1.0, 1.0]
+  "layer_norm_pipeline.tl": {
+    "activated": [
+      [0.0, 1.7069664, 0.0, 0.0],
+      [0.0, 1.4336468, 0.0, 0.43237007]
+    ]
   },
 
-  "argmax.tl": {
-    "result": [1.0, 2.0]
+  "deep_layer_norm.tl": {
+    "predictions": [0.0, 2.0, 0.0]
+  }, 
+
+
+  "linear_2d.tl": {
+    "result": [
+      [1.2, 1.85],
+      [2.8, 3.85]
+    ]
   },
 
-  "argmin.tl": {
-    "result": [1.0, 2.0]
+  "mlp_network.tl": {
+    "final": [0.63297474, 0.3989121]
   },
 
-  "minmax_pipeline.tl": {
-    "overall_max": 0.7100998759269714
+  "linear_classification.tl": {
+    "predictions": [0.0, 1.0]
   },
-  
+
 
   "activations.tl": {
     "final_leaky": [
@@ -192,6 +206,34 @@
 
   "multiply.tl" : {
     "mul": [12.0, 32.0, 50.0]
+  },
+
+  "max_full.tl": {
+    "result": 5.0
+  },
+
+  "min_full.tl": {
+    "result": 1.0
+  },
+
+  "max_axis.tl": {
+    "result": [4.0, 6.0]
+  },
+
+  "min_axis.tl": {
+    "result": [2.0, 1.0, 1.0]
+  },
+
+  "argmax.tl": {
+    "result": [1.0, 2.0]
+  },
+
+  "argmin.tl": {
+    "result": [1.0, 2.0]
+  },
+
+  "minmax_pipeline.tl": {
+    "overall_max": 0.7100998759269714
   },
 
   "mlp.tl": {
