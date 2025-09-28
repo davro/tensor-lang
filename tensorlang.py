@@ -354,6 +354,57 @@ try:
             return {'type': 'slice', 'tensor': tensor_name, 'specs': slice_specs}
 
 
+        # ================================================================
+        # Transpose, Reshape, Concat
+        # ================================================================
+        elif tree.data == 'transpose_call':
+            tensor_name = None
+            axes = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Tree):
+                    # Parse axes specification (optional)
+                    axis_values = []
+                    for grandchild in child.children:
+                        if isinstance(grandchild, Token) and grandchild.type == 'NUMBER':
+                            axis_values.append(int(float(grandchild.value)))
+                    if axis_values:
+                        axes = tuple(axis_values)
+            
+            print(f"Transpose args: tensor={tensor_name}, axes={axes}")
+            return {'type': 'transpose', 'tensor': tensor_name, 'axes': axes}
+
+        elif tree.data == 'reshape_call':
+            tensor_name = None
+            new_shape = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Tree) and child.data == 'shape':
+                    new_shape = build_shape(child)
+            
+            print(f"Reshape args: tensor={tensor_name}, new_shape={new_shape}")
+            return {'type': 'reshape', 'tensor': tensor_name, 'new_shape': new_shape}
+
+        elif tree.data == 'concat_call':
+            tensor_names = []
+            axis = None
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_names.append(child.value)
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    axis = int(float(child.value))
+            
+            print(f"Concat args: tensors={tensor_names}, axis={axis}")
+            return {'type': 'concat', 'tensors': tensor_names, 'axis': axis}
+
+
+
+
         print(f"Unrecognized expr type: {tree.data}")
         return None
 
@@ -426,7 +477,9 @@ try:
                         'relu', 'sigmoid', 'tanh', 'softmax', 
                         'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
                         'greater', 'less', 'equal', 
-                        'linear', 'layer_norm', 'cross_entropy', 'mse_loss', 'slice'
+                        'linear', 'layer_norm', 'cross_entropy', 'mse_loss', 
+                        'transpose', 'reshape', 'concat', 'slice',
+                        'slice'
                     ]:
 
                     if expr['type'] == 'fill':
@@ -578,6 +631,97 @@ try:
                         
                         env[name] = {'dtype': 'f32', 'shape': output_shape}
                         print(f"Assigned type for {name} ({expr['type']}): {env[name]}")
+
+
+                    # ================================================================
+                    # Transpose, Reshape, Concat
+                    # ================================================================
+                    elif expr['type'] == 'transpose':
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for transpose")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        axes = expr.get('axes')
+                        
+                        if axes is None:
+                            # Default transpose: reverse all dimensions
+                            output_shape = tuple(reversed(input_shape))
+                        else:
+                            # Custom axes permutation
+                            if len(axes) != len(input_shape):
+                                print(f"Type error: Transpose axes {axes} length doesn't match tensor dimensions {len(input_shape)}")
+                                return False, env
+                            if set(axes) != set(range(len(input_shape))):
+                                print(f"Type error: Transpose axes {axes} must be permutation of {list(range(len(input_shape)))}")
+                                return False, env
+                            output_shape = tuple(input_shape[i] for i in axes)
+                        
+                        env[name] = {'dtype': 'f32', 'shape': output_shape}
+                        print(f"Assigned type for {name} (transpose): {env[name]}")
+
+                    elif expr['type'] == 'reshape':
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for reshape")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        new_shape = expr['new_shape']
+                        
+                        # Validate that total number of elements remains the same
+                        input_elements = int(np.prod([int(dim) for dim in input_shape]))
+                        new_elements = int(np.prod([int(dim) for dim in new_shape]))
+                        
+                        if input_elements != new_elements:
+                            print(f"Type error: Reshape element count mismatch. Input {input_elements} != output {new_elements}")
+                            return False, env
+                        
+                        env[name] = {'dtype': 'f32', 'shape': new_shape}
+                        print(f"Assigned type for {name} (reshape): {env[name]}")
+
+                    elif expr['type'] == 'concat':
+                        tensor_names = expr['tensors']
+                        axis = expr['axis']
+                        
+                        # Get tensor types
+                        tensor_types = []
+                        for tensor_name in tensor_names:
+                            if tensor_name not in env:
+                                print(f"Type error: Undefined tensor {tensor_name} for concat")
+                                return False, env
+                            tensor_types.append(env[tensor_name])
+                        
+                        # Validate concatenation compatibility
+                        first_shape = tensor_types[0]['shape']
+                        if axis < 0 or axis >= len(first_shape):
+                            print(f"Type error: Concat axis {axis} out of bounds for shape {first_shape}")
+                            return False, env
+                        
+                        # All tensors must have same number of dimensions
+                        concat_dim_size = 0
+                        for i, tensor_type in enumerate(tensor_types):
+                            shape = tensor_type['shape']
+                            if len(shape) != len(first_shape):
+                                print(f"Type error: Concat tensor {i} dimension count mismatch")
+                                return False, env
+                            
+                            # All dimensions except concat axis must match
+                            for dim_idx, (dim1, dim2) in enumerate(zip(first_shape, shape)):
+                                if dim_idx != axis and dim1 != dim2:
+                                    print(f"Type error: Concat tensor {i} shape mismatch at dimension {dim_idx}")
+                                    return False, env
+                            
+                            # Sum up the concat dimension
+                            concat_dim_size += shape[axis]
+                        
+                        # Compute output shape
+                        output_shape = list(first_shape)
+                        output_shape[axis] = concat_dim_size
+                        
+                        env[name] = {'dtype': 'f32', 'shape': tuple(output_shape)}
+                        print(f"Assigned type for {name} (concat): {env[name]}")
 
 
                     else:
@@ -2387,6 +2531,133 @@ extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
 
 
 
+                # ================================================================
+                # Transpose, Reshape, Concat
+                # ================================================================
+                elif expr['type'] == 'transpose':
+                    tensor_name = expr['tensor']
+                    axes = expr.get('axes')
+                    input_shape = env[tensor_name]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    if len(input_shape) == 2:
+                        # 2D transpose (matrix transpose)
+                        rows, cols = int(input_shape[0]), int(input_shape[1])
+                        
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void transpose_2d_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_row < cols && out_col < rows) {{
+        // output[out_row, out_col] = input[out_col, out_row]
+        output[out_row * rows + out_col] = input[out_col * cols + out_row];
+    }}
+}}
+extern "C" void launch_transpose_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((rows + block.x - 1) / block.x, (cols + block.y - 1) / block.y);
+    transpose_2d_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('transpose_2d', name, tensor_name, None, rows, cols))
+                    
+                    cuda_code += kernel
+
+                # RESHAPE
+                elif expr['type'] == 'reshape':
+                    tensor_name = expr['tensor']
+                    input_shape = env[tensor_name]['shape']
+                    output_shape = env[name]['shape']
+                    
+                    total_elements = int(np.prod([int(dim) for dim in input_shape]))
+                    
+                    kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void reshape_kernel_{name}(float* input, float* output, int total_elements) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < total_elements) {{
+        // Simple memory copy - reshape is just a view change
+        output[idx] = input[idx];
+    }}
+}}
+extern "C" void launch_reshape_{name}(float* input, float* output, int total_elements) {{
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    reshape_kernel_{name}<<<grid, block>>>(input, output, total_elements);
+    cudaDeviceSynchronize();
+}}
+"""
+                    kernels.append(('reshape', name, tensor_name, None, total_elements))
+                    
+                    cuda_code += kernel
+
+                # CONCAT
+                elif expr['type'] == 'concat':
+                    tensor_names = expr['tensors']
+                    axis = expr['axis']
+                    
+                    if len(tensor_names) == 2 and axis == 0:
+                        # Simple 2-tensor concatenation along axis 0 (most common case)
+                        tensor1, tensor2 = tensor_names
+                        shape1 = env[tensor1]['shape']
+                        shape2 = env[tensor2]['shape']
+                        output_shape = env[name]['shape']
+                        
+                        if len(shape1) == 2:
+                            rows1, cols = int(shape1[0]), int(shape1[1])
+                            rows2 = int(shape2[0])
+                            total_rows = int(output_shape[0])
+                            
+                            kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void concat_axis0_kernel_{name}(float* input1, float* input2, float* output,
+                                          int rows1, int rows2, int cols) {{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (col < cols) {{
+        if (row < rows1) {{
+            // Copy from first tensor
+            output[row * cols + col] = input1[row * cols + col];
+        }} else if (row < rows1 + rows2) {{
+            // Copy from second tensor
+            int src_row = row - rows1;
+            output[row * cols + col] = input2[src_row * cols + col];
+        }}
+    }}
+}}
+extern "C" void launch_concat_{name}(float* input1, float* input2, float* output,
+                                    int rows1, int rows2, int cols) {{
+    dim3 block(16, 16);
+    int total_rows = rows1 + rows2;
+    dim3 grid((cols + block.x - 1) / block.x, (total_rows + block.y - 1) / block.y);
+    concat_axis0_kernel_{name}<<<grid, block>>>(input1, input2, output, rows1, rows2, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                            kernels.append(('concat_axis0', name, tensor1, tensor2, rows1, rows2, cols))
+                    
+                    cuda_code += kernel
+
+
+
+
 
 
 
@@ -2819,7 +3090,9 @@ extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
                             c_int(size), c_float(eps)
                         )
 
-
+                    # ================================================================
+                    # Execution: cross_entropy, mse_loss
+                    # ================================================================
                     elif op_type == 'cross_entropy':
                         batch_size, num_classes = dims
                         getattr(lib, f'launch_cross_entropy_{name}')(
@@ -2835,6 +3108,27 @@ extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
                             c_int(total_elements)
                         )
 
+                    # ================================================================
+                    # Execution: transpose_2d, reshape, concat_axis0
+                    # ================================================================
+                    elif op_type == 'transpose_2d':
+                        rows, cols = dims
+                        getattr(lib, f'launch_transpose_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(rows), c_int(cols)
+                        )
+                    elif op_type == 'reshape':
+                        total_elements = dims[0]
+                        getattr(lib, f'launch_reshape_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                            c_int(total_elements)
+                        )
+                    elif op_type == 'concat_axis0':
+                        rows1, rows2, cols = dims
+                        getattr(lib, f'launch_concat_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])),
+                            c_int(rows1), c_int(rows2), c_int(cols)
+                        )
 
 
                     # Save result for all computed tensors
@@ -2845,6 +3139,7 @@ extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
                     # Specific output used by tests runner for extracting the result of each tensor output logs
                     print(f"Result {name} ({op_type}):\n{output}")
 
+                    # TensorLang Cache for outputs npy
                     np.save(f"cache/{tensorlang_file}/{name}.npy", output)
                     print(f"TensorLang Cache: saved {name} to cache/{tensorlang_file}/{name}.npy")
 

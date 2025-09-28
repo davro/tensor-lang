@@ -34,6 +34,9 @@ expr: tensor_literal
     | layer_norm_call
     | cross_entropy_call
     | mse_loss_call
+    | transpose_call
+    | reshape_call
+    | concat_call
     | slice_expr
     | NAME
 
@@ -70,6 +73,11 @@ layer_norm_call: "layer_norm" "(" NAME ["," "axis" "=" NUMBER] ["," "eps" "=" NU
 // Loss functions
 cross_entropy_call: "cross_entropy" "(" NAME "," NAME ")"
 mse_loss_call: "mse_loss" "(" NAME "," NAME ")"
+
+// Advanced tensor operations
+transpose_call: "transpose" "(" NAME ["," "axes" "=" "(" NUMBER ("," NUMBER)* ")"] ")"
+reshape_call: "reshape" "(" NAME "," shape ")"
+concat_call: "concat" "(" NAME "," NAME "," "axis" "=" NUMBER ")"
 
 // Tensor slicing
 slice_expr: NAME "[" slice_spec ("," slice_spec)* "]"
