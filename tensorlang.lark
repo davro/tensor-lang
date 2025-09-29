@@ -32,6 +32,8 @@ expr: tensor_literal
     | equal_call
     | linear_call
     | layer_norm_call
+    | batch_norm_call
+    | instance_norm_call
     | cross_entropy_call
     | mse_loss_call
     | transpose_call
@@ -68,7 +70,11 @@ equal_call: "equal" "(" NAME "," NAME ")"
 
 // Neural network layers
 linear_call: "linear" "(" NAME "," NAME "," NAME ")"
+
+// Normalization operations
 layer_norm_call: "layer_norm" "(" NAME ["," "axis" "=" NUMBER] ["," "eps" "=" NUMBER] ")"
+batch_norm_call: "batch_norm" "(" NAME "," NAME "," NAME ["," "eps" "=" NUMBER] ")"
+instance_norm_call: "instance_norm" "(" NAME ["," "eps" "=" NUMBER] ")"
 
 // Loss functions
 cross_entropy_call: "cross_entropy" "(" NAME "," NAME ")"

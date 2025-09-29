@@ -322,7 +322,7 @@ try:
             return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}
 
         # ================================================================
-        # Cross-entropy loss and mean squared error (MSE) loss 
+        # Expression: cross-entropy loss and mean squared error (MSE) loss 
         # ================================================================
         elif tree.data == 'cross_entropy_call':
             args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
@@ -336,7 +336,7 @@ try:
 
 
         # ================================================================
-        # Slice feature
+        # Expression: slice feature
         # ================================================================
         elif tree.data == 'slice_expr':
             tensor_name = None
@@ -355,7 +355,7 @@ try:
 
 
         # ================================================================
-        # Transpose, Reshape, Concat
+        # Expression: transpose, reshape, concat
         # ================================================================
         elif tree.data == 'transpose_call':
             tensor_name = None
@@ -402,6 +402,44 @@ try:
             print(f"Concat args: tensors={tensor_names}, axis={axis}")
             return {'type': 'concat', 'tensors': tensor_names, 'axis': axis}
 
+        # ================================================================
+        # Expression: batch_norm_call, instance_norm_call
+        # ================================================================
+        elif tree.data == 'batch_norm_call':
+            tensor_name = None
+            running_mean_name = None
+            running_var_name = None
+            eps = 1e-5  # Default epsilon
+            
+            arg_count = 0
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    if arg_count == 0:
+                        tensor_name = child.value
+                    elif arg_count == 1:
+                        running_mean_name = child.value
+                    elif arg_count == 2:
+                        running_var_name = child.value
+                    arg_count += 1
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    eps = float(child.value)
+            
+            print(f"BatchNorm args: tensor={tensor_name}, mean={running_mean_name}, var={running_var_name}, eps={eps}")
+            return {'type': 'batch_norm', 'tensor': tensor_name, 'running_mean': running_mean_name, 
+                    'running_var': running_var_name, 'eps': eps}
+
+        elif tree.data == 'instance_norm_call':
+            tensor_name = None
+            eps = 1e-5  # Default epsilon
+            
+            for child in tree.children:
+                if isinstance(child, Token) and child.type == 'NAME':
+                    tensor_name = child.value
+                elif isinstance(child, Token) and child.type == 'NUMBER':
+                    eps = float(child.value)
+            
+            print(f"InstanceNorm args: tensor={tensor_name}, eps={eps}")
+            return {'type': 'instance_norm', 'tensor': tensor_name, 'eps': eps}
 
 
 
@@ -471,13 +509,13 @@ try:
                     env[name] = {'dtype': 'f32', 'shape': shape}
                     print(f"Inferred shape for {name}: {env[name]['shape']}")
 
-                #elif isinstance(expr, dict) and expr['type'] in ['matmul', 'add', 'minus', 'mult', 'div', 'relu', 'sigmoid', 'tanh', 'softmax', 'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 'greater', 'less', 'equal', 'linear', 'layer_norm', 'slice']:
+
                 elif isinstance(expr, dict) and expr['type'] in [
                         'matmul', 'add', 'minus', 'mult', 'div', 
                         'relu', 'sigmoid', 'tanh', 'softmax', 
                         'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
                         'greater', 'less', 'equal', 
-                        'linear', 'layer_norm', 'cross_entropy', 'mse_loss', 
+                        'linear', 'layer_norm', 'batch_norm', 'instance_norm', 'cross_entropy', 'mse_loss', 
                         'transpose', 'reshape', 'concat', 'slice',
                         'slice'
                     ]:
@@ -606,7 +644,63 @@ try:
                         print(f"DEBUG: layer_norm axis={axis}, input_shape={input_shape}")
 
 
+                    # ================================================================
+                    # Type: batch_norm, instance_norm
+                    # ================================================================
+                    elif expr['type'] == 'batch_norm':
+                        tensor_name = expr['tensor']
+                        running_mean_name = expr['running_mean']
+                        running_var_name = expr['running_var']
+                        
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for batch_norm")
+                            return False, env
+                        if running_mean_name not in env:
+                            print(f"Type error: Undefined running_mean {running_mean_name} for batch_norm")
+                            return False, env
+                        if running_var_name not in env:
+                            print(f"Type error: Undefined running_var {running_var_name} for batch_norm")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        mean_shape = env[running_mean_name]['shape']
+                        var_shape = env[running_var_name]['shape']
+                        
+                        # Batch norm: input (N, C, ...), running_mean/var (C,)
+                        if len(input_shape) < 2:
+                            print(f"Type error: BatchNorm input must be at least 2D, got {len(input_shape)}D")
+                            return False, env
+                        
+                        num_features = input_shape[1]  # Channel dimension
+                        expected_stats_shape = (num_features,)
+                        
+                        if mean_shape != expected_stats_shape:
+                            print(f"Type error: BatchNorm running_mean shape {mean_shape} != expected {expected_stats_shape}")
+                            return False, env
+                        if var_shape != expected_stats_shape:
+                            print(f"Type error: BatchNorm running_var shape {var_shape} != expected {expected_stats_shape}")
+                            return False, env
+                        
+                        # Output shape same as input
+                        env[name] = {'dtype': 'f32', 'shape': input_shape}
+                        print(f"Assigned type for {name} (batch_norm): {env[name]}")
 
+                    elif expr['type'] == 'instance_norm':
+                        tensor_name = expr['tensor']
+                        if tensor_name not in env:
+                            print(f"Type error: Undefined tensor {tensor_name} for instance_norm")
+                            return False, env
+                        
+                        input_shape = env[tensor_name]['shape']
+                        
+                        # Instance norm preserves input shape
+                        env[name] = {'dtype': 'f32', 'shape': input_shape}
+                        print(f"Assigned type for {name} (instance_norm): {env[name]}")
+
+
+                    # ================================================================
+                    # Type: max, min, argmax, argmin
+                    # ================================================================
                     elif expr['type'] in ['max', 'min', 'argmax', 'argmin']:
                         tensor_name = expr['tensor']
                         if tensor_name not in env:
@@ -634,7 +728,7 @@ try:
 
 
                     # ================================================================
-                    # Transpose, Reshape, Concat
+                    # Type: transpose, reshape, concat
                     # ================================================================
                     elif expr['type'] == 'transpose':
                         tensor_name = expr['tensor']
@@ -722,6 +816,11 @@ try:
                         
                         env[name] = {'dtype': 'f32', 'shape': tuple(output_shape)}
                         print(f"Assigned type for {name} (concat): {env[name]}")
+
+
+
+
+
 
 
                     else:
@@ -2570,7 +2669,121 @@ extern "C" void launch_transpose_{name}(float* input, float* output, int rows, i
                     
                     cuda_code += kernel
 
-                # RESHAPE
+
+
+                # ================================================================
+                # batch_norm
+                # ================================================================
+
+                # BATCH NORMALIZATION
+                elif expr['type'] == 'batch_norm':
+                    tensor_name = expr['tensor']
+                    running_mean_name = expr['running_mean']
+                    running_var_name = expr['running_var']
+                    eps = expr.get('eps', 1e-5)
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if len(input_shape) == 2:
+                        # 2D batch norm: (N, C) format
+                        batch_size, num_features = int(input_shape[0]), int(input_shape[1])
+                        
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void batch_norm_2d_kernel_{name}(float* input, float* running_mean, float* running_var,
+                                            float* output, int batch_size, int num_features, float eps) {{
+    int feature_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (feature_idx < num_features && batch_idx < batch_size) {{
+        // Get running statistics for this feature
+        float mean = running_mean[feature_idx];
+        float var = running_var[feature_idx];
+        float std_dev = sqrtf(var + eps);
+        
+        // Normalize this element
+        int idx = batch_idx * num_features + feature_idx;
+        output[idx] = (input[idx] - mean) / std_dev;
+    }}
+}}
+extern "C" void launch_batch_norm_{name}(float* input, float* running_mean, float* running_var,
+                                         float* output, int batch_size, int num_features, float eps) {{
+    dim3 block(16, 16);
+    dim3 grid((num_features + block.x - 1) / block.x, (batch_size + block.y - 1) / block.y);
+    batch_norm_2d_kernel_{name}<<<grid, block>>>(input, running_mean, running_var, output,
+                                                 batch_size, num_features, eps);
+    cudaDeviceSynchronize();
+}}
+"""
+                        #kernels.append(('batch_norm_2d', name, tensor_name, running_mean_name, running_var_name, batch_size, num_features, eps))
+                        kernels.append(('batch_norm_2d', name, tensor_name, running_mean_name, batch_size, num_features, eps, running_var_name))
+
+                    
+                    cuda_code += kernel
+
+                # INSTANCE NORMALIZATION
+                elif expr['type'] == 'instance_norm':
+                    tensor_name = expr['tensor']
+                    eps = expr.get('eps', 1e-5)
+                    input_shape = env[tensor_name]['shape']
+                    
+                    if len(input_shape) == 2:
+                        # 2D instance norm: normalize each sample independently
+                        batch_size, num_features = int(input_shape[0]), int(input_shape[1])
+                        
+                        kernel = f"""
+// Define FLT_MAX for CUDA device code
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38f
+#endif
+
+__global__ void instance_norm_2d_kernel_{name}(float* input, float* output,
+                                               int batch_size, int num_features, float eps) {{
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (batch_idx < batch_size) {{
+        // Compute mean for this sample
+        float sum = 0.0f;
+        for (int f = 0; f < num_features; f++) {{
+            sum += input[batch_idx * num_features + f];
+        }}
+        float mean = sum / num_features;
+        
+        // Compute variance for this sample
+        float var_sum = 0.0f;
+        for (int f = 0; f < num_features; f++) {{
+            float diff = input[batch_idx * num_features + f] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / num_features;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize this sample
+        for (int f = 0; f < num_features; f++) {{
+            int idx = batch_idx * num_features + f;
+            output[idx] = (input[idx] - mean) / std_dev;
+        }}
+    }}
+}}
+extern "C" void launch_instance_norm_{name}(float* input, float* output,
+                                           int batch_size, int num_features, float eps) {{
+    dim3 block(256);
+    dim3 grid((batch_size + block.x - 1) / block.x);
+    instance_norm_2d_kernel_{name}<<<grid, block>>>(input, output, batch_size, num_features, eps);
+    cudaDeviceSynchronize();
+}}
+"""
+                        kernels.append(('instance_norm_2d', name, tensor_name, None, None, batch_size, num_features, eps))
+                    
+                    cuda_code += kernel
+
+
+                # ================================================================
+                # Generation: reshape
+                # ================================================================
                 elif expr['type'] == 'reshape':
                     tensor_name = expr['tensor']
                     input_shape = env[tensor_name]['shape']
@@ -2603,7 +2816,9 @@ extern "C" void launch_reshape_{name}(float* input, float* output, int total_ele
                     
                     cuda_code += kernel
 
-                # CONCAT
+                # ================================================================
+                # Generation: concat
+                # ================================================================
                 elif expr['type'] == 'concat':
                     tensor_names = expr['tensors']
                     axis = expr['axis']
@@ -2654,10 +2869,6 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
                             kernels.append(('concat_axis0', name, tensor1, tensor2, rows1, rows2, cols))
                     
                     cuda_code += kernel
-
-
-
-
 
 
 
@@ -3046,6 +3257,10 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
                             c_int(in_features), c_int(out_features)
                         )
                     
+
+                    # ================================================================
+                    # Execution: linear_2d, layer_norm_2d, layer_norm_axis0, layer_norm_1d
+                    # ================================================================
                     elif op_type == 'linear_2d':
                         ###############################################################
                         # Save result for all computed tensors
@@ -3090,6 +3305,7 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
                             c_int(size), c_float(eps)
                         )
 
+
                     # ================================================================
                     # Execution: cross_entropy, mse_loss
                     # ================================================================
@@ -3107,6 +3323,7 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
                             c_void_p(int(gpu_allocs[name])),
                             c_int(total_elements)
                         )
+
 
                     # ================================================================
                     # Execution: transpose_2d, reshape, concat_axis0
@@ -3131,6 +3348,30 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
                         )
 
 
+                    # ================================================================
+                    # Execution: batch_norm_2d, instance_norm_2d
+                    # ================================================================
+                    elif op_type == 'batch_norm_2d':
+                        running_mean_name, batch_size, num_features, eps, running_var_name = arg2, dims[0], dims[1], dims[2], dims[3]
+                        getattr(lib, f'launch_batch_norm_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])),  # input tensor
+                            c_void_p(int(gpu_allocs[running_mean_name])),
+                            c_void_p(int(gpu_allocs[running_var_name])), 
+                            c_void_p(int(gpu_allocs[name])),  # output tensor
+                            c_int(batch_size), c_int(num_features), c_float(eps)
+                        )
+
+                    elif op_type == 'instance_norm_2d':
+                        print(f"DEBUG instance_norm dims: {dims}")
+                        batch_size, num_features, eps = dims[-3], dims[-2], dims[-1]  # Get last 3 values
+                        getattr(lib, f'launch_instance_norm_{name}')(
+                            c_void_p(int(gpu_allocs[arg1])),
+                            c_void_p(int(gpu_allocs[name])),
+                            c_int(batch_size), c_int(num_features), c_float(eps)
+                        )
+
+
+                    # ================================================================
                     # Save result for all computed tensors
                     output = np.zeros(shape, dtype=np.float32)
                     cuda.memcpy_dtoh(output, gpu_allocs[name])
