@@ -4,7 +4,16 @@
 // Program Structure
 start: program
 program: (statement)*
-statement: let_binding | expr
+statement: function_def | let_binding | expr
+
+// Function Definitions
+function_def: "fn" NAME "(" [param_list] ")" ["->" type] "{" function_body "}"
+param_list: param ("," param)*
+param: NAME ":" type
+function_body: (function_statement)* return_statement?
+function_statement: let_binding | expr_statement
+expr_statement: expr
+return_statement: "return" expr
 
 // Bindings
 let_binding: "let" NAME [":" type] "=" expr
@@ -17,7 +26,7 @@ expr: tensor_literal
     | minus_call
     | mult_call
     | div_call
-    | relu_call
+    | relu_call 
     | sigmoid_call
     | tanh_call
     | softmax_call
@@ -40,12 +49,23 @@ expr: tensor_literal
     | reshape_call
     | concat_call
     | slice_expr
+    | user_function_call
     | NAME
 
-// Types
-type: "Tensor" "[" dtype "," shape "]"
+// User-defined function calls (must come after built-in calls to avoid conflicts)
+user_function_call: NAME "(" [arg_list] ")"
+arg_list: expr ("," expr)*
+
+// Types - concrete type takes priority over generic
+type: "Tensor" "[" dtype "," shape "]"          -> concrete_type
+    | "Tensor" "[" generic_shape "]"            -> generic_type
+
 dtype: "f32" | "f64"
 shape: "(" NUMBER ("," NUMBER)* [","] ")"
+
+// Generic shape parameters (for function signatures)
+generic_shape: generic_dim ("," generic_dim)*
+generic_dim: NAME | NUMBER
 
 // Expression Definitions
 tensor_literal: "[" (NUMBER ("," NUMBER)* | inner_array ("," inner_array)*) "]"

@@ -26,12 +26,13 @@ returns = np.array([
     [0.08, 0.10, 0.12, 0.05],
     [0.06, 0.07, 0.09, 0.04],
     [0.15, 0.12, 0.18, 0.08],
-    [0.05, 0.06, 0.04, 0.03]
+    [0.05, 0.06, 0.04, 0.03],
+    [0.02, 0.03, 0.04, 0.05]
 ], dtype=np.float32)
 
 weights = np.array([[0.3], [0.25], [0.25], [0.2]], dtype=np.float32)
 
-risk_factor = np.array([[1.2], [1.1], [0.8], [1.4], [0.6]], dtype=np.float32)
+risk_factor = np.array([[1.2], [1.1], [0.8], [1.4], [0.6], [0.5]], dtype=np.float32)
 
 # Log input tensors
 logger.info(f"Input returns: shape {returns.shape}, sample {returns[:2]}")
@@ -174,7 +175,7 @@ try:
     logger.info("Freed all GPU memory")
 
     print(f'Portfolio: log saved to {log_file}')
-    
+
 except Exception as e:
     logger.error(f"Failed to free GPU memory: {e}")
     raise

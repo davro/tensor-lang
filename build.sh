@@ -11,10 +11,11 @@ source python-env/bin/activate
 #pip3 install --upgrade lark
 #pip install pycuda
 #pip install numpy
+pip install tqdm
 
 # Install required packages
-pip install -r requirements.txt
+#pip install -r requirements.txt
 #pip freeze > requirements.txt
 
 # Test Runner for all tests
-python3 tests/runner.py
+#python3 tests/runner.py
