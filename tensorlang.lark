@@ -18,6 +18,8 @@ statement: function_def
          | expr
 
 
+
+
 ////////////////////////////////////////////////////////////////////////////////
 // Function Definitions
 ////////////////////////////////////////////////////////////////////////////////
@@ -68,6 +70,7 @@ expr: tensor_literal
     | slice_expr
     | user_function_call
     | NAME
+    | NUMBER
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -79,9 +82,13 @@ elif_clause: "elif" condition "{" (statement)* "}"
 else_clause: "else" "{" (statement)* "}"
 
 // Conditions - support both tensor comparisons and compile-time constants
+//condition: comparison_expr | NAME | "true" | "false"
+// Conditions - support both tensor comparisons and compile-time constants
 condition: comparison_expr | NAME | "true" | "false"
 
-comparison_expr: NAME comp_op NAME | NAME comp_op NUMBER | reduction_call comp_op NUMBER
+// Allow any expression (function calls, names, literals) in comparisons
+//comparison_expr: NAME comp_op NAME | NAME comp_op NUMBER | reduction_call comp_op NUMBER
+comparison_expr: expr comp_op expr
 
 comp_op: ">" | "<" | ">=" | "<=" | "==" | "!="
 

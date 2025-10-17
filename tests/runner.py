@@ -21,16 +21,16 @@ except ImportError:
 # python3 tests/runner.py tests/add.tl tests/mul.tl	Run specific tests
 # python3 tests/runner.py --filter broadcast	Run only tests whose filenames contain "broadcast"
 
-# ------------------------------
+# ================================================================
 # Paths and Globals
-# ------------------------------
+# ================================================================
 ROOT_DIR = Path(__file__).parent.parent
 TEST_DIR = Path(__file__).parent
 EXPECTED_RESULTS_FILE = TEST_DIR / "expected_results.json"
 
-# ------------------------------
+# ================================================================
 # Load Expected Results
-# ------------------------------
+# ================================================================
 try:
     with open(EXPECTED_RESULTS_FILE, "r") as f:
         EXPECTED_RESULTS = json.load(f)
@@ -41,9 +41,9 @@ except json.JSONDecodeError as e:
     print(f"❌ Error parsing expected_results.json: {e}")
     sys.exit(1)
 
-# ------------------------------
+# ================================================================
 # Helpers
-# ------------------------------
+# ================================================================
 def color(text, code):
     return f"\033[{code}m{text}\033[0m"
 
@@ -78,9 +78,9 @@ def parse_args():
 
     return opts
 
-# ------------------------------
+# ================================================================
 # Parse Log Results
-# ------------------------------
+# ================================================================
 def parse_result(log_content):
     """Extract and clean all results from the log using regex."""
     result_pattern = r"Result (\w+) \(([\w]+)\):\n\s*(.*?)\s*(?=\n[A-Z]|\nResult|\nFreed|$)"
@@ -100,7 +100,7 @@ def parse_result(log_content):
             except ValueError as e:
                 print(f"Error parsing scalar result for {variable}: {e}")
         else:
-            # print(f"Debug: Raw result for {variable}: {result_str!r}")
+            #print(f"Debug: Raw result for {variable}: {result_str!r}")
             cleaned_result = re.sub(r"\s+", ",", result_str.strip())
             cleaned_result = re.sub(r"\]\s*\[", "],[", cleaned_result)
             cleaned_result = cleaned_result.rstrip(",")
@@ -112,11 +112,9 @@ def parse_result(log_content):
                 print(f"Error parsing array result for {variable}: {e}, cleaned_result={cleaned_result!r}")
     return results
 
-# ------------------------------
+# ================================================================
 # Run a Single Test
-# ------------------------------
-# Run a Single Test
-# ------------------------------
+# ================================================================
 def run_test(test_file):
     """Run a single test and compare with expected results."""
     start_time = time.time()
@@ -187,9 +185,9 @@ def run_test(test_file):
     finally:
         os.chdir(original_dir)
 
-# ------------------------------
+# ================================================================
 # Main Runner
-# ------------------------------
+# ================================================================
 def main():
     opts = parse_args()
     all_tests = list(EXPECTED_RESULTS.keys())
@@ -259,6 +257,6 @@ def main():
             output = color(f"PASS  {test_file} (after re-run): {message}", GREEN) if success else color(f"FAIL  {test_file} (after re-run): {message}", RED)
             print(output)
 
-# ------------------------------
+# ================================================================
 if __name__ == "__main__":
     main()

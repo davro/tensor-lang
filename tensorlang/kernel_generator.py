@@ -1,0 +1,1939 @@
+import inspect
+import sys
+import numpy as np
+
+# ================================================================
+#                          TensorLang
+# ================================================================
+class KernelGenerator:
+    # TODO: Split into separate classes (e.g., ElementwiseGenerator, ReductionGenerator) when stable
+
+    #def __init__(self, kernel_type, *args):
+
+    def _validate(self, kernel_type, op_type):
+        """Validate the operation type and required parameters.
+
+        Args:
+            kernel_type (str): Type of kernel ('elementwise', 'broadcast', 'general_broadcast').
+            op_type (str): Operation type (e.g., 'add', 'fill').
+
+        Raises:
+            ValueError: If kernel_type is not supported.
+        """
+
+        # self.op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}
+        # self.supported_dtypes = {'float': 'float', 'double': 'double', 'int': 'int'}
+
+        self.operation_signatures = {
+            'elementwise': {
+                'add':   ['arg1', 'arg2', 'size'],
+                'minus': ['arg1', 'arg2', 'size'],
+                'mult':  ['arg1', 'arg2', 'size'],
+                'div':   ['arg1', 'arg2', 'size'],
+            },
+            'binary_broadcast': {
+                'add':   ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'minus': ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'mult':  ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'div':   ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+            },
+            'binary_1d_broadcast': {
+                'add':   ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'minus': ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'mult':  ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'div':   ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+            },
+            'binary_general_broadcast': {
+                'add':   ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'minus': ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'mult':  ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+                'div':   ['arg1', 'arg2', 'size', 'shape1', 'shape2'],
+            },
+            'fill': {
+                'fill':  []
+            },
+            'matmul': {
+                'matmul':  []
+            },
+            'relu': {
+                'relu':  []
+            },
+            'sigmoid': {
+                'sigmoid':  []
+            },
+            'tanh': {
+                'tanh':  []
+            },
+            'softmax': {
+                'softmax':  []
+            },
+            'greater_broadcast': {
+                'greater':  []
+            },
+            'less_broadcast': {
+                'less':  []
+            },
+            'equal': {
+                'equal':  []
+            },
+            'sum': {
+                'sum':  []
+            },
+            'mean': {
+                'mean':  []
+            },
+            'slice': {
+                'slice':  []
+            },
+            'max': {
+                'max':  []
+            },
+            'min': {
+                'min':  []
+            },
+            'argmax': {
+                'argmax':  []
+            },
+            'argmin': {
+                'argmin':  []
+            },
+            'linear': {
+                'linear':  []
+            },
+            'layer_norm': {
+                'layer_norm':  []
+            },
+
+
+            'concat': {
+                'concat':  []
+            },
+            'reshape': {
+                'reshape':  []
+            },
+            'reshape': {
+                'reshape':  []
+            },
+            'instance_norm': {
+                'instance_norm':  []
+            },
+            'batch_norm': {
+                'batch_norm':  []
+            },
+            'transpose': {
+                'transpose':  []
+            },
+            'mse_loss': {
+                'mse_loss':  []
+            },
+            'cross_entropy': {
+                'cross_entropy':  []
+            }  
+        }
+
+        #print (f"KERNEL TYPE: {kernel_type}")
+        if kernel_type not in self.operation_signatures:
+            raise ValueError(f"Generator: Unsupported kernel type: {kernel_type}")
+        self.kernel_type = kernel_type
+
+        if op_type not in self.operation_signatures[self.kernel_type]:
+            raise ValueError(f"Unsupported operation for {self.kernel_type}: {op_type}")
+
+
+    # ================================================================
+    # Generate Unary Operations Kernel
+    # ================================================================
+    def generate_unary_op_kernel(self, op_type, name, arg1, size, cuda_debug_code, operation):
+        """
+        Generate a CUDA kernel for a unary operation.
+        
+        Args:
+            op_type (str): Type of operation (e.g., 'relu', 'sigmoid').
+            name (str): Unique name for the kernel.
+            arg1: Input argument (tensor).
+            size (int): Size of the input/output arrays.
+            cuda_debug_code (str): CUDA debug code to include.
+            operation (str): CUDA operation (e.g., 'fmaxf(0.0f, input[idx])' for ReLU).
+        
+        Returns:
+            tuple: (kernel_code, (op_type, name, arg1, None, size))
+        """
+
+        kernel_template = f"""
+    __global__ void {op_type}_kernel_{name}(float* input, float* output, int size) {{
+        int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx < size) {{
+            output[idx] = {operation};
+        }}
+    }}
+    extern "C" void launch_{op_type}_{name}(float* input, float* output, int size) {{
+        dim3 block(256);
+        dim3 grid((size + block.x - 1) / block.x);
+        {op_type}_kernel_{name}<<<grid, block>>>(input, output, size);
+        cudaDeviceSynchronize();
+        {cuda_debug_code}
+    }}
+    """
+        return kernel_template, (op_type, name, arg1, None, size)
+
+
+    # ================================================================
+    # Elementwise
+    # ================================================================
+    def elementwise(self, op_type, name, arg1, arg2, size, cuda_debug_code):
+        """Generate element-wise kernel for binary operations where shapes match"""
+
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        op_symbol = {
+            'add': '+',
+            'minus': '-',
+            'mult': '*',
+            'div': '/'
+        }[op_type]
+        
+        kernel = f"""
+// -----------------------------------------------------------------------------
+// TensorLang -> Elementwise {op_type} ({op_symbol})
+// --------------------------------------------------------------   ---------------
+__global__ void {op_type}_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = A[idx] {op_symbol} B[idx];
+    }}
+}}
+extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    {op_type}_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+        return kernel, (op_type, name, arg1, arg2, size)
+
+
+    # ================================================================
+    # Binary Broadcast operations (add, minus, mult, div)
+    # ================================================================
+    def binary_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape, cuda_debug_code):
+        """Generate CUDA kernel for binary operations (add, minus, mult, div) with 2D+1D broadcasting.
+        
+        Args:
+            op_name (str): Name of the operation (e.g., 'add').
+            op_type (str): Type of operation (e.g., 'add', 'minus').
+            name (str): Unique name for the kernel.
+            arg1 (str): First input tensor name.
+            arg2 (str): Second input tensor name.
+            shape1 (tuple): Shape of the first tensor.
+            shape2 (tuple): Shape of the second tensor (1D).
+            output_shape (tuple): Shape of the output tensor (2D).
+            cuda_debug_code (str): CUDA debug code to include.
+        
+        Returns:
+            tuple: (kernel_code, kernel_info)
+        """
+
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        rows, cols = output_shape
+        
+        # Determine broadcast direction
+        if shape1[0] == shape2[0]:
+            # Row broadcast: (3, 4) op (3,) - use B[i]
+            op_symbol = {
+                'add': '+', 'minus': '-', 'mult': '*', 'div': '/'
+            }[op_type]
+            
+            kernel = f"""
+__global__ void {op_type}_broadcast_rows_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = A[i * cols + j] {op_symbol} B[i];
+    }}
+}}
+extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    {op_type}_broadcast_rows_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+        """
+            return kernel, (f'{op_type}_broadcast_rows', name, arg1, arg2, rows, cols)
+        else:
+            # Column broadcast: (3, 4) op (4,) - use B[j]
+            op_symbol = {
+                'add': '+', 'minus': '-', 'mult': '*', 'div': '/'
+            }[op_type]
+            
+            kernel = f"""
+__global__ void {op_type}_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = A[i * cols + j] {op_symbol} B[j];
+    }}
+}}
+extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    {op_type}_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+        """
+            return kernel, (f'{op_type}_broadcast', name, arg1, arg2, rows, cols)
+
+
+    # ================================================================
+    # Binary 1D Broadcast (add, minus, mult, div)
+    # ================================================================
+    def binary_1d_broadcast(self, op_type, name, arg1, arg2, size, cuda_debug_code):
+        """Handle broadcasting with scalar (0-D tensor)"""
+
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        op_symbol = {
+            'add': '+', 'minus': '-', 'mult': '*', 'div': '/'
+        }[op_type]
+        
+        kernel = f"""
+__global__ void {op_type}_scalar_kernel_{name}(float* A, float* B_scalar, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = A[idx] {op_symbol} B_scalar[0];
+    }}
+}}
+extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    {op_type}_scalar_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+        """
+        return kernel, (f'{op_type}_scalar', name, arg1, arg2, size)
+
+
+    # ================================================================
+    # Binary General Broadcast (add, minus, mult, div)
+    # ================================================================
+    def binary_general_broadcast(self, op_type, name, arg1, arg2, shape1, shape2, output_shape, cuda_debug_code):
+        """Generate kernel for general NumPy-style broadcasting"""
+
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        op_symbol = {
+            'add': '+', 'minus': '-', 'mult': '*', 'div': '/'
+        }[op_type]
+        
+        # Calculate strides and dimensions
+        ndim_out = len(output_shape)
+        total_elements = int(np.prod([int(dim) for dim in output_shape]))
+        
+        # Pad shapes with 1s on the left to match output dimensionality
+        padded_shape1 = (1,) * (ndim_out - len(shape1)) + shape1
+        padded_shape2 = (1,) * (ndim_out - len(shape2)) + shape2
+        
+        # Convert to strings for kernel code
+        shape1_str = ', '.join(map(str, [int(d) for d in padded_shape1]))
+        shape2_str = ', '.join(map(str, [int(d) for d in padded_shape2]))
+        output_shape_str = ', '.join(map(str, [int(d) for d in output_shape]))
+        
+        kernel = f"""
+__device__ int compute_broadcast_index(int linear_idx, const int* out_shape, const int* in_shape, int ndim) {{
+    int in_idx = 0;
+    int temp_idx = linear_idx;
+    int out_stride = 1;
+    
+    // Compute index by iterating dimensions from right to left
+    for (int i = ndim - 1; i >= 0; i--) {{
+        int out_coord = temp_idx % out_shape[i];
+        temp_idx /= out_shape[i];
+        
+        // If input dimension is 1, use index 0 (broadcast), else use coordinate
+        int in_coord = (in_shape[i] == 1) ? 0 : out_coord;
+        in_idx += in_coord * out_stride;
+        
+        if (i > 0) {{
+            out_stride *= in_shape[i];
+        }}
+    }}
+    return in_idx;
+}}
+
+__global__ void {op_type}_general_broadcast_kernel_{name}(
+    float* A, float* B, float* C, 
+    int* shape1, int* shape2, int* out_shape, 
+    int ndim, int total_elements) {{
+    
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < total_elements) {{
+        int idx1 = compute_broadcast_index(idx, out_shape, shape1, ndim);
+        int idx2 = compute_broadcast_index(idx, out_shape, shape2, ndim);
+        
+        C[idx] = A[idx1] {op_symbol} B[idx2];
+    }}
+}}
+
+extern "C" void launch_{op_type}_{name}(
+    float* A, float* B, float* C,
+    int* shape1, int* shape2, int* out_shape,
+    int ndim, int total_elements) {{
+    
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    
+    {op_type}_general_broadcast_kernel_{name}<<<grid, block>>>(
+        A, B, C, shape1, shape2, out_shape, ndim, total_elements);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+
+        # In generate_general_broadcast_kernel function, change the return to include op_type:
+        return kernel, ('general_broadcast', op_type, name, arg1, arg2, 
+                        padded_shape1, padded_shape2, output_shape, total_elements)
+
+
+    # ================================================================
+    # Fill 
+    # ================================================================
+    def fill(self, op_type, name, arg1, arg2, size, op_value, cuda_debug_code):
+
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        kernel = f"""
+__global__ void fill_kernel_{name}(float* output, float value, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        output[idx] = value;
+    }}
+}}
+extern "C" void launch_fill_{name}(float* output, float value, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    fill_kernel_{name}<<<grid, block>>>(output, value, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+        """
+        return kernel, (op_type, name, arg1, arg2, size, op_value)
+
+    # def fill_broadcast(self, op_type, name, arg1, size, op_value, cuda_debug_code):
+    #     return self.generate_unary_op_kernel(
+    #         op_type, name, arg1, size, cuda_debug_code, 
+    #         operation=f"{op_value}",  # Use the constant value directly
+    #         has_input=False
+    #     )
+
+
+    # ================================================================
+    # MatMul
+    # ================================================================
+    def matmul(self, op_type, name, arg1, arg2, m, n, p, cuda_debug_code):
+
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        kernel = f"""
+__global__ void matmul_kernel_{name}(float* A, float* B, float* C, int M, int N, int P) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < M && j < P) {{
+        float sum = 0.0;
+        for (int k = 0; k < N; k++) {{
+            sum += A[i * N + k] * B[k * P + j];
+        }}
+        C[i * P + j] = sum;
+    }}
+}}
+extern "C" void launch_matmul_{name}(float* A, float* B, float* C, int M, int N, int P) {{
+    dim3 block(16, 16);
+    dim3 grid((P + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    matmul_kernel_{name}<<<grid, block>>>(A, B, C, M, N, P);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+        return kernel, (op_type, name, arg1, arg2, m, n, p)
+
+
+    # ================================================================
+    # ReLu
+    # ================================================================
+    def relu(self, op_type, name, arg1, size, cuda_debug_code):
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        return self.generate_unary_op_kernel(
+            op_type, name, arg1, size, cuda_debug_code, 
+            operation="fmaxf(0.0f, input[idx])"
+        )
+
+
+    # ================================================================
+    # Sigmoid
+    # ================================================================
+    def sigmoid(self, op_type, name, arg1, size, cuda_debug_code):
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        return self.generate_unary_op_kernel(
+            op_type, name, arg1, size, cuda_debug_code, 
+            operation="1.0f / (1.0f + expf(-input[idx]))"
+        )
+
+
+    # ================================================================
+    # Tanh
+    # ================================================================
+    def tanh(self, op_type, name, arg1, size, cuda_debug_code):
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        return self.generate_unary_op_kernel(
+            op_type, name, arg1, size, cuda_debug_code, 
+            operation="tanhf(input[idx])"
+        )
+
+
+    # ================================================================
+    # Softmax
+    # ================================================================
+    def softmax(self, op_type, name, tensor_name, input_shape, axis, cuda_debug_code):
+        """
+        Generate a CUDA kernel for softmax operation (1D or 2D).
+
+        Args:
+            op_type (str): Operation type ('softmax' or 'softmax_1d').
+            name (str): Unique name for the kernel.
+            tensor_name (str): Name of the input tensor.
+            input_shape (list): Shape of the input tensor.
+            axis (int): Axis along which to compute softmax (or None for last axis).
+            cuda_debug_code (str): CUDA debug code to include.
+
+        Returns:
+            tuple: (kernel_code, kernel_info)
+        """
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        if axis is None:
+            axis = len(input_shape) - 1
+
+        if len(input_shape) == 2 and axis == 1:
+            # 2D softmax along rows
+            rows, cols = int(input_shape[0]), int(input_shape[1])
+            kernel_params = "int rows, int cols"
+            index = "row * cols + col"  # Correct indexing for 2D
+            initial_index = "row * cols"  # Correct initial index for max_val
+            loop_var = "col"
+            outer_loop = "int row = blockIdx.x * blockDim.x + threadIdx.x;\n    if (row < rows) {"
+            block = "256"
+            grid = "(rows + block.x - 1) / block.x"
+            kernel_info = ('softmax', name, tensor_name, None, rows, cols, axis)
+        elif len(input_shape) == 1:
+            # 1D softmax
+            size = int(input_shape[0])
+            kernel_params = "int size"
+            index = "i"  # Simple index for 1D
+            initial_index = "0"  # Initial index for max_val
+            loop_var = "i"
+            outer_loop = "if (threadIdx.x == 0 && blockIdx.x == 0) {"
+            block = "1"
+            grid = "1"
+            kernel_info = ('softmax_1d', name, tensor_name, None, size)
+        else:
+            raise ValueError(f"Unsupported softmax shape {input_shape} or axis {axis}")
+
+        kernel = f"""
+__global__ void softmax_kernel_{name}(float* input, float* output, {kernel_params}) {{
+    {outer_loop}
+        // Find max for numerical stability
+        float max_val = input[{initial_index}];
+        for (int {loop_var} = 1; {loop_var} < {(size if len(input_shape) == 1 else 'cols')}; {loop_var}++) {{
+            max_val = fmaxf(max_val, input[{index}]);
+        }}
+        
+        // Compute exp(x - max) and sum
+        float sum_exp = 0.0f;
+        for (int {loop_var} = 0; {loop_var} < {(size if len(input_shape) == 1 else 'cols')}; {loop_var}++) {{
+            float exp_val = expf(input[{index}] - max_val);
+            output[{index}] = exp_val;
+            sum_exp += exp_val;
+        }}
+        
+        // Normalize by sum
+        for (int {loop_var} = 0; {loop_var} < {(size if len(input_shape) == 1 else 'cols')}; {loop_var}++) {{
+            output[{index}] /= sum_exp;
+        }}
+    }}
+}}
+extern "C" void launch_softmax_{name}(float* input, float* output, {kernel_params}) {{
+    dim3 block({block});
+    dim3 grid({grid});
+    softmax_kernel_{name}<<<grid, block>>>(input, output, {('rows, cols' if len(input_shape) == 2 else 'size')});
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+        return kernel, kernel_info
+
+
+    # ================================================================
+    # Greater broadcast
+    # ================================================================
+    def greater_broadcast(self, op_type, name, arg1, arg2, shape1, shape2, output_shape, size, cuda_debug_code):
+        if shape1 == shape2:
+            # Element-wise greater
+            kernel = f"""
+__global__ void greater_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = (A[idx] > B[idx]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_greater_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    greater_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('greater', name, arg1, arg2, size))
+            # cuda_code += kernel
+            return kernel, (op_type, name, arg1, arg2, size)
+
+        else:
+            # Broadcasting greater (e.g., (4,5) > (5,) -> (4,5))
+            rows, cols = output_shape
+            kernel = f"""
+__global__ void greater_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = (A[i * cols + j] > B[j]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_greater_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    greater_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}_broadcast", name, arg1, arg2, rows, cols)
+
+
+    # ================================================================
+    # Less broadcast
+    # ================================================================
+    def less_broadcast(self, op_type, name, arg1, arg2, shape1, shape2, output_shape, cuda_debug_code):
+        if shape1 == shape2:
+            # Element-wise less
+            size = int(np.prod([int(dim) for dim in output_shape]))
+            kernel = f"""
+__global__ void less_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = (A[idx] < B[idx]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_less_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    less_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}", name, arg1, arg2, size)
+        else:
+            # Broadcasting less
+            rows, cols = output_shape
+            kernel = f"""
+__global__ void less_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = (A[i * cols + j] < B[j]) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_less_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    less_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}_broadcast", name, arg1, arg2, rows, cols)
+
+
+    # ================================================================
+    # equal
+    # ================================================================
+    def equal(self, op_type, name, arg1, arg2, shape1, shape2, output_shape, cuda_debug_code):
+
+        if shape1 == shape2:
+            # Element-wise equal
+            size = int(np.prod([int(dim) for dim in output_shape]))
+            kernel = f"""
+__global__ void equal_kernel_{name}(float* A, float* B, float* C, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        C[idx] = (fabsf(A[idx] - B[idx]) < 1e-6f) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_equal_{name}(float* A, float* B, float* C, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    equal_kernel_{name}<<<grid, block>>>(A, B, C, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}", name, arg1, arg2, size)
+        else:
+            # Broadcasting equal
+            rows, cols = output_shape
+            kernel = f"""
+__global__ void equal_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {{
+        C[i * cols + j] = (fabsf(A[i * cols + j] - B[j]) < 1e-6f) ? 1.0f : 0.0f;
+    }}
+}}
+extern "C" void launch_equal_{name}(float* A, float* B, float* C, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    equal_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}", name, arg1, arg2, rows, cols)
+
+
+    # ================================================================
+    # sum
+    # ================================================================
+    def sum(self, op_type, name, tensor_name, axis, input_shape, cuda_debug_code):
+        if axis is None:
+            #print("DEBUG: Taking sum_full path")
+            # Full reduction to scalar
+            size = int(np.prod([int(dim) for dim in input_shape]))
+            kernel = f"""
+__global__ void sum_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : 0.0f;
+    __syncthreads();
+    
+    // Reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result for this block to global memory
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_sum_{name}(float* input, float* output, int size) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    sum_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('sum_full', name, tensor_name, None, size))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_full", name, tensor_name, None, size)
+
+        else:
+            # Reduction along specific axis
+            #print(f"DEBUG: Taking axis-specific path, axis={axis}")
+            if len(input_shape) == 2 and axis == 1:
+                #print("DEBUG: Using sum_axis kernel (axis=1)")
+                # Sum along columns (each row sums to one value)
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void sum_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            sum += input[row * cols + col];
+        }}
+        output[row] = sum;
+    }}
+}}
+extern "C" void launch_sum_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    sum_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('sum_axis', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+
+            elif len(input_shape) == 2 and axis == 0:
+                # Sum along rows (each column sums to one value)
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void sum_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            sum += input[row * cols + col];
+        }}
+        output[col] = sum;
+    }}
+}}
+extern "C" void launch_sum_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    sum_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('sum_axis0', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
+
+
+    # ================================================================
+    # mean
+    # ================================================================
+    def mean(self, op_type, name, tensor_name, axis, input_shape, cuda_debug_code):
+
+        if axis is None:
+            # Full mean to scalar
+            size = int(np.prod([int(dim) for dim in input_shape]))
+            kernel = f"""
+__global__ void mean_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : 0.0f;
+    __syncthreads();
+    
+    // Reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result for this block to global memory
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_mean_{name}(float* input, float* output, int size) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    mean_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+
+    // Divide by size to get mean
+    float mean_val;
+    cudaMemcpy(&mean_val, output, sizeof(float), cudaMemcpyDeviceToHost);
+    mean_val /= size;
+    cudaMemcpy(output, &mean_val, sizeof(float), cudaMemcpyHostToDevice);
+}}
+"""
+            # kernels.append(('mean_full', name, tensor_name, None, size))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_full", name, tensor_name, None, size)
+        else:
+            # Mean along specific axis
+            if len(input_shape) == 2 and axis == 1:
+                # Mean along columns
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void mean_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            sum += input[row * cols + col];
+        }}
+        output[row] = sum / cols;
+    }}
+}}
+extern "C" void launch_mean_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    mean_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('mean_axis', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+
+            elif len(input_shape) == 2 and axis == 0:
+                # Mean along rows
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void mean_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            sum += input[row * cols + col];
+        }}
+        output[col] = sum / rows;
+    }}
+}}
+extern "C" void launch_mean_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    mean_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
+
+
+    # ================================================================
+    # slice
+    # ================================================================
+    def slice(self, op_type, name, tensor_name, slice_specs, input_shape, output_shape, cuda_debug_code):
+
+        # For now, implement common 2D slicing cases
+        if len(input_shape) == 2 and len(slice_specs) <= 2:
+            rows, cols = int(input_shape[0]), int(input_shape[1])
+            
+            # Parse slice specifications
+            row_spec = slice_specs[0] if len(slice_specs) > 0 else {'type': 'full_slice'}
+            col_spec = slice_specs[1] if len(slice_specs) > 1 else {'type': 'full_slice'}
+            
+            # Calculate slice bounds
+            if row_spec['type'] == 'slice':
+                row_start = row_spec.get('start', 0) or 0
+                row_end = row_spec.get('end', rows) or rows
+            elif row_spec['type'] == 'index':
+                row_start = row_spec['value']
+                row_end = row_spec['value'] + 1
+            else:  # full_slice
+                row_start, row_end = 0, rows
+                
+            if col_spec['type'] == 'slice':
+                col_start = col_spec.get('start', 0) or 0
+                col_end = col_spec.get('end', cols) or cols
+            elif col_spec['type'] == 'index':
+                col_start = col_spec['value']
+                col_end = col_spec['value'] + 1
+            else:  # full_slice
+                col_start, col_end = 0, cols
+            
+            # Bounds checking
+            row_start = max(0, min(row_start, rows))
+            row_end = max(row_start, min(row_end, rows))
+            col_start = max(0, min(col_start, cols))
+            col_end = max(col_start, min(col_end, cols))
+            
+            out_rows = row_end - row_start
+            out_cols = col_end - col_start
+            
+            kernel = f"""
+__global__ void slice_kernel_{name}(float* input, float* output, 
+                                int in_rows, int in_cols,
+                                int row_start, int row_end,
+                                int col_start, int col_end,
+                                int out_rows, int out_cols) {{
+    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_row < out_rows && out_col < out_cols) {{
+        int in_row = row_start + out_row;
+        int in_col = col_start + out_col;
+        
+        int in_idx = in_row * in_cols + in_col;
+        int out_idx = out_row * out_cols + out_col;
+        
+        output[out_idx] = input[in_idx];
+    }}
+}}
+extern "C" void launch_slice_{name}(float* input, float* output,
+                                int in_rows, int in_cols,
+                                int row_start, int row_end,
+                                int col_start, int col_end,
+                                int out_rows, int out_cols) {{
+    dim3 block(16, 16);
+    dim3 grid((out_cols + block.x - 1) / block.x, (out_rows + block.y - 1) / block.y);
+    slice_kernel_{name}<<<grid, block>>>(input, output, in_rows, in_cols,
+                                        row_start, row_end, col_start, col_end,
+                                        out_rows, out_cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('slice_2d', name, tensor_name, None, rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols))
+            # cuda_code += kernel
+
+            return kernel, (f"{op_type}_2d", name, tensor_name, None, rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols)
+        
+        elif len(input_shape) == 1 and len(slice_specs) == 1:
+            # 1D slicing
+            size = int(input_shape[0])
+            spec = slice_specs[0]
+            
+            if spec['type'] == 'slice':
+                start = spec.get('start', 0) or 0
+                end = spec.get('end', size) or size
+            elif spec['type'] == 'index':
+                start = spec['value']
+                end = spec['value'] + 1
+            else:  # full_slice
+                start, end = 0, size
+                
+            start = max(0, min(start, size))
+            end = max(start, min(end, size))
+            out_size = end - start
+            
+            kernel = f"""
+__global__ void slice_1d_kernel_{name}(float* input, float* output, int start, int size) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {{
+        output[idx] = input[start + idx];
+    }}
+}}
+extern "C" void launch_slice_{name}(float* input, float* output, int start, int size) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    slice_1d_kernel_{name}<<<grid, block>>>(input, output, start, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('slice_1d', name, tensor_name, None, start, out_size))
+            # cuda_code += kernel
+
+            return kernel, (f"{op_type}_1d", name, tensor_name, None, start, out_size)
+
+
+    # ================================================================
+    # max
+    # ================================================================
+    def max(self, op_type, name, tensor_name, axis, input_shape, cuda_debug_code):
+        if axis is None:
+            # Full reduction to scalar
+            size = int(np.prod([int(dim) for dim in input_shape]))
+            kernel = f"""
+__global__ void max_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : -FLT_MAX;
+    __syncthreads();
+    
+    // Reduction in shared memory using max
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        }}
+        __syncthreads();
+    }}
+    
+    // Use atomicMax for the final reduction (requires int conversion)
+    if (tid == 0) {{
+        float* addr = output;
+        int* int_addr = (int*)addr;
+        int old_val, new_val;
+        do {{
+            old_val = *int_addr;
+            new_val = __float_as_int(fmaxf(__int_as_float(old_val), sdata[0]));
+        }} while (atomicCAS(int_addr, old_val, new_val) != old_val);
+    }}
+}}
+extern "C" void launch_max_{name}(float* input, float* output, int size) {{
+    // Initialize output to -FLT_MAX
+    float neg_max = -FLT_MAX;
+    cudaMemcpy(output, &neg_max, sizeof(float), cudaMemcpyHostToDevice);
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    max_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('max_full', name, tensor_name, None, size))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_full", name, tensor_name, None, size)
+        else:
+            # Reduction along specific axis
+            if len(input_shape) == 2 and axis == 1:
+                # Max along columns (each row max to one value)
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void max_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float max_val = input[row * cols];
+        for (int col = 1; col < cols; col++) {{
+            max_val = fmaxf(max_val, input[row * cols + col]);
+        }}
+        output[row] = max_val;
+    }}
+}}
+extern "C" void launch_max_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    max_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                # kernels.append(('max_axis', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+
+            elif len(input_shape) == 2 and axis == 0:
+                # Max along rows (each column max to one value)
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void max_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float max_val = input[col];
+        for (int row = 1; row < rows; row++) {{
+            max_val = fmaxf(max_val, input[row * cols + col]);
+        }}
+        output[col] = max_val;
+    }}
+}}
+extern "C" void launch_max_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    max_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+}}
+"""
+                # kernels.append(('max_axis0', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
+
+
+
+    # ================================================================
+    # min
+    # ================================================================
+    def min(self, op_type, name, tensor_name, axis, input_shape, cuda_debug_code):
+
+        if axis is None:
+            # Full reduction to scalar
+            size = int(np.prod([int(dim) for dim in input_shape]))
+            kernel = f"""
+__global__ void min_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data into shared memory
+    sdata[tid] = (i < size) ? input[i] : FLT_MAX;
+    __syncthreads();
+    
+    // Reduction in shared memory using min
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] = fminf(sdata[tid], sdata[tid + s]);
+        }}
+        __syncthreads();
+    }}
+    
+    // Use atomicMin-like operation for final reduction
+    if (tid == 0) {{
+        float* addr = output;
+        int* int_addr = (int*)addr;
+        int old_val, new_val;
+        do {{
+            old_val = *int_addr;
+            new_val = __float_as_int(fminf(__int_as_float(old_val), sdata[0]));
+        }} while (atomicCAS(int_addr, old_val, new_val) != old_val);
+    }}
+}}
+extern "C" void launch_min_{name}(float* input, float* output, int size) {{
+    // Initialize output to FLT_MAX
+    float pos_max = FLT_MAX;
+    cudaMemcpy(output, &pos_max, sizeof(float), cudaMemcpyHostToDevice);
+    
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    min_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('min_full', name, tensor_name, None, size))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_full", name, tensor_name, None, size)
+
+        else:
+            # Similar axis-specific implementations as max...
+            if len(input_shape) == 2 and axis == 1:
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void min_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float min_val = input[row * cols];
+        for (int col = 1; col < cols; col++) {{
+            min_val = fminf(min_val, input[row * cols + col]);
+        }}
+        output[row] = min_val;
+    }}
+}}
+extern "C" void launch_min_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    min_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('min_axis', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+                
+            elif len(input_shape) == 2 and axis == 0:
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void min_axis0_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float min_val = input[col];
+        for (int row = 1; row < rows; row++) {{
+            min_val = fminf(min_val, input[row * cols + col]);
+        }}
+        output[col] = min_val;
+    }}
+}}
+extern "C" void launch_min_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    min_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('min_axis0', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
+
+
+    # ================================================================
+    # argmax
+    # ================================================================
+    def argmax(self, op_type, name, tensor_name, axis, input_shape, cuda_debug_code):
+
+        if axis is None:
+            # Full argmax to scalar index
+            size = int(np.prod([int(dim) for dim in input_shape]))
+            kernel = f"""
+__global__ void argmax_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    extern __shared__ int indices[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Load data and indices into shared memory
+    if (i < size) {{
+        sdata[tid] = input[i];
+        indices[tid] = i;
+    }} else {{
+        sdata[tid] = -FLT_MAX;
+        indices[tid] = -1;
+    }}
+    __syncthreads();
+    
+    // Reduction in shared memory - keep track of both value and index
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            if (sdata[tid + s] > sdata[tid]) {{
+                sdata[tid] = sdata[tid + s];
+                indices[tid] = indices[tid + s];
+            }}
+        }}
+        __syncthreads();
+    }}
+    
+    // Write index result for this block
+    if (tid == 0) {{
+        atomicMax((int*)output, indices[0]);  // This is a simplification
+        // In practice, need proper atomic argmax operation
+        output[0] = (float)indices[0];
+    }}
+}}
+extern "C" void launch_argmax_{name}(float* input, float* output, int size) {{
+    dim3 block(256);
+    dim3 grid(1);  // Single block for simplicity in full reduction
+    int shared_size = block.x * (sizeof(float) + sizeof(int));
+    argmax_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('argmax_full', name, tensor_name, None, size))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_axis", name, tensor_name, None, size)
+
+
+        else:
+            # Axis-specific argmax (simplified for 2D case)
+            if len(input_shape) == 2 and axis == 1:
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void argmax_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float max_val = input[row * cols];
+        int max_idx = 0;
+        for (int col = 1; col < cols; col++) {{
+            if (input[row * cols + col] > max_val) {{
+                max_val = input[row * cols + col];
+                max_idx = col;
+            }}
+        }}
+        output[row] = (float)max_idx;
+    }}
+}}
+extern "C" void launch_argmax_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    argmax_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('argmax_axis', name, tensor_name, None, rows, cols, axis))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+
+
+
+    # ================================================================
+    # argmin
+    # ================================================================
+    def argmin(self, op_type, name, tensor_name, axis, input_shape, cuda_debug_code):
+
+        if len(input_shape) == 2 and axis == 1:
+            rows, cols = int(input_shape[0]), int(input_shape[1])
+            kernel = f"""
+__global__ void argmin_axis_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {{
+        float min_val = input[row * cols];
+        int min_idx = 0;
+        for (int col = 1; col < cols; col++) {{
+            if (input[row * cols + col] < min_val) {{
+                min_val = input[row * cols + col];
+                min_idx = col;
+            }}
+        }}
+        output[row] = (float)min_idx;
+    }}
+}}
+extern "C" void launch_argmin_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    argmin_axis_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('argmin_axis', name, tensor_name, None, rows, cols, axis))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+
+
+    # ================================================================
+    # linear
+    # ================================================================
+    def linear(self, op_type, name, input_name, weight_name, bias_name, input_shape, weight_shape, output_shape, cuda_debug_code):
+
+        if len(input_shape) == 1:
+            # 1D case: vector @ matrix + bias
+            in_features = int(input_shape[0])
+            out_features = int(output_shape[0])
+            
+            kernel = f"""
+__global__ void linear_1d_kernel_{name}(float* input, float* weight, float* bias, 
+                                        float* output, int in_features, int out_features) {{
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_idx < out_features) {{
+        float sum = 0.0f;
+        
+        // Compute dot product: input @ weight[:, out_idx]
+        for (int in_idx = 0; in_idx < in_features; in_idx++) {{
+            sum += input[in_idx] * weight[in_idx * out_features + out_idx];
+        }}
+        
+        // Add bias
+        output[out_idx] = sum + bias[out_idx];
+    }}
+}}
+extern "C" void launch_linear_{name}(float* input, float* weight, float* bias,
+                                    float* output, int in_features, int out_features) {{
+    dim3 block(256);
+    dim3 grid((out_features + block.x - 1) / block.x);
+    linear_1d_kernel_{name}<<<grid, block>>>(input, weight, bias, output, 
+                                            in_features, out_features);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('linear_1d', name, input_name, weight_name, bias_name, in_features, out_features))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_1d", name, input_name, weight_name, bias_name, in_features, out_features)
+
+        elif len(input_shape) == 2:
+            # 2D case: batch_matrix @ matrix + bias (broadcasted)
+            batch_size, in_features = int(input_shape[0]), int(input_shape[1])
+            out_features = int(output_shape[1])
+            
+            kernel = f"""
+__global__ void linear_2d_kernel_{name}(float* input, float* weight, float* bias,
+                                        float* output, int batch_size, 
+                                        int in_features, int out_features) {{
+    int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (batch_idx < batch_size && out_idx < out_features) {{
+        float sum = 0.0f;
+        
+        // Compute dot product for this batch item and output feature
+        for (int in_idx = 0; in_idx < in_features; in_idx++) {{
+            sum += input[batch_idx * in_features + in_idx] * 
+                weight[in_idx * out_features + out_idx];
+        }}
+        
+        // Add bias and store result
+        output[batch_idx * out_features + out_idx] = sum + bias[out_idx];
+    }}
+}}
+extern "C" void launch_linear_{name}(float* input, float* weight, float* bias,
+                                    float* output, int batch_size,
+                                    int in_features, int out_features) {{
+    dim3 block(16, 16);
+    dim3 grid((out_features + block.x - 1) / block.x, 
+            (batch_size + block.y - 1) / block.y);
+    linear_2d_kernel_{name}<<<grid, block>>>(input, weight, bias, output,
+                                            batch_size, in_features, out_features);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('linear_2d', name, input_name, weight_name, bias_name, batch_size, in_features, out_features))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_2d", name, input_name, weight_name, bias_name, batch_size, in_features, out_features)
+
+
+    # ================================================================
+    # layer_norm
+    # ================================================================
+    def layer_norm(self, op_type, name, tensor_name, axis, eps, input_shape, cuda_debug_code):
+
+        # Default to last axis
+        if axis is None:
+            axis = len(input_shape) - 1
+        
+        #print(f"DEBUG CUDA: layer_norm axis={axis}, input_shape={input_shape}")
+
+        if len(input_shape) == 2:
+            # 2D Layer norm - most common case
+            if axis == 1:
+                #print("DEBUG: Using row-wise normalization kernel")
+                # Normalize along features (each row independently)
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void layer_norm_kernel_{name}(float* input, float* output, 
+                                        int rows, int cols, float eps) {{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (row < rows) {{
+        // Compute mean for this row
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            sum += input[row * cols + col];
+        }}
+        float mean = sum / cols;
+        
+        // Compute variance for this row
+        float var_sum = 0.0f;
+        for (int col = 0; col < cols; col++) {{
+            float diff = input[row * cols + col] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / cols;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize this row
+        for (int col = 0; col < cols; col++) {{
+            float normalized = (input[row * cols + col] - mean) / std_dev;
+            output[row * cols + col] = normalized;
+        }}
+    }}
+}}
+extern "C" void launch_layer_norm_{name}(float* input, float* output,
+                                        int rows, int cols, float eps) {{
+    dim3 block(256);
+    dim3 grid((rows + block.x - 1) / block.x);
+    layer_norm_kernel_{name}<<<grid, block>>>(input, output, rows, cols, eps);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('layer_norm_2d', name, tensor_name, None, rows, cols, eps))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_2d", name, tensor_name, None, rows, cols, eps)
+
+            elif axis == 0:
+                print("DEBUG: Using column-wise normalization kernel")
+                # Normalize along batch dimension (each column independently)
+                rows, cols = int(input_shape[0]), int(input_shape[1])
+                kernel = f"""
+__global__ void layer_norm_axis0_kernel_{name}(float* input, float* output,
+                                            int rows, int cols, float eps) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (col < cols) {{
+        // Compute mean for this column
+        float sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            sum += input[row * cols + col];
+        }}
+        float mean = sum / rows;
+        
+        // Compute variance for this column
+        float var_sum = 0.0f;
+        for (int row = 0; row < rows; row++) {{
+            float diff = input[row * cols + col] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / rows;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize this column
+        for (int row = 0; row < rows; row++) {{
+            float normalized = (input[row * cols + col] - mean) / std_dev;
+            output[row * cols + col] = normalized;
+        }}
+    }}
+}}
+extern "C" void launch_layer_norm_{name}(float* input, float* output,
+                                        int rows, int cols, float eps) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    layer_norm_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols, eps);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                # kernels.append(('layer_norm_axis0', name, tensor_name, None, rows, cols, eps))
+                # cuda_code += kernel
+                return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, eps)
+
+        elif len(input_shape) == 1:
+            # 1D Layer norm
+            size = int(input_shape[0])
+            kernel = f"""
+__global__ void layer_norm_1d_kernel_{name}(float* input, float* output,
+                                            int size, float eps) {{
+    // Single block implementation for 1D case
+    if (threadIdx.x == 0 && blockIdx.x == 0) {{
+        // Compute mean
+        float sum = 0.0f;
+        for (int i = 0; i < size; i++) {{
+            sum += input[i];
+        }}
+        float mean = sum / size;
+        
+        // Compute variance
+        float var_sum = 0.0f;
+        for (int i = 0; i < size; i++) {{
+            float diff = input[i] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / size;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize
+        for (int i = 0; i < size; i++) {{
+            output[i] = (input[i] - mean) / std_dev;
+        }}
+    }}
+}}
+extern "C" void launch_layer_norm_{name}(float* input, float* output,
+                                        int size, float eps) {{
+    dim3 block(1);
+    dim3 grid(1);
+    layer_norm_1d_kernel_{name}<<<grid, block>>>(input, output, size, eps);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            # kernels.append(('layer_norm_1d', name, tensor_name, None, size, eps))
+            # cuda_code += kernel
+            return kernel, (f"{op_type}_1d", name, tensor_name, None, size, eps)
+
+
+    # ================================================================
+    # cross_entropy
+    # ================================================================
+    def cross_entropy(self, op_type, name, pred_name, pred_shape, target_shape, target_name, cuda_debug_code):
+
+        if len(pred_shape) == 2 and len(target_shape) == 1:
+            # Class indices format: (batch, classes) vs (batch,)
+            batch_size, num_classes = int(pred_shape[0]), int(pred_shape[1])
+
+            kernel = f"""
+__global__ void cross_entropy_kernel_{name}(float* predictions, float* targets,
+                                        float* output, int batch_size, int num_classes) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Each thread computes loss for one sample
+    float loss = 0.0f;
+    if (batch_idx < batch_size) {{
+        int target_class = (int)targets[batch_idx];
+        
+        // Clamp target class to valid range
+        target_class = max(0, min(target_class, num_classes - 1));
+        
+        // Get predicted probability for true class
+        float pred_prob = predictions[batch_idx * num_classes + target_class];
+        
+        // Clamp probability to prevent log(0)
+        pred_prob = fmaxf(pred_prob, 1e-7f);
+        pred_prob = fminf(pred_prob, 1.0f - 1e-7f);
+        
+        // Compute negative log likelihood
+        loss = -logf(pred_prob);
+    }}
+    
+    // Load into shared memory for reduction
+    sdata[tid] = (batch_idx < batch_size) ? loss : 0.0f;
+    __syncthreads();
+    
+    // Reduce to compute mean loss
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_cross_entropy_{name}(float* predictions, float* targets,
+                                        float* output, int batch_size, int num_classes) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((batch_size + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    cross_entropy_kernel_{name}<<<grid, block, shared_size>>>(predictions, targets, output,
+                                                            batch_size, num_classes);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+    
+    // Divide by batch size to get mean
+    float mean_loss;
+    cudaMemcpy(&mean_loss, output, sizeof(float), cudaMemcpyDeviceToHost);
+    mean_loss /= batch_size;
+    cudaMemcpy(output, &mean_loss, sizeof(float), cudaMemcpyHostToDevice);
+}}
+"""
+            return kernel, (f"{op_type}", name, pred_name, target_name, batch_size, num_classes)
+
+
+    # ================================================================
+    # mse_loss
+    # ================================================================
+    def mse_loss(self, op_type, name, pred_name, target_name, total_elements, cuda_debug_code):
+
+        kernel = f"""
+__global__ void mse_loss_kernel_{name}(float* predictions, float* targets,
+                                    float* output, int total_elements) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Compute squared error for this element
+    float squared_error = 0.0f;
+    if (idx < total_elements) {{
+        float diff = predictions[idx] - targets[idx];
+        squared_error = diff * diff;
+    }}
+    
+    // Load into shared memory for reduction
+    sdata[tid] = (idx < total_elements) ? squared_error : 0.0f;
+    __syncthreads();
+    
+    // Reduce to compute sum of squared errors
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] += sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+    
+    // Write result for this block
+    if (tid == 0) {{
+        atomicAdd(output, sdata[0]);
+    }}
+}}
+extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
+                                    float* output, int total_elements) {{
+    // Initialize output to zero
+    cudaMemset(output, 0, sizeof(float));
+    
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    int shared_size = block.x * sizeof(float);
+    mse_loss_kernel_{name}<<<grid, block, shared_size>>>(predictions, targets, output, total_elements);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+
+    // Divide by total elements to get mean
+    float mean_loss;
+    cudaMemcpy(&mean_loss, output, sizeof(float), cudaMemcpyDeviceToHost);
+    mean_loss /= total_elements;
+    cudaMemcpy(output, &mean_loss, sizeof(float), cudaMemcpyHostToDevice);
+}}
+"""
+        return kernel, (f"{op_type}", name, pred_name, target_name, total_elements)
+
+
+    # ================================================================
+    # Transpose, Reshape, Concat
+    # ================================================================
+    def transpose(self, op_type, name, input_shape, tensor_name, cuda_debug_code):
+        if len(input_shape) == 2:
+            # 2D transpose (matrix transpose)
+            rows, cols = int(input_shape[0]), int(input_shape[1])
+            
+            kernel = f"""
+__global__ void transpose_2d_kernel_{name}(float* input, float* output, int rows, int cols) {{
+    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
+    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (out_row < cols && out_col < rows) {{
+        // output[out_row, out_col] = input[out_col, out_row]
+        output[out_row * rows + out_col] = input[out_col * cols + out_row];
+    }}
+}}
+extern "C" void launch_transpose_{name}(float* input, float* output, int rows, int cols) {{
+    dim3 block(16, 16);
+    dim3 grid((rows + block.x - 1) / block.x, (cols + block.y - 1) / block.y);
+    transpose_2d_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}_2d", name, tensor_name, None, rows, cols)
+
+
+    # ================================================================
+    # batch_norm
+    # ================================================================
+    def batch_norm(self, op_type, name, input_shape, tensor_name, running_mean_name, eps, running_var_name, cuda_debug_code):
+
+        if len(input_shape) == 2:
+            # 2D batch norm: (N, C) format
+            batch_size, num_features = int(input_shape[0]), int(input_shape[1])
+            
+            kernel = f"""
+__global__ void batch_norm_2d_kernel_{name}(float* input, float* running_mean, float* running_var,
+                                            float* output, int batch_size, int num_features, float eps) {{
+    int feature_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (feature_idx < num_features && batch_idx < batch_size) {{
+        // Get running statistics for this feature
+        float mean = running_mean[feature_idx];
+        float var = running_var[feature_idx];
+        float std_dev = sqrtf(var + eps);
+        
+        // Normalize this element
+        int idx = batch_idx * num_features + feature_idx;
+        output[idx] = (input[idx] - mean) / std_dev;
+    }}
+}}
+extern "C" void launch_batch_norm_{name}(float* input, float* running_mean, float* running_var,
+                                        float* output, int batch_size, int num_features, float eps) {{
+    dim3 block(16, 16);
+    dim3 grid((num_features + block.x - 1) / block.x, (batch_size + block.y - 1) / block.y);
+    batch_norm_2d_kernel_{name}<<<grid, block>>>(input, running_mean, running_var, output,
+                                                batch_size, num_features, eps);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}_2d", name, tensor_name, running_mean_name, batch_size, num_features, eps, running_var_name)
+
+
+    # ================================================================
+    # instance_norm
+    # ================================================================
+    def instance_norm(self, op_type, name, tensor_name, input_shape, eps, cuda_debug_code):
+
+        if len(input_shape) == 2:
+            # 2D instance norm: normalize each sample independently
+            batch_size, num_features = int(input_shape[0]), int(input_shape[1])
+            
+            kernel = f"""
+__global__ void instance_norm_2d_kernel_{name}(float* input, float* output,
+                                            int batch_size, int num_features, float eps) {{
+    int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (batch_idx < batch_size) {{
+        // Compute mean for this sample
+        float sum = 0.0f;
+        for (int f = 0; f < num_features; f++) {{
+            sum += input[batch_idx * num_features + f];
+        }}
+        float mean = sum / num_features;
+        
+        // Compute variance for this sample
+        float var_sum = 0.0f;
+        for (int f = 0; f < num_features; f++) {{
+            float diff = input[batch_idx * num_features + f] - mean;
+            var_sum += diff * diff;
+        }}
+        float variance = var_sum / num_features;
+        float std_dev = sqrtf(variance + eps);
+        
+        // Normalize this sample
+        for (int f = 0; f < num_features; f++) {{
+            int idx = batch_idx * num_features + f;
+            output[idx] = (input[idx] - mean) / std_dev;
+        }}
+    }}
+}}
+extern "C" void launch_instance_norm_{name}(float* input, float* output,
+                                        int batch_size, int num_features, float eps) {{
+    dim3 block(256);
+    dim3 grid((batch_size + block.x - 1) / block.x);
+    instance_norm_2d_kernel_{name}<<<grid, block>>>(input, output, batch_size, num_features, eps);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+            return kernel, (f"{op_type}_2d", name, tensor_name, None, None, batch_size, num_features, eps)
+
+
+    # ================================================================
+    # Reshape
+    # ================================================================
+    def reshape(self, op_type, name, tensor_name, total_elements, cuda_debug_code):
+        kernel = f"""
+__global__ void reshape_kernel_{name}(float* input, float* output, int total_elements) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx < total_elements) {{
+        // Simple memory copy - reshape is just a view change
+        output[idx] = input[idx];
+    }}
+}}
+extern "C" void launch_reshape_{name}(float* input, float* output, int total_elements) {{
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    reshape_kernel_{name}<<<grid, block>>>(input, output, total_elements);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+
+        return kernel, (f"{op_type}", name, tensor_name, None, total_elements)
+
+
+    # ================================================================
+    # Concat
+    # ================================================================
+    def concat(self, op_type, name, tensor_names, axis, env, cuda_debug_code):
+        if len(tensor_names) == 2 and axis == 0:
+            # Simple 2-tensor concatenation along axis 0 (most common case)
+            tensor1, tensor2 = tensor_names
+            shape1 = env[tensor1]['shape']
+            shape2 = env[tensor2]['shape']
+            output_shape = env[name]['shape']
+            
+            if len(shape1) == 2:
+                rows1, cols = int(shape1[0]), int(shape1[1])
+                rows2 = int(shape2[0])
+                total_rows = int(output_shape[0])
+                
+                kernel = f"""
+__global__ void concat_axis0_kernel_{name}(float* input1, float* input2, float* output,
+                                        int rows1, int rows2, int cols) {{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (col < cols) {{
+        if (row < rows1) {{
+            // Copy from first tensor
+            output[row * cols + col] = input1[row * cols + col];
+        }} else if (row < rows1 + rows2) {{
+            // Copy from second tensor
+            int src_row = row - rows1;
+            output[row * cols + col] = input2[src_row * cols + col];
+        }}
+    }}
+}}
+extern "C" void launch_concat_{name}(float* input1, float* input2, float* output,
+                                    int rows1, int rows2, int cols) {{
+    dim3 block(16, 16);
+    int total_rows = rows1 + rows2;
+    dim3 grid((cols + block.x - 1) / block.x, (total_rows + block.y - 1) / block.y);
+    concat_axis0_kernel_{name}<<<grid, block>>>(input1, input2, output, rows1, rows2, cols);
+    cudaDeviceSynchronize();
+    {cuda_debug_code}
+}}
+"""
+                return kernel, (f"{op_type}_axis0", name, tensor1, tensor2, rows1, rows2, cols)
+
+
+    # ================================================================
+    # TEMPLATE
+    # ================================================================
+    # def template(self, op_type):
+    #     return kernel, (f"{op_type}", )
