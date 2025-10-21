@@ -1,7 +1,36 @@
-// TensorLang: 2-Layer Neural Network Forward Pass
-// Input batch of 4 samples with 3 features each
+// ============================================================================
+// TensorLang: Neural Net
+// ============================================================================
+// Description: Tests neural network operations
+//
+// Architecture Pattern:
+//   'out_bias' output
+//
+// Expected Output Variables:
+//   out_bias
+//
+// @EXPECTED
+// {
+//   "out_bias": [
+//     [
+//       -0.04,
+//       -0.12
+//     ],
+//     [
+//       0.293,
+//       0.343
+//     ],
+//     [
+//       0.49,
+//       0.12
+//     ],
+//     [
+//       0.024,
+//       0.083
+//     ]
+//   ]
+// }
 
-// Layer 1 weights (3 inputs × 5 hidden)
 let W1 : Tensor[f32, (3, 5)] = [
   [0.2, -0.1, 0.4, 0.0, 0.5],
   [-0.3, 0.8, -0.2, 0.1, -0.5],

@@ -1,5 +1,37 @@
-// tests/function_broadcast_add.tl
-// Tests broadcasting inside a function with row-wise addition
+// ============================================================================
+// TensorLang: Function Broadcast Add
+// ============================================================================
+// Description: Tests addition operations
+//
+// Architecture Pattern:
+//   'adjusted' output
+//
+// Expected Output Variables:
+//   adjusted
+//
+// @EXPECTED
+// {
+//   "adjusted": [
+//     [
+//       101,
+//       102,
+//       103,
+//       104
+//     ],
+//     [
+//       205,
+//       206,
+//       207,
+//       208
+//     ],
+//     [
+//       309,
+//       310,
+//       311,
+//       312
+//     ]
+//   ]
+// }
 
 fn add_bias_rows(data: Tensor[M, N], bias: Tensor[M, 1]) -> Tensor[M, N] {
     return add(data, bias)

@@ -1,4 +1,38 @@
-// Compare different activation patterns
+// ============================================================================
+// TensorLang: Activations
+// ============================================================================
+// Description: Tests various activation functions
+//
+// Architecture Pattern:
+//   'final_leaky' output
+//
+// Expected Output Variables:
+//   final_leaky
+//
+// @EXPECTED
+// {
+//   "final_leaky": [
+//     [
+//       0.2,
+//       0.1,
+//       1.0,
+//       2.0
+//     ],
+//     [
+//       0.05,
+//       0.0,
+//       0.5,
+//       1.5
+//     ],
+//     [
+//       0.15,
+//       0.5,
+//       1.0,
+//       2.5
+//     ]
+//   ]
+// }
+
 let logits : Tensor[f32, (3, 4)] = [
   [-2.0, -1.0, 1.0, 2.0],
   [-0.5, 0.0, 0.5, 1.5],

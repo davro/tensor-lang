@@ -1,6 +1,31 @@
-// Test layer norm in neural network pipeline
-// Demonstrates stabilizing effect of layer normalization in deep networks
-// Pattern: Linear -> LayerNorm -> Activation -> Linear
+// ============================================================================
+// TensorLang: Layer Norm Pipeline
+// ============================================================================
+// Description: Tests layer normalization
+//
+// Architecture Pattern:
+//   'activated' output
+//
+// Expected Output Variables:
+//   activated
+//
+// @EXPECTED
+// {
+//   "activated": [
+//     [
+//       0.0,
+//       1.7069664,
+//       0.0,
+//       0.0
+//     ],
+//     [
+//       0.0,
+//       1.4336468,
+//       0.0,
+//       0.43237007
+//     ]
+//   ]
+// }
 
 let input: Tensor[f32, (2, 3)] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 

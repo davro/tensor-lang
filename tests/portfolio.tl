@@ -1,4 +1,35 @@
-// Portfolio optimization simulation
+// ============================================================================
+// TensorLang: Portfolio
+// ============================================================================
+// Description: Tests portfolio computations
+//
+// Architecture Pattern:
+//   'risk_adjusted' output
+//
+// Expected Output Variables:
+//   risk_adjusted
+//
+// @EXPECTED
+// {
+//   "risk_adjusted": [
+//     [
+//       0.08791666
+//     ],
+//     [
+//       0.08090909
+//     ],
+//     [
+//       0.0825
+//     ],
+//     [
+//       0.09714287
+//     ],
+//     [
+//       0.07666666
+//     ]
+//   ]
+// }
+
 let returns : Tensor[f32, (5, 4)] = [
   [0.12, 0.08, 0.15, 0.06],
   [0.08, 0.10, 0.12, 0.05],

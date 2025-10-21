@@ -1,7 +1,21 @@
-// Test multi-layer perceptron (MLP) using linear layers
-// Build a simple 2-layer neural network: input -> hidden -> output
-// This demonstrates real neural network construction in TensorLang
-// expected results "final": [0.63297474, 0.3989121]
+// ============================================================================
+// TensorLang: Mlp Network
+// ============================================================================
+// Description: Tests multi-layer perceptron
+//
+// Architecture Pattern:
+//   'final' output
+//
+// Expected Output Variables:
+//   final
+//
+// @EXPECTED
+// {
+//   "final": [
+//     0.63297474,
+//     0.3989121
+//   ]
+// }
 
 let input: Tensor[f32, (3,)] = [1.0, 0.5, -0.5]
 

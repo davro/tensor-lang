@@ -1,6 +1,18 @@
-// Test complete training pipeline with loss computation
-// Demonstrates end-to-end supervised learning workflow
-// Input -> Network -> Loss -> Evaluation
+// ============================================================================
+// TensorLang: Training Pipeline
+// ============================================================================
+// Description: Tests operation pipeline
+//
+// Architecture Pattern:
+//   Loss value
+//
+// Expected Output Variables:
+//   loss
+//
+// @EXPECTED
+// {
+//   "loss": 1.0891168117523193
+// }
 
 let input: Tensor[f32, (2, 3)] = [[1.0, 0.5, -0.2], [-0.5, 1.2, 0.8]]
 let targets: Tensor[f32, (2,)] = [1.0, 0.0]  // True class labels

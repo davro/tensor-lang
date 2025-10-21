@@ -1,6 +1,24 @@
-// Test advanced tensor transformations in ML pipeline
-// Demonstrates practical usage: data preprocessing with reshape, transpose, and concat
-// Common pattern in computer vision and sequence processing
+// ============================================================================
+// TensorLang: Tensor Transforms
+// ============================================================================
+// Description: Tests tensor operations
+//
+// Architecture Pattern:
+//   'result' output
+//
+// Expected Output Variables:
+//   result
+//
+// @EXPECTED
+// {
+//   "result": [
+//     [
+//       13.3,
+//       11.150001,
+//       8.9
+//     ]
+//   ]
+// }
 
 let batch1: Tensor[f32, (2, 4)] = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]
 let batch2: Tensor[f32, (1, 4)] = [[9.0, 10.0, 11.0, 12.0]]

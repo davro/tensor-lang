@@ -1,4 +1,35 @@
-// Simple linear model: y = Wx + b
+// ============================================================================
+// TensorLang: Linear Regression
+// ============================================================================
+// Description: Tests linear transformation layer
+//
+// Architecture Pattern:
+//   Classification output
+//
+// Expected Output Variables:
+//   predictions
+//
+// @EXPECTED
+// {
+//   "predictions": [
+//     [
+//       2.1
+//     ],
+//     [
+//       2.9
+//     ],
+//     [
+//       3.7
+//     ],
+//     [
+//       4.5
+//     ],
+//     [
+//       5.3
+//     ]
+//   ]
+// }
+
 let X : Tensor[f32, (5, 2)] = [
   [1.0, 2.0], 
   [2.0, 3.0], 

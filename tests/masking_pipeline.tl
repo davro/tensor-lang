@@ -1,6 +1,23 @@
-// Test comparison for masking - common ML pattern
-// Create data, find values > 0, then multiply original data by mask
-// This simulates conditional processing based on sign
+// ============================================================================
+// TensorLang: Masking Pipeline
+// ============================================================================
+// Description: Tests operation pipeline
+//
+// Architecture Pattern:
+//   'filtered' output
+//
+// Expected Output Variables:
+//   filtered
+//
+// @EXPECTED
+// {
+//   "filtered": [
+//     0.0,
+//     2.0,
+//     0.0,
+//     4.0
+//   ]
+// }
 
 let data: Tensor[f32, (4,)] = [-1.0, 2.0, -3.0, 4.0]
 let zeros: Tensor[f32, (4,)] = [0.0, 0.0, 0.0, 0.0]

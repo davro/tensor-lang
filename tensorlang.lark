@@ -47,6 +47,10 @@ expr: tensor_literal
     | div_call
     | relu_call 
     | sigmoid_call
+
+    | gelu_call
+    | swish_call
+
     | tanh_call
     | softmax_call
     | sum_call
@@ -126,6 +130,9 @@ minus_call: "minus" "(" NAME "," NAME ")"
 mult_call: "mult" "(" NAME "," NAME ")"
 div_call: "div" "(" NAME "," NAME ")"
 relu_call: "relu" "(" NAME ")"
+
+gelu_call: "gelu" "(" NAME ")"
+swish_call: "swish" "(" NAME ")"
 
 
 ////////////////////////////////////////////////////////////////////////////////

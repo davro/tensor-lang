@@ -1,6 +1,27 @@
-// Test different normalization techniques on same data
-// Demonstrates the differences between layer norm, batch norm, and instance norm
-// Common in comparing normalization strategies for neural networks
+// ============================================================================
+// TensorLang: Normalization Comparison
+// ============================================================================
+// Description: Tests normalization techniques
+//
+// Architecture Pattern:
+//   Network output
+//
+// Expected Output Variables:
+//   batch_output
+//
+// @EXPECTED
+// {
+//   "batch_output": [
+//     [
+//       -1.4999679,
+//       -1.94996
+//     ],
+//     [
+//       1.699968,
+//       2.04996
+//     ]
+//   ]
+// }
 
 let input: Tensor[f32, (2, 4)] = [[1.0, 4.0, 7.0, 10.0], [2.0, 5.0, 8.0, 11.0]]
 

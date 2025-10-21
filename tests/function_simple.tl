@@ -1,3 +1,30 @@
+// ============================================================================
+// TensorLang: Function Simple
+// ============================================================================
+// Description: Tests custom function definition
+//
+// Architecture Pattern:
+//   'result' output
+//
+// Expected Output Variables:
+//   result
+//
+// @EXPECTED
+// {
+//   "result": [
+//     [
+//       1.5,
+//       2.5,
+//       3.5
+//     ],
+//     [
+//       4.5,
+//       5.5,
+//       6.5
+//     ]
+//   ]
+// }
+
 fn add_tensors(a: Tensor[M, N], b: Tensor[M, N]) -> Tensor[M, N] {
     return add(a, b)
 }

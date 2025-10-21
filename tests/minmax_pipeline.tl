@@ -1,5 +1,18 @@
-// Test min/max operations in a pipeline - common ML pattern
-// Apply softmax to logits, find max probability per row, then get overall max
+// ============================================================================
+// TensorLang: Minmax Pipeline
+// ============================================================================
+// Description: Tests maximum reduction
+//
+// Architecture Pattern:
+//   'overall_max' output
+//
+// Expected Output Variables:
+//   overall_max
+//
+// @EXPECTED
+// {
+//   "overall_max": 0.7100998759269714
+// }
 
 let logits: Tensor[f32, (3, 4)] = [[1.0, 3.0, 2.0, 1.5],
                                    [2.5, 1.0, 4.0, 2.0],

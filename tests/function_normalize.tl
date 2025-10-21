@@ -1,3 +1,29 @@
+// ============================================================================
+// TensorLang: Normalize a tensor
+// ============================================================================
+// Description: Tests Normalize a tensor (mean=0, std=1)
+//
+// Architecture Pattern:
+//   'normalized' output
+//
+// Expected Output Variables:
+//   normalized
+//
+// @EXPECTED
+// {
+//   "normalized": [
+//     [
+//       -1.5, -0.5, 0.5, 1.5
+//     ],
+//     [
+//       -1.5, -0.5, 0.5, 1.5
+//     ],
+//     [
+//       -1.5, -0.5, 0.5, 1.5
+//     ]
+//   ]
+// }
+
 // Normalize a tensor (mean=0, std=1)
 fn normalize(x: Tensor[M, N]) -> Tensor[M, N] {
     let x_mean = mean(x, axis=1)
@@ -12,3 +38,4 @@ let data: Tensor[f32, (3, 4)] = [
 ]
 let normalized = normalize(data)
 normalized
+

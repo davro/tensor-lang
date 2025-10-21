@@ -1,3 +1,28 @@
+// ============================================================================
+// TensorLang: Function Matmul
+// ============================================================================
+// Description: Tests custom function definition
+//
+// Architecture Pattern:
+//   'c' output
+//
+// Expected Output Variables:
+//   c
+//
+// @EXPECTED
+// {
+//   "c": [
+//     [
+//       4,
+//       5
+//     ],
+//     [
+//       10,
+//       11
+//     ]
+//   ]
+// }
+
 // Matrix multiplication function
 fn matmul_wrapper(a: Tensor[M, N], b: Tensor[N, P]) -> Tensor[M, P] {
     return matmul(a, b)

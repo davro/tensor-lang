@@ -1,7 +1,18 @@
-// Test cross entropy loss for classification
-// Predictions: softmax probabilities for 3 samples, 3 classes each
-// Targets: class indices [1, 0, 2]
-// Expected: -log(prob of correct class) averaged over batch
+// ============================================================================
+// TensorLang: Cross Entropy
+// ============================================================================
+// Description: Tests cross entropy loss computation
+//
+// Architecture Pattern:
+//   Loss value
+//
+// Expected Output Variables:
+//   loss
+//
+// @EXPECTED
+// {
+//   "loss": 0.4080584943294525
+// }
 
 let predictions: Tensor[f32, (3, 3)] = [[0.2, 0.7, 0.1],    // Sample 1: class 1 (0.7 prob)
                                         [0.6, 0.3, 0.1],    // Sample 2: class 0 (0.6 prob)

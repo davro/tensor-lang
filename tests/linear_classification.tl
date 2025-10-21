@@ -1,6 +1,21 @@
-// Test linear layer for classification - common ML pattern
-// Input features -> linear classifier -> softmax -> predicted class
-// expected results "predictions": [0.0, 1.0]
+// ============================================================================
+// TensorLang: Linear Classification
+// ============================================================================
+// Description: Tests linear transformation layer
+//
+// Architecture Pattern:
+//   Classification output
+//
+// Expected Output Variables:
+//   predictions
+//
+// @EXPECTED
+// {
+//   "predictions": [
+//     0.0,
+//     1.0
+//   ]
+// }
 
 let features: Tensor[f32, (2, 3)] = [[1.0, 0.5, -0.2],    // Sample 1
                                      [-0.5, 1.5, 0.8]]    // Sample 2

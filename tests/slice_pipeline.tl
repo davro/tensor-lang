@@ -1,6 +1,21 @@
-// Test slicing with other operations - common ML pattern
-// Extract subset of data, apply activation, then sum
-// Simulates processing a batch slice
+// ============================================================================
+// TensorLang: Slice Pipeline
+// ============================================================================
+// Description: Tests operation pipeline
+//
+// Architecture Pattern:
+//   'result' output
+//
+// Expected Output Variables:
+//   result
+//
+// @EXPECTED
+// {
+//   "result": [
+//     10.0,
+//     16.0
+//   ]
+// }
 
 let data: Tensor[f32, (4, 3)] = [[1.0, -2.0, 3.0],
                                  [4.0, -5.0, 6.0],

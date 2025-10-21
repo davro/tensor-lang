@@ -1,3 +1,35 @@
+// ============================================================================
+// TensorLang: Function Risk Adjusted
+// ============================================================================
+// Description: Tests custom function definition
+//
+// Architecture Pattern:
+//   'adjusted' output
+//
+// Expected Output Variables:
+//   adjusted
+//
+// @EXPECTED
+// {
+//   "adjusted": [
+//     [
+//       0.08791666666666667
+//     ],
+//     [
+//       0.08090909090909092
+//     ],
+//     [
+//       0.0825
+//     ],
+//     [
+//       0.09714285714285714
+//     ],
+//     [
+//       0.07666666666666666
+//     ]
+//   ]
+// }
+
 // Portfolio returns function
 fn portfolio_returns(returns: Tensor[M, N], weights: Tensor[N, P]) -> Tensor[M, P] {
     return matmul(returns, weights)

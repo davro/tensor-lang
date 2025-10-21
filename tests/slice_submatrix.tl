@@ -1,6 +1,27 @@
-// Test 2D tensor submatrix slicing
-// Extract 2x2 submatrix from center of 4x4 matrix
-// matrix[1:3, 1:3] should return center 2x2 block
+// ============================================================================
+// TensorLang: Slice Submatrix
+// ============================================================================
+// Description: Tests tensor slicing
+//
+// Architecture Pattern:
+//   'result' output
+//
+// Expected Output Variables:
+//   result
+//
+// @EXPECTED
+// {
+//   "result": [
+//     [
+//       6.0,
+//       7.0
+//     ],
+//     [
+//       10.0,
+//       11.0
+//     ]
+//   ]
+// }
 
 let matrix: Tensor[f32, (4, 4)] = [[1.0, 2.0, 3.0, 4.0],
                                    [5.0, 6.0, 7.0, 8.0],

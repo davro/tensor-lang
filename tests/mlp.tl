@@ -1,4 +1,36 @@
-// 3-layer MLP for classification (simplified)
+// ============================================================================
+// TensorLang: Mlp
+// ============================================================================
+// Description: Tests multi-layer perceptron
+//
+// Architecture Pattern:
+//   Network output
+//
+// Expected Output Variables:
+//   output
+//
+// @EXPECTED
+// {
+//   "output": [
+//     [
+//       0.22000001,
+//       0.29
+//     ],
+//     [
+//       0.70000005,
+//       -0.05
+//     ],
+//     [
+//       0.26000002,
+//       0.32
+//     ],
+//     [
+//       0.4,
+//       0.29999998
+//     ]
+//   ]
+// }
+
 let X : Tensor[f32, (4, 3)] = [
   [1.0, 2.0, 1.0],
   [2.0, 1.0, 3.0],

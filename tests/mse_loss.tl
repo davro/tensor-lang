@@ -1,6 +1,18 @@
-// Test mean squared error loss for regression
-// Predictions vs targets: compute mean of squared differences
-// Expected: mean((pred - target)²)
+// ============================================================================
+// TensorLang: Mse Loss
+// ============================================================================
+// Description: Tests mean squared error loss
+//
+// Architecture Pattern:
+//   Loss value
+//
+// Expected Output Variables:
+//   loss
+//
+// @EXPECTED
+// {
+//   "loss": 0.09250001609325409
+// }
 
 let predictions: Tensor[f32, (4,)] = [1.0, 2.5, 3.2, 1.8]
 let targets: Tensor[f32, (4,)] = [1.2, 2.0, 3.0, 2.0]
