@@ -20,6 +20,9 @@ from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.type_checker import type_checker
 from tensorlang.ast_builder import build_ast
 
+from tensorlang.autograd import ComputationGraph, AutogradContext
+
+
 class TensorCompiler:
 
     def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False):
@@ -29,8 +32,28 @@ class TensorCompiler:
         self.debug_info   = debug_info
         self.debug_ast    = debug_ast
         self.cache_layers = cache_layers
-        self.tensorlang   = TensorLang()
+        # self.tensorlang   = TensorLang()
         
+        # NEW: Autograd support
+        self.comp_graph = ComputationGraph(debug_mode=debug_mode)
+        self.requires_grad_tensors = set()
+
+
+    def _should_track_gradients(self, tensor_name):
+        """Check if a tensor should have gradients tracked."""
+        return tensor_name in self.requires_grad_tensors
+
+    def _record_operation(self, op_type, name, inputs, metadata=None):
+        """Record operation in autograd graph if tracking is enabled."""
+        if not AutogradContext.is_enabled():
+            return
+        
+        if any(self._should_track_gradients(inp) for inp in inputs):
+            self.comp_graph.add_operation(op_type, name, inputs, metadata)
+            self.requires_grad_tensors.add(name)
+            
+            if self.debug_mode:
+                print(f"[Autograd] Recorded {op_type}: {inputs} -> {name}")
 
     def prod(self, lst):
         """Compute product of list elements."""
@@ -136,6 +159,13 @@ class TensorCompiler:
                 kernels = []
                 cuda_code = generator.cuda_header()
                 for node in ast:
+
+                    if node['type'] == 'let' and node.get('requires_grad', False):
+                        name = node['name']
+                        self.requires_grad_tensors.add(name)
+                        if self.debug_mode:
+                            print(f"[Autograd] Tensor '{name}' marked for gradient tracking")
+
                     if node['type'] == 'let' and isinstance(node['expr'], dict):
                         name = node['name']
                         expr = node['expr']
@@ -160,6 +190,8 @@ class TensorCompiler:
                             arg1, arg2     = expr['args']
                             shape1, shape2 = env[arg1]['shape'], env[arg2]['shape']
                             output_shape   = env[name]['shape']
+
+                            self._record_operation(expr['type'], name, [arg1, arg2])
 
                             self.tensorlang.print(message=f"Tensor {expr['type']}")
                             self.tensorlang.print(message=f"Tensor Shape1: {len(shape1)} Shape2: {len(shape2)}")
@@ -225,6 +257,9 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
+                            # NEW: Record in autograd graph
+                            self._record_operation('matmul', name, [arg1, arg2])
+
                         # ========================================
                         # ReLU | SIGMOID | TANH
                         # ========================================
@@ -241,6 +276,8 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
+                            self._record_operation(expr['type'], name, [arg1]) 
+
                         # ========================================
                         # SOFTMAX
                         # ========================================
@@ -254,6 +291,8 @@ class TensorCompiler:
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+
+                            self._record_operation(expr['type'], name, [arg1]) 
 
                         # ========================================
                         # GREATER
@@ -312,6 +351,9 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
+                            # NEW: Record with metadata
+                            self._record_operation('sum', name, [tensor_name], metadata={'axis': axis})
+
                         # ========================================
                         # MEAN
                         # ========================================
@@ -325,6 +367,8 @@ class TensorCompiler:
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+
+                            self._record_operation('mean', name, [tensor_name], metadata={'axis': axis})
 
                         # ========================================
                         # SLICE
@@ -592,10 +636,10 @@ class TensorCompiler:
                             if name in tensors:
                                 cuda.memcpy_htod(gpu_allocs[name], tensors[name])
                                 if self.debug_mode:
-                                    tensorlang.print(message=f"Copied {name} to GPU, shape: {tensors[name].shape}, sample: {tensors[name][:2] if tensors[name].ndim > 1 else tensors[name]}")
+                                    self.tensorlang.print(message=f"Copied {name} to GPU, shape: {tensors[name].shape}, sample: {tensors[name][:2] if tensors[name].ndim > 1 else tensors[name]}")
                             else:
                                 if self.debug_mode:
-                                    tensorlang.print(message=f"Allocated GPU memory for {name} (uninitialized), shape: {shape}")
+                                    self.tensorlang.print(message=f"Allocated GPU memory for {name} (uninitialized), shape: {shape}")
 
                         # Kernel execution
                         for kernel_info in kernels:
@@ -1046,9 +1090,67 @@ class TensorCompiler:
                                     cache_npy_path = cache_file_dir / f"{alias_name}.npy"
                                     # cache_npy_path = f"{tensorlang_file}/{alias_name}.npy"
                                     
+                                    if self.cache_layers:
+                                        if self.debug_mode:
+                                            print(f"CACHE LAYER NPY: {cache_npy_path}")
+                                        np.save(cache_npy_path, tensors[alias_name])
+
+                        # ==================================================
+                        # NEW: Cache tensor literals that weren't cached during kernel execution
+                        if self.cache_layers:
+                            for name in tensors:
+                                cache_npy_path = cache_file_dir / f"{name}.npy"
+                                if not cache_npy_path.exists():
+                                    np.save(cache_npy_path, tensors[name])
                                     if self.debug_mode:
-                                        print(f"CACHE LAYER NPY: {cache_npy_path}")
-                                    np.save(cache_npy_path, tensors[alias_name])
+                                        print(f"Cached tensor literal: {name}")
+
+                        # ==================================================
+                        # NEW: Register computed tensors in autograd graph
+                        for name in tensors:
+                            requires_grad = name in self.requires_grad_tensors
+                            self.comp_graph.register_tensor(name, tensors[name], requires_grad)
+                            
+                            if self.debug_mode and requires_grad:
+                                print(f"[Autograd] Registered '{name}' with gradient tracking")
+                        
+                        # ==================================================
+                        # NEW: Handle backward() statements
+                        for node in ast:
+                            if node['type'] == 'backward':
+                                loss_name = node['loss_tensor']
+                                
+                                print(f"\n{'='*80}")
+                                print(f"BACKWARD PASS from '{loss_name}'")
+                                print('='*80)
+                                
+                                try:
+                                    # Compute gradients
+                                    self.comp_graph.backward(loss_name)
+                                    
+                                    # Print and cache gradients
+                                    for grad_name in self.comp_graph.requires_grad:
+                                        if grad_name not in self.comp_graph.gradients:
+                                            continue
+                                        
+                                        grad_tensor = self.comp_graph.gradients[grad_name]
+                                        
+                                        # Print gradient
+                                        print(f"\nGradient {grad_name}.grad:\n{grad_tensor}")
+                                        
+                                        # Cache gradient if enabled
+                                        if self.cache_layers:
+                                            grad_cache_path = cache_file_dir / f"{grad_name}.grad.npy"
+                                            np.save(grad_cache_path, grad_tensor)
+                                    
+                                    print('='*80)
+                                    
+                                except Exception as e:
+                                    print(f"\n[Autograd] Error during backward pass: {e}")
+                                    # if self.debug_mode:
+                                    #     import traceback
+                                    #     traceback.print_exc()
+                        # ==================================================
 
                         # Free GPU memory
                         for name, alloc in gpu_allocs.items():

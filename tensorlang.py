@@ -5,7 +5,6 @@ from tensorlang.tensor_lang import TensorLang
 from tensorlang.compiler import TensorCompiler
 from tensorlang.test_runner import TestRunner
 
-
 def main():
     tensorlang = TensorLang()
     args = tensorlang.parse_arguments()

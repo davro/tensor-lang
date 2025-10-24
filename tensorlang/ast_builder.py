@@ -24,6 +24,12 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                         if DEBUG_MODE:
                             print(f"Registered function: {func_def['name']}")
                 
+                # Add this elif block after the function_def handling:
+                elif stmt.data == 'backward_statement':
+                    backward_node = build_backward_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if backward_node:
+                        ast.append(backward_node)
+
                 # Let binding
                 elif stmt.data == 'let_binding':
                     let_node = build_let_binding(stmt, DEBUG_MODE, DEBUG_INFO)
@@ -101,14 +107,64 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                         output_tensor = expr_node['name']
     
     # Default to last tensor if no explicit output
+    # if not output_tensor and ast:
+    #     output_tensor = ast[-1]['name']
+    # Default to last tensor if no explicit output
     if not output_tensor and ast:
-        output_tensor = ast[-1]['name']
+        # Find the last 'let' statement (skip backward statements)
+        for node in reversed(ast):
+            if node['type'] == 'let':
+                output_tensor = node['name']
+                break
+
     
     return ast, output_tensor, functions
 
 
+# def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+#     """Parse: let name: Type = expr"""
+#     if DEBUG_MODE:
+#         print(f"Building let_binding from {tree.data}")
+#     if tree.data != 'let_binding':
+#         if DEBUG_MODE:
+#             print(f"Invalid let_binding node: {tree.data}")
+#         return None
+    
+#     children = tree.children
+#     requires_grad = False
+
+#     # NEW: Check for 'with grad' marker
+#     for child in children:
+#         if isinstance(child, Tree) and child.data == 'grad_marker':
+#             requires_grad = True
+#             if DEBUG_MODE:
+#                 print(f"Found grad_marker - tensor will track gradients")
+
+#     if len(children) == 3:
+#         name = children[0].value
+#         if DEBUG_MODE:
+#             print(f"Processing let binding for {name}")
+#         if isinstance(children[1], Tree) and children[1].data == 'type':
+#             ty = build_type(children[1], DEBUG_MODE, DEBUG_INFO)
+#             expr = build_expression(children[2], DEBUG_MODE, DEBUG_INFO)
+#         else:
+#             ty = None
+#             expr = build_expression(children[2], DEBUG_MODE, DEBUG_INFO)
+#         return {
+#             'type': 'let', 
+#             'name': name, 
+#             'ty': ty, 
+#             'expr': expr, 
+#             'requires_grad': requires_grad,
+#             'tree': tree
+#         }
+#     else:
+#         if DEBUG_MODE:
+#             print(f"Unexpected number of children in let_binding: {len(children)}")
+#         return None
+
 def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
-    """Parse: let name: Type = expr"""
+    """Parse: let name: Type = expr [with grad]"""
     if DEBUG_MODE:
         print(f"Building let_binding from {tree.data}")
     if tree.data != 'let_binding':
@@ -117,21 +173,53 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optiona
         return None
     
     children = tree.children
-    if len(children) == 3:
-        name = children[0].value
-        if DEBUG_MODE:
-            print(f"Processing let binding for {name}")
-        if isinstance(children[1], Tree) and children[1].data == 'type':
-            ty = build_type(children[1], DEBUG_MODE, DEBUG_INFO)
-            expr = build_expression(children[2], DEBUG_MODE, DEBUG_INFO)
-        else:
-            ty = None
-            expr = build_expression(children[2], DEBUG_MODE, DEBUG_INFO)
-        return {'type': 'let', 'name': name, 'ty': ty, 'expr': expr, 'tree': tree}
-    else:
-        if DEBUG_MODE:
-            print(f"Unexpected number of children in let_binding: {len(children)}")
-        return None
+    requires_grad = False
+    
+    # Check for 'with grad' marker
+    for child in children:
+        if isinstance(child, Tree) and child.data == 'grad_marker':
+            requires_grad = True
+            if DEBUG_MODE:
+                print(f"Found grad_marker - tensor will track gradients")
+    
+    # Parse based on structure (name, [type], expr, [grad_marker])
+    name_idx = 0
+    type_idx = None
+    expr_idx = None
+    
+    name = children[name_idx].value
+    if DEBUG_MODE:
+        print(f"Processing let binding for {name}, requires_grad={requires_grad}")
+    
+    # Find type and expression indices
+    for i in range(1, len(children)):
+        child = children[i]
+        if isinstance(child, Tree):
+            if child.data in ['type', 'concrete_type', 'generic_type']:
+                type_idx = i
+            elif child.data == 'expr':
+                expr_idx = i
+            elif child.data == 'grad_marker':
+                pass  # Already handled
+    
+    # Build type if present
+    ty = None
+    if type_idx is not None:
+        ty = build_type(children[type_idx], DEBUG_MODE, DEBUG_INFO)
+    
+    # Build expression
+    expr = None
+    if expr_idx is not None:
+        expr = build_expression(children[expr_idx], DEBUG_MODE, DEBUG_INFO)
+    
+    return {
+        'type': 'let',
+        'name': name,
+        'ty': ty,
+        'expr': expr,
+        'requires_grad': requires_grad,
+        'tree': tree
+    }
 
 
 def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
@@ -580,3 +668,19 @@ def substitute_names(expr: Dict, param_map: Dict, name_mapping: Dict) -> Dict:
             new_expr['tensor'] = name_mapping[tensor_name]
     
     return new_expr
+
+
+def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+    """Parse: backward(loss_name)"""
+    if tree.data != 'backward_statement':
+        return None
+    
+    if len(tree.children) > 0:
+        loss_tensor = tree.children[0].value
+        if DEBUG_MODE:
+            print(f"Building backward statement for loss: {loss_tensor}")
+        return {
+            'type': 'backward',
+            'loss_tensor': loss_tensor
+        }
+    return None
