@@ -292,7 +292,9 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
-                            self._record_operation(expr['type'], name, [arg1]) 
+                            #self._record_operation(expr['type'], name, [arg1]) 
+                            self._record_operation('softmax', name, [tensor_name], metadata={'axis': axis})
+
 
                         # ========================================
                         # GREATER
