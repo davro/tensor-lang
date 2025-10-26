@@ -8,7 +8,7 @@ File: tensorlang/autograd.py
 import numpy as np
 from typing import Dict, List, Optional, Set, Tuple
 from collections import defaultdict
-
+from tensorlang.tensor_lang import TensorLang
 
 class ComputationNode:
     """Represents a single operation in the computation graph."""
@@ -37,6 +37,7 @@ class ComputationGraph:
         self.tensors: Dict[str, np.ndarray] = {}
         self.gradients: Dict[str, np.ndarray] = {}
         self.requires_grad: Set[str] = set()
+        self.tensorlang = TensorLang()
         self.debug_mode = debug_mode
         
     def register_tensor(self, name: str, value: np.ndarray, requires_grad: bool = False):
@@ -53,7 +54,7 @@ class ComputationGraph:
         self.nodes.append(node)
         
         if self.debug_mode:
-            print(f"[Autograd] Recorded: {node}")
+            self.tensorlang.print(message=f"[AUTOGRAD] Recorded: {node}")
             
     def zero_grad(self):
         """Reset all gradients to zero."""
@@ -78,18 +79,18 @@ class ComputationGraph:
     #     self.gradients[loss_name] = np.ones_like(self.tensors[loss_name])
         
     #     if self.debug_mode:
-    #         print(f"\n[Autograd] Starting backward pass from '{loss_name}'")
-    #         print(f"[Autograd] Graph has {len(self.nodes)} operations")
+    #         print(f"\n[AUTOGRAD] Starting backward pass from '{loss_name}'")
+    #         print(f"[AUTOGRAD] Graph has {len(self.nodes)} operations")
         
     #     # Traverse graph in reverse order
     #     for node in reversed(self.nodes):
     #         if self.debug_mode:
-    #             print(f"\n[Autograd] Processing: {node}")
+    #             print(f"\n[AUTOGRAD] Processing: {node}")
                 
     #         self._backward_node(node)
             
     #     if self.debug_mode:
-    #         print("\n[Autograd] Backward pass complete")
+    #         print("\n[AUTOGRAD] Backward pass complete")
     #         for name in self.requires_grad:
     #             if name in self.gradients:
     #                 grad_norm = np.linalg.norm(self.gradients[name])
@@ -119,11 +120,11 @@ class ComputationGraph:
         # Validate loss is scalar
         loss_shape = self.tensors[loss_name].shape
         if loss_shape not in [(), (1,)]:
-            print(f"Warning: Loss should be scalar, got shape {loss_shape}")
+            self.tensorlang.print(message=f"[AUTOGRAD] Warning: Loss should be scalar, got shape {loss_shape}")
         
         if self.debug_mode:
-            print(f"\n[Autograd] Starting backward pass from '{loss_name}'")
-            print(f"[Autograd] Graph has {len(self.nodes)} operations")
+            self.tensorlang.print(message=f"[AUTOGRAD] Starting backward pass from '{loss_name}'")
+            self.tensorlang.print(message=f"[AUTOGRAD] -> Graph has {len(self.nodes)} operations")
         
         # ================================================================
         # Step 2: Initialize ALL gradients to zero BEFORE backward pass
@@ -151,7 +152,7 @@ class ComputationGraph:
             if tensor_name in self.tensors:
                 self.gradients[tensor_name] = np.zeros_like(self.tensors[tensor_name])
                 if self.debug_mode:
-                    print(f"[Autograd] Initialized gradient for '{tensor_name}' to zero")
+                    self.tensorlang.print(message=f"[AUTOGRAD] Initialized gradient for '{tensor_name}' to zero")
         
         # ================================================================
         # Step 3: Set loss gradient to 1.0 (seed gradient)
@@ -159,19 +160,19 @@ class ComputationGraph:
         self.gradients[loss_name] = np.ones_like(self.tensors[loss_name])
         
         if self.debug_mode:
-            print(f"[Autograd] Set loss gradient to 1.0")
+            self.tensorlang.print(message=f"[AUTOGRAD] Set loss gradient to 1.0")
         
         # ================================================================
         # Step 4: Backward pass - traverse graph in REVERSE topological order
         # ================================================================
         for node in reversed(self.nodes):
             if self.debug_mode:
-                print(f"\n[Autograd] Processing: {node}")
+                self.tensorlang.print(message=f"[AUTOGRAD] Processing: {node}")
             
             # Skip if output doesn't have gradient yet (dead branch in graph)
             if node.output_name not in self.gradients:
                 if self.debug_mode:
-                    print(f"[Autograd] Skipping {node.output_name} - no gradient")
+                    self.tensorlang.print(message=f"[AUTOGRAD] -> Skipping {node.output_name} - no gradient")
                 continue
             
             output_grad = self.gradients[node.output_name]
@@ -179,7 +180,7 @@ class ComputationGraph:
             # Check if gradient is zero (optimization - can skip computation)
             if np.all(output_grad == 0):
                 if self.debug_mode:
-                    print(f"[Autograd] Skipping {node.output_name} - zero gradient")
+                    self.tensorlang.print(message=f"[AUTOGRAD] -> Skipping {node.output_name} - zero gradient")
                 continue
             
             # Compute gradients for this node
@@ -199,14 +200,14 @@ class ComputationGraph:
         #     if name not in self.requires_grad and name != loss_name:
         #         del self.gradients[name]
         #         if self.debug_mode:
-        #             print(f"[Autograd] Cleared intermediate gradient: {name}")
+        #             print(f"[AUTOGRAD] Cleared intermediate gradient: {name}")
         
         # ================================================================
         # Step 6: Debug output
         # ================================================================
         if self.debug_mode:
-            print("\n[Autograd] Backward pass complete")
-            print(f"[Autograd] Gradients computed for {len(self.gradients)} tensors")
+            self.tensorlang.print(message=f"[AUTOGRAD] Backward pass complete")
+            self.tensorlang.print(message=f"[AUTOGRAD] Gradients computed for {len(self.gradients)} tensors")
             
             # Print gradients for leaf tensors (requires_grad)
             for name in sorted(self.requires_grad):
@@ -215,15 +216,16 @@ class ComputationGraph:
                     grad_norm = np.linalg.norm(grad)
                     grad_mean = np.mean(np.abs(grad))
                     grad_max = np.max(np.abs(grad))
-                    print(f"  {name}.grad: shape={grad.shape}, "
-                        f"norm={grad_norm:.6f}, "
-                        f"mean_abs={grad_mean:.6f}, "
+                    self.tensorlang.print(message=f"[AUTOGRAD] -> (requires_grad) {name}.grad: \n"
+                        f"shape={grad.shape}, \n"
+                        f"norm={grad_norm:.6f}, \n"
+                        f"mean_abs={grad_mean:.6f}, \n"
                         f"max_abs={grad_max:.6f}")
             
             # Print any unexpected gradients (for debugging)
             unexpected_grads = set(self.gradients.keys()) - self.requires_grad - {loss_name}
             if unexpected_grads:
-                print(f"\n[Autograd] Intermediate gradients: {sorted(unexpected_grads)}")
+                self.tensorlang.print(message=f"[AUTOGRAD] Intermediate gradients: {sorted(unexpected_grads)}")
                     
     
     def _backward_node(self, node: ComputationNode):
@@ -306,7 +308,7 @@ class ComputationGraph:
             
         else:
             if self.debug_mode:
-                print(f"[Autograd] Warning: No backward implemented for {node.op_type}")
+                self.tensorlang.print(message=f"[AUTOGRAD] Warning: No backward implemented for {node.op_type}")
     
     # ================================================================
     # Backward Pass Implementations
@@ -344,6 +346,7 @@ class ComputationGraph:
                 
     #     return grad
     
+
     def _unbroadcast(self, grad: np.ndarray, target_shape: Tuple) -> np.ndarray:
         """
         Reverse broadcasting by summing over broadcast dimensions.
@@ -376,7 +379,7 @@ class ComputationGraph:
         """
         
         if self.debug_mode:
-            print(f"[Autograd] Unbroadcasting: {grad.shape} -> {target_shape}")
+            self.tensorlang.print(message=f"[AUTOGRAD] Unbroadcasting: {grad.shape} -> {target_shape}")
         
         # ================================================================
         # Step 0: Handle edge cases
@@ -407,13 +410,13 @@ class ComputationGraph:
         
         if ndim_diff > 0:
             if self.debug_mode:
-                print(f"[Autograd] Summing {ndim_diff} prepended dimensions")
+                self.tensorlang.print(message=f"[AUTOGRAD] Summing {ndim_diff} prepended dimensions")
             
             # Sum over leading dimensions (always axis 0, repeatedly)
             for _ in range(ndim_diff):
                 grad = grad.sum(axis=0)
                 if self.debug_mode:
-                    print(f"[Autograd]   After sum: {grad.shape}")
+                    self.tensorlang.print(message=f"[AUTOGRAD] -> After sum: {grad.shape}")
         
         elif ndim_diff < 0:
             # This should never happen in valid broadcasting
@@ -446,12 +449,12 @@ class ComputationGraph:
             if target_dim == 1 and grad_dim != 1:
                 # This dimension was broadcast from 1 to grad_dim
                 if self.debug_mode:
-                    print(f"[Autograd] Summing axis {i}: {grad_dim} -> 1")
+                    self.tensorlang.print(message=f"[AUTOGRAD] Summing axis {i}: {grad_dim} -> 1")
                 
                 grad = grad.sum(axis=i, keepdims=True)
                 
                 if self.debug_mode:
-                    print(f"[Autograd]   After sum: {grad.shape}")
+                    self.tensorlang.print(message=f"[AUTOGRAD] -> After sum: {grad.shape}")
             
             elif target_dim != grad_dim:
                 # Shapes don't match and it's not a broadcast from 1
@@ -480,9 +483,10 @@ class ComputationGraph:
         
         if self.debug_mode:
             grad_norm = np.linalg.norm(grad)
-            print(f"[Autograd] Unbroadcast complete: {grad.shape}, norm={grad_norm:.6f}")
+            self.tensorlang.print(message=f"[AUTOGRAD] -> Unbroadcast complete: {grad.shape}, norm={grad_norm:.6f}")
         
         return grad
+
 
     def _backward_add(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of addition: passes gradient to both inputs."""
@@ -490,18 +494,21 @@ class ComputationGraph:
         self._accumulate_grad(a, output_grad)
         self._accumulate_grad(b, output_grad)
     
+
     def _backward_minus(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of subtraction: +grad to first input, -grad to second."""
         a, b = node.inputs
         self._accumulate_grad(a, output_grad)
         self._accumulate_grad(b, -output_grad)
     
+
     def _backward_mult(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of multiplication: d(a*b)/da = b, d(a*b)/db = a."""
         a, b = node.inputs
         self._accumulate_grad(a, output_grad * self.tensors[b])
         self._accumulate_grad(b, output_grad * self.tensors[a])
     
+
     def _backward_div(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of division: d(a/b)/da = 1/b, d(a/b)/db = -a/b²."""
         a, b = node.inputs
@@ -509,6 +516,7 @@ class ComputationGraph:
         self._accumulate_grad(a, output_grad / b_val)
         self._accumulate_grad(b, -output_grad * self.tensors[a] / (b_val ** 2))
     
+
     def _backward_matmul(self, node: ComputationNode, output_grad: np.ndarray):
         """
         Gradient of matrix multiplication.
@@ -528,12 +536,14 @@ class ComputationGraph:
         grad_b = a_val.T @ output_grad
         self._accumulate_grad(b, grad_b)
     
+
     def _backward_relu(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of ReLU: 1 where input > 0, else 0."""
         inp = node.inputs[0]
         mask = (self.tensors[inp] > 0).astype(np.float32)
         self._accumulate_grad(inp, output_grad * mask)
     
+
     def _backward_sigmoid(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of sigmoid: σ(x) * (1 - σ(x))."""
         inp = node.inputs[0]
@@ -541,6 +551,7 @@ class ComputationGraph:
         grad = output_grad * sigmoid_out * (1 - sigmoid_out)
         self._accumulate_grad(inp, grad)
     
+
     def _backward_tanh(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of tanh: 1 - tanh²(x)."""
         inp = node.inputs[0]
@@ -548,6 +559,7 @@ class ComputationGraph:
         grad = output_grad * (1 - tanh_out ** 2)
         self._accumulate_grad(inp, grad)
     
+
     def _backward_softmax(self, node: ComputationNode, output_grad: np.ndarray):
         """
         Gradient of softmax (simplified for cross-entropy combination).
@@ -567,6 +579,7 @@ class ComputationGraph:
         
         self._accumulate_grad(inp, grad)
     
+
     def _backward_sum(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of sum: broadcast gradient back to input shape."""
         inp = node.inputs[0]
@@ -582,6 +595,7 @@ class ComputationGraph:
             
         self._accumulate_grad(inp, grad)
     
+
     def _backward_mean(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of mean: broadcast gradient / count back to input."""
         inp = node.inputs[0]
@@ -601,6 +615,7 @@ class ComputationGraph:
             
         self._accumulate_grad(inp, grad)
     
+
     def _backward_linear(self, node: ComputationNode, output_grad: np.ndarray):
         """
         Gradient of linear layer: y = x @ w + b
@@ -630,6 +645,7 @@ class ComputationGraph:
             grad_b = output_grad.sum(axis=0)
         self._accumulate_grad(bias, grad_b)
     
+
     def _backward_layer_norm(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of layer normalization (simplified)."""
         inp = node.inputs[0]
@@ -657,10 +673,12 @@ class ComputationGraph:
         
         self._accumulate_grad(inp, grad)
     
+
     def _backward_mse_loss(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of MSE loss: 2 * (pred - target) / n."""
         pred, target = node.inputs
         pred_val = self.tensors[pred]
+        # Target typically doesn't require gradients
         target_val = self.tensors[target]
         
         n = pred_val.size
@@ -668,7 +686,7 @@ class ComputationGraph:
         grad = 2 * (pred_val - target_val) / n * scalar_grad
         
         self._accumulate_grad(pred, grad)
-        # Target typically doesn't require gradients
+
     
     def _backward_cross_entropy(self, node: ComputationNode, output_grad: np.ndarray):
         """
@@ -718,55 +736,55 @@ class AutogradContext:
 
 
 
-def test_autograd():
-    """Simple test of autograd system."""
-    print("Testing Autograd System\n" + "="*50)
+# def test_autograd():
+#     """Simple test of autograd system."""
+#     print("Testing Autograd System\n" + "="*50)
     
-    # Create computation graph
-    graph = ComputationGraph(debug_mode=True)
+#     # Create computation graph
+#     graph = ComputationGraph(debug_mode=True)
     
-    # Simple example: y = x @ w, loss = sum(y)
-    x = np.array([[1.0, 2.0], [3.0, 4.0]])
-    w = np.array([[0.5, 0.5], [0.5, 0.5]])
+#     # Simple example: y = x @ w, loss = sum(y)
+#     x = np.array([[1.0, 2.0], [3.0, 4.0]])
+#     w = np.array([[0.5, 0.5], [0.5, 0.5]])
     
-    # Register input tensors
-    graph.register_tensor('x', x, requires_grad=False)
-    graph.register_tensor('w', w, requires_grad=True)
+#     # Register input tensors
+#     graph.register_tensor('x', x, requires_grad=False)
+#     graph.register_tensor('w', w, requires_grad=True)
     
-    # Forward pass: compute y = x @ w
-    y = x @ w
-    graph.register_tensor('y', y)
-    graph.add_operation('matmul', 'y', ['x', 'w'])
+#     # Forward pass: compute y = x @ w
+#     y = x @ w
+#     graph.register_tensor('y', y)
+#     graph.add_operation('matmul', 'y', ['x', 'w'])
     
-    # Forward pass: compute loss = sum(y)
-    loss = y.sum()
-    graph.register_tensor('loss', np.array([loss]))
-    graph.add_operation('sum', 'loss', ['y'], {'axis': None})
+#     # Forward pass: compute loss = sum(y)
+#     loss = y.sum()
+#     graph.register_tensor('loss', np.array([loss]))
+#     graph.add_operation('sum', 'loss', ['y'], {'axis': None})
     
-    # Backward pass
-    print("\n" + "="*50)
-    print("Starting backward pass...")
-    print("="*50)
-    graph.backward('loss')
+#     # Backward pass
+#     print("\n" + "="*50)
+#     print("Starting backward pass...")
+#     print("="*50)
+#     graph.backward('loss')
     
-    print(f"\nGradient of w:\n{graph.gradients['w']}")
-    print(f"\nExpected: [[4, 4], [6, 6]]")
+#     print(f"\nGradient of w:\n{graph.gradients['w']}")
+#     print(f"\nExpected: [[4, 4], [6, 6]]")
     
-    # Verify
-    expected = np.array([[4.0, 4.0], [6.0, 6.0]])
-    if np.allclose(graph.gradients['w'], expected):
-        print("\n✅ Test PASSED!")
-        return True
-    else:
-        print("\n❌ Test FAILED!")
-        print(f"Expected:\n{expected}")
-        print(f"Got:\n{graph.gradients['w']}")
+#     # Verify
+#     expected = np.array([[4.0, 4.0], [6.0, 6.0]])
+#     if np.allclose(graph.gradients['w'], expected):
+#         print("\n✅ Test PASSED!")
+#         return True
+#     else:
+#         print("\n❌ Test FAILED!")
+#         print(f"Expected:\n{expected}")
+#         print(f"Got:\n{graph.gradients['w']}")
         
-        # Debug info
-        print("\nDebug Info:")
-        print(f"y gradient: {graph.gradients.get('y', 'NOT SET')}")
-        print(f"loss gradient: {graph.gradients.get('loss', 'NOT SET')}")
-        return False
+#         # Debug info
+#         print("\nDebug Info:")
+#         print(f"y gradient: {graph.gradients.get('y', 'NOT SET')}")
+#         print(f"loss gradient: {graph.gradients.get('loss', 'NOT SET')}")
+#         return False
     
 
 # if __name__ == '__main__':

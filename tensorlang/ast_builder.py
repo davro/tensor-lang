@@ -3,6 +3,9 @@
 
 from lark import Tree, Token
 from typing import Dict, List, Optional, Tuple
+from tensorlang.tensor_lang import TensorLang
+
+tensorlang = TensorLang()
 
 def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Optional[str], Dict]:
     """Build AST from parse tree, handling function definitions and inlining"""
@@ -22,7 +25,7 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                     if func_def:
                         functions[func_def['name']] = func_def
                         if DEBUG_MODE:
-                            print(f"Registered function: {func_def['name']}")
+                            tensorlang.print(message=f"[AST] Registered function: {func_def['name']}")
                 
                 # Add this elif block after the function_def handling:
                 elif stmt.data == 'backward_statement':
@@ -36,7 +39,7 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                     if let_node:
                         if not let_node.get('expr'):
                             if DEBUG_MODE:
-                                print(f"Warning: let_node has no expr: {let_node}")
+                                tensorlang.print(message=f"[AST] Warning: let_node has no expr: {let_node}")
                             continue
                         
                         # Check if expression is a user function call
@@ -95,7 +98,7 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                                         'tree': None
                                     })
                             else:
-                                print(f"Error: Undefined function '{func_name}'")
+                                tensorlang.print(message=f"[AST] Error: Undefined function '{func_name}'")
                                 return None, None, None
                         else:
                             ast.append(let_node)
@@ -165,11 +168,12 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
 
 def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
     """Parse: let name: Type = expr [with grad]"""
+
     if DEBUG_MODE:
-        print(f"Building let_binding from {tree.data}")
+        tensorlang.print(message=f"[AST] Building let_binding from {tree.data}")
     if tree.data != 'let_binding':
         if DEBUG_MODE:
-            print(f"Invalid let_binding node: {tree.data}")
+            tensorlang.print(message=f"[AST] Invalid let_binding node: {tree.data}")
         return None
     
     children = tree.children
@@ -180,7 +184,7 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optiona
         if isinstance(child, Tree) and child.data == 'grad_marker':
             requires_grad = True
             if DEBUG_MODE:
-                print(f"Found grad_marker - tensor will track gradients")
+                tensorlang.print(message=f"[AST] Found grad_marker - tensor will track gradients")
     
     # Parse based on structure (name, [type], expr, [grad_marker])
     name_idx = 0
@@ -189,7 +193,7 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optiona
     
     name = children[name_idx].value
     if DEBUG_MODE:
-        print(f"Processing let binding for {name}, requires_grad={requires_grad}")
+        tensorlang.print(message=f"[AST] Processing let binding for {name}, requires_grad={requires_grad}")
     
     # Find type and expression indices
     for i in range(1, len(children)):
@@ -225,7 +229,7 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optiona
 def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     """Parse type annotation"""
     if DEBUG_MODE:
-        print(f"Building type from {tree.data}")
+        tensorlang.print(message=f"[AST] Building type from {tree.data}")
     
     if tree.data == 'concrete_type':
         children = tree.children
@@ -254,14 +258,14 @@ def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
 def build_shape(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple:
     """Parse shape specification"""
     if DEBUG_MODE:
-        print(f"Building shape from {tree.data}")
+        tensorlang.print(message=f"[AST] Building shape from {tree.data}")
     if tree.data != 'shape':
         if DEBUG_MODE:
-            print(f"Invalid shape node: {tree.data}")
+            tensorlang.print(message=f"[AST] Invalid shape node: {tree.data}")
         return (0, 0)
     nums = [int(float(child.value)) for child in tree.children if isinstance(child, Token) and child.type == 'NUMBER']
     if DEBUG_MODE:
-        print(f"Shape numbers: {nums}")
+        tensorlang.print(message=f"[AST] Shape numbers: {nums}")
     return tuple(nums)
 
 
@@ -272,7 +276,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     
     if isinstance(tree, Token) and tree.type == 'NAME':
         if DEBUG_MODE:
-            print(f"Expression: {tree.type}: {tree.value}")
+            tensorlang.print(message=f"[AST] Expression: {tree.type}: {tree.value}")
         return {'type': 'name', 'name': tree.value}
     
     elif tree.data == 'user_function_call':
@@ -298,13 +302,13 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     elif tree.data == 'cross_entropy_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         if DEBUG_INFO:
-            print(f"Expression {tree.data} args: {args}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
         return {'type': 'cross_entropy', 'args': args}
     
     elif tree.data == 'mse_loss_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         if DEBUG_INFO:
-            print(f"Expression {tree.data} args: {args}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
         return {'type': 'mse_loss', 'args': args}
     
     # Axis operations
@@ -318,7 +322,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             elif isinstance(child, Token) and child.type == 'NUMBER':
                 axis = int(float(child.value))
         if DEBUG_INFO:
-            print(f"Expression {tree.data} tensor={tensor_name}, axis={axis}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} tensor={tensor_name}, axis={axis}")
         return {'type': expr_name, 'tensor': tensor_name, 'axis': axis}
     
     # Concat
@@ -331,7 +335,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             elif isinstance(child, Token) and child.type == 'NUMBER':
                 axis = int(float(child.value))
         if DEBUG_MODE:
-            print(f"Expression: {tree.data} args: tensors={tensor_names}, axis={axis}")
+            tensorlang.print(message=f"[AST] Expression: {tree.data} args: tensors={tensor_names}, axis={axis}")
         return {'type': 'concat', 'tensors': tensor_names, 'axis': axis}
     
     # Tensor literal
@@ -346,7 +350,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             elif isinstance(child, Token) and child.type == 'NUMBER':
                 data.append(float(child.value))
         if DEBUG_MODE:
-            print(f"Tensor literal data: {data}, is_1d: {is_1d}")
+            tensorlang.print(message=f"[AST] Tensor literal data: {data}, is_1d: {is_1d}")
         return {'type': 'tensor_literal', 'data': data, 'is_1d': is_1d, 'tree': tree}
     
     # Fill
@@ -355,7 +359,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
         shape_tree = tree.children[1] if len(tree.children) > 1 and isinstance(tree.children[1], Tree) else None
         shape = build_shape(shape_tree, DEBUG_MODE, DEBUG_INFO) if shape_tree else (1,)
         if DEBUG_INFO:
-            print(f"{tree.data} value: {value}, shape: {shape}")
+            tensorlang.print(message=f"[AST] {tree.data} value: {value}, shape: {shape}")
         return {'type': 'fill', 'value': value, 'shape': shape}
     
     # Layer norm
@@ -373,7 +377,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
                 else:
                     axis = int(value)
         if DEBUG_INFO:
-            print(f"Expression {tree.data} args: tensor={tensor_name}, axis={axis}, eps={eps}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axis={axis}, eps={eps}")
         return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}
     
     # Slice
@@ -388,7 +392,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
                     spec = build_slice_spec(child, DEBUG_MODE, DEBUG_INFO)
                     slice_specs.append(spec)
         if DEBUG_INFO:
-            print(f"Expression {tree.data} args: tensor={tensor_name}, specs={slice_specs}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, specs={slice_specs}")
         return {'type': 'slice', 'tensor': tensor_name, 'specs': slice_specs}
     
     # Transpose
@@ -406,7 +410,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
                 if axis_values:
                     axes = tuple(axis_values)
         if DEBUG_INFO:
-            print(f"Expression {tree.data} args: tensor={tensor_name}, axes={axes}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axes={axes}")
         return {'type': 'transpose', 'tensor': tensor_name, 'axes': axes}
     
     # Reshape
@@ -419,7 +423,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             elif isinstance(child, Tree) and child.data == 'shape':
                 new_shape = build_shape(child, DEBUG_MODE, DEBUG_INFO)
         if DEBUG_INFO:
-            print(f"Expression {tree.data} args: tensor={tensor_name}, new_shape={new_shape}")
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, new_shape={new_shape}")
         return {'type': 'reshape', 'tensor': tensor_name, 'new_shape': new_shape}
     
     # Batch norm
@@ -441,7 +445,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             elif isinstance(child, Token) and child.type == 'NUMBER':
                 eps = float(child.value)
         if DEBUG_MODE:
-            print(f"Expression: {tree.data} args: tensor={tensor_name}, mean={running_mean_name}, var={running_var_name}, eps={eps}")
+            tensorlang.print(message=f"[AST] Expression: {tree.data} args: tensor={tensor_name}, mean={running_mean_name}, var={running_var_name}, eps={eps}")
         return {'type': 'batch_norm', 'tensor': tensor_name, 'running_mean': running_mean_name, 
                 'running_var': running_var_name, 'eps': eps}
     
@@ -455,7 +459,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             elif isinstance(child, Token) and child.type == 'NUMBER':
                 eps = float(child.value)
         if DEBUG_MODE:
-            print(f"{tree.data} args: tensor={tensor_name}, eps={eps}")
+            tensorlang.print(message=f"[AST] {tree.data} args: tensor={tensor_name}, eps={eps}")
         return {'type': 'instance_norm', 'tensor': tensor_name, 'eps': eps}
     
     print(f"Unrecognized expr type: {tree.data}")
@@ -520,12 +524,12 @@ def build_function_def(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Option
             body_idx = param_list_idx + 1
     
     if body_idx >= len(children):
-        print(f"ERROR: No function body found for function {name}")
+        tensorlang.print(message=f"[AST] ERROR: No function body found for function {name}")
         return None
     
     body_tree = children[body_idx]
     if body_tree.data != 'function_body':
-        print(f"ERROR: Expected function_body, got {body_tree.data}")
+        tensorlang.print(message=f"[AST] ERROR: Expected function_body, got {body_tree.data}")
         return None
     
     body_statements = []
@@ -678,7 +682,7 @@ def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
     if len(tree.children) > 0:
         loss_tensor = tree.children[0].value
         if DEBUG_MODE:
-            print(f"Building backward statement for loss: {loss_tensor}")
+            tensorlang.print(message=f"[AST] Building backward statement for loss: {loss_tensor}")
         return {
             'type': 'backward',
             'loss_tensor': loss_tensor

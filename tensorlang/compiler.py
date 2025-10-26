@@ -26,13 +26,12 @@ from tensorlang.autograd import ComputationGraph, AutogradContext
 class TensorCompiler:
 
     def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False):
-        self.tensorlang   = TensorLang()
-        self.version      = self.tensorlang.version
         self.debug_mode   = debug_mode
         self.debug_info   = debug_info
         self.debug_ast    = debug_ast
         self.cache_layers = cache_layers
-        # self.tensorlang   = TensorLang()
+        self.tensorlang   = TensorLang()
+        self.version      = self.tensorlang.version
         
         # NEW: Autograd support
         self.comp_graph = ComputationGraph(debug_mode=debug_mode)
@@ -53,7 +52,7 @@ class TensorCompiler:
             self.requires_grad_tensors.add(name)
             
             if self.debug_mode:
-                print(f"[Autograd] Recorded {op_type}: {inputs} -> {name}")
+                self.tensorlang.print(message=f"[COMPILER] [Autograd] Recorded {op_type}: {inputs} -> {name}")
 
     def prod(self, lst):
         """Compute product of list elements."""
@@ -71,6 +70,346 @@ class TensorCompiler:
                 return False
         return True
 
+    def _execute_single_kernel(self, kernel_info, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
+        """Execute a single CUDA kernel and save results."""
+        op_type = kernel_info[0]
+        
+        # print (f"######################{self.debug_mode}")
+
+        # Handle general_broadcast specially
+        if op_type == 'general_broadcast':
+            _, actual_op, name, arg1, arg2, padded_shape1, padded_shape2, output_shape_tuple, total_elements = kernel_info
+            shape = tuple(int(dim) for dim in env[name]['shape'])
+            
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] Executing {op_type} ({actual_op}) for {name}, shape: {shape}")
+            
+            ndim = len(output_shape_tuple)
+            
+            # Allocate GPU memory for shape arrays
+            shape1_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            shape2_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            out_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            
+            # Copy shape data to GPU
+            shape1_array = np.array(padded_shape1, dtype=np.int32)
+            shape2_array = np.array(padded_shape2, dtype=np.int32)
+            out_shape_array = np.array(output_shape_tuple, dtype=np.int32)
+            
+            cuda.memcpy_htod(shape1_gpu, shape1_array)
+            cuda.memcpy_htod(shape2_gpu, shape2_array)
+            cuda.memcpy_htod(out_shape_gpu, out_shape_array)
+            
+            # Launch kernel
+            getattr(lib, f'launch_{actual_op}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[name])),
+                c_void_p(int(shape1_gpu)),
+                c_void_p(int(shape2_gpu)),
+                c_void_p(int(out_shape_gpu)),
+                c_int(ndim),
+                c_int(total_elements)
+            )
+            
+            # Save result
+            self._save_kernel_result(name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+        
+        # Standard unpacking for all other operations
+        op_type, name, arg1, arg2, *dims = kernel_info
+        shape = tuple(int(dim) for dim in env[name]['shape'])
+        
+        # Execute based on operation type
+        if op_type == 'matmul':
+            m, n, p = dims
+            getattr(lib, f'launch_matmul_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[arg2])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(m), c_int(n), c_int(p)
+            )
+
+        elif op_type in ['add', 'minus', 'mult', 'div']:
+            size = dims[0]
+            getattr(lib, f'launch_{op_type}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[arg2])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type in ['add_scalar', 'minus_scalar', 'mult_scalar', 'div_scalar']:
+            size = dims[0]
+            op_base = op_type.split('_')[0]
+            getattr(lib, f'launch_{op_base}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[arg2])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type in [
+                'add_broadcast', 'minus_broadcast', 'mult_broadcast', 'div_broadcast',
+                'greater_broadcast', 'less_broadcast', 'equal_broadcast'
+            ]:
+            op_name = op_type.split("_")[0]
+            rows, cols = dims
+            getattr(lib, f'launch_{op_name}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[arg2])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        elif op_type in ['relu', 'sigmoid', 'tanh']:
+            op_name = op_type.split("_")[0]
+            size = dims[0]
+            getattr(lib, f'launch_{op_name}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type in ['greater', 'less', 'equal']:
+            size = dims[0]
+            getattr(lib, f'launch_{op_type}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[name])),
+                c_int(size)
+            )
+
+        elif op_type == 'softmax_1d':
+            size = dims[0]
+            getattr(lib, f'launch_softmax_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type == 'softmax':
+            rows, cols, axis = dims
+            getattr(lib, f'launch_softmax_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        elif op_type in ['sum_axis', 'sum_axis0']:
+            rows, cols, axis = dims
+            getattr(lib, f'launch_sum_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        elif op_type == 'slice_2d':
+            rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols = dims
+            getattr(lib, f'launch_slice_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])),
+                c_int(rows), c_int(cols),
+                c_int(row_start), c_int(row_end), c_int(col_start), c_int(col_end),
+                c_int(out_rows), c_int(out_cols)
+            )
+            
+        elif op_type == 'slice_1d':
+            start, out_size = dims
+            getattr(lib, f'launch_slice_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])),
+                c_int(start), c_int(out_size)
+            )
+
+        elif op_type == 'sum_full':
+            size = dims[0]
+            getattr(lib, f'launch_sum_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type == 'mean_full':
+            size = dims[0]
+            getattr(lib, f'launch_mean_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type in ['mean_axis', 'mean_axis0']:
+            rows, cols, axis = dims
+            getattr(lib, f'launch_mean_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        elif op_type in ['max_full', 'min_full']:
+            size = dims[0]
+            op_name = op_type.split('_')[0]
+            getattr(lib, f'launch_{op_name}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(size)
+            )
+
+        elif op_type in ['max_axis', 'max_axis0', 'min_axis', 'min_axis0']:
+            rows, cols, axis = dims
+            op_name = op_type.split('_')[0]
+            getattr(lib, f'launch_{op_name}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        elif op_type in ['argmax_full', 'argmax_axis']:
+            if len(dims) == 1:
+                size = dims[0]
+                getattr(lib, f'launch_argmax_{name}')(
+                    c_void_p(int(gpu_allocs[arg1])), 
+                    c_void_p(int(gpu_allocs[name])), 
+                    c_int(size)
+                )
+            else:
+                rows, cols, axis = dims
+                getattr(lib, f'launch_argmax_{name}')(
+                    c_void_p(int(gpu_allocs[arg1])), 
+                    c_void_p(int(gpu_allocs[name])), 
+                    c_int(rows), c_int(cols)
+                )
+
+        elif op_type == 'argmin_axis':
+            rows, cols, axis = dims
+            getattr(lib, f'launch_argmin_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        elif op_type == 'fill':
+            size, value = dims
+            getattr(lib, f'launch_fill_{name}')(
+                c_void_p(int(gpu_allocs[name])), 
+                c_float(value), c_int(size)
+            )
+
+        elif op_type == 'linear_1d':
+            input_name, weight_name, bias_name, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2]
+            getattr(lib, f'launch_linear_{name}')(
+                c_void_p(int(gpu_allocs[input_name])),
+                c_void_p(int(gpu_allocs[weight_name])),
+                c_void_p(int(gpu_allocs[bias_name])),
+                c_void_p(int(gpu_allocs[name])),
+                c_int(in_features), c_int(out_features)
+            )
+
+        elif op_type == 'linear_2d':
+            input_name, weight_name, bias_name, batch_size, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2], dims[3]
+            getattr(lib, f'launch_linear_{name}')(
+                c_void_p(int(gpu_allocs[input_name])),
+                c_void_p(int(gpu_allocs[weight_name])),
+                c_void_p(int(gpu_allocs[bias_name])),
+                c_void_p(int(gpu_allocs[name])),
+                c_int(batch_size), c_int(in_features), c_int(out_features)
+            )
+
+        elif op_type in ['layer_norm_2d', 'layer_norm_axis0']:
+            rows, cols, eps = dims
+            getattr(lib, f'launch_layer_norm_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                c_int(rows), c_int(cols), c_float(eps)
+            )
+
+        elif op_type == 'layer_norm_1d':
+            size, eps = dims
+            getattr(lib, f'launch_layer_norm_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                c_int(size), c_float(eps)
+            )
+
+        elif op_type == 'cross_entropy':
+            batch_size, num_classes = dims
+            getattr(lib, f'launch_cross_entropy_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[name])),
+                c_int(batch_size), c_int(num_classes)
+            )
+            
+        elif op_type == 'mse_loss':
+            total_elements = dims[0]
+            getattr(lib, f'launch_mse_loss_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[name])),
+                c_int(total_elements)
+            )
+
+        elif op_type == 'transpose_2d':
+            rows, cols = dims
+            getattr(lib, f'launch_transpose_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                c_int(rows), c_int(cols)
+            )
+            
+        elif op_type == 'reshape':
+            total_elements = dims[0]
+            getattr(lib, f'launch_reshape_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
+                c_int(total_elements)
+            )
+            
+        elif op_type == 'concat_axis0':
+            rows1, rows2, cols = dims
+            getattr(lib, f'launch_concat_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])),
+                c_int(rows1), c_int(rows2), c_int(cols)
+            )
+
+        elif op_type == 'batch_norm_2d':
+            running_mean_name, batch_size, num_features, eps, running_var_name = arg2, dims[0], dims[1], dims[2], dims[3]
+            getattr(lib, f'launch_batch_norm_{name}')(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[running_mean_name])),
+                c_void_p(int(gpu_allocs[running_var_name])), 
+                c_void_p(int(gpu_allocs[name])),
+                c_int(batch_size), c_int(num_features), c_float(eps)
+            )
+
+        elif op_type == 'instance_norm_2d':
+            batch_size, num_features, eps = dims[-3], dims[-2], dims[-1]
+            getattr(lib, f'launch_instance_norm_{name}')(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[name])),
+                c_int(batch_size), c_int(num_features), c_float(eps)
+            )
+
+        elif op_type in ['minus_broadcast_rows', 'add_broadcast_rows']:
+            rows, cols = dims
+            op_name = op_type.split('_')[0]
+            getattr(lib, f'launch_{op_name}_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), 
+                c_void_p(int(gpu_allocs[arg2])), 
+                c_void_p(int(gpu_allocs[name])), 
+                c_int(rows), c_int(cols)
+            )
+
+        # Save result
+        self._save_kernel_result(name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+
+    def _save_kernel_result(self, name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda):
+        """Save kernel result from GPU to CPU."""
+        if name in env:
+            shape = tuple(int(dim) for dim in env[name]['shape'])
+            output = np.zeros(shape, dtype=np.float32)
+            cuda.memcpy_dtoh(output, gpu_allocs[name])
+            tensors[name] = output
+
+            if self.cache_layers:
+                cache_npy_path = cache_file_dir / f"{name}.npy"
+                np.save(cache_npy_path, output)
+
+            self.tensorlang.print(type=f"[COMPILER] Result {name} ({op_type}):\n{output}")
 
     def compile_and_execute(self, tensorlang_file):
         """Compile and execute a single .tl file."""
@@ -79,7 +418,7 @@ class TensorCompiler:
         if tensorlang_file:
             file_path = Path(tensorlang_file)
         else:
-            self.tensorlang.print(type="[TensorLang]", message=f"Missing file")
+            self.tensorlang.print(message=f"[COMPILER] Error missing file")
             return
 
         # if not file_path.is_absolute():
@@ -88,49 +427,62 @@ class TensorCompiler:
 
         # Check if file exists
         if not file_path.exists():
-            print(f"Error: {tensorlang_file} not found at {file_path}")
+            self.tensorlang.print(message=f"[COMPILER] Error: {tensorlang_file} not found at {file_path}")
             sys.exit(1)
 
-        self.tensorlang.print_header(self.version)
+        self.tensorlang.print_header(f"[COMPILER] {self.version}")
         
-
         # Gather file details
         if file_path.suffix == '.tl':
             file_details = {
-                "| Path     " : str(file_path),
-                "| Name     " : file_path.name,
-                "| Suffix   " : file_path.suffix or "None",
-                "| Size     " : f"{file_path.stat().st_size} bytes",
-                "| Modified " : time.ctime(file_path.stat().st_mtime),
+                "// Path     " : str(file_path),
+                "// Name     " : file_path.name,
+                "// Suffix   " : file_path.suffix or "None",
+                "// Size     " : f"{file_path.stat().st_size} bytes",
+                "// Modified " : time.ctime(file_path.stat().st_mtime),
             }
-            details_str = "\n".join(f"{key}: {value}" for key, value in file_details.items())
+            details_str = "\n".join(f"{key} {value}" for key, value in file_details.items())
             self.tensorlang.print(type=details_str)
+            self.tensorlang.print(type="// ============================================================================")
+            self.tensorlang.print(type="// ============================================================================\n")
         else:
-            self.tensorlang.print(type=f"TensorLang file not found, suffix is not .tl") 
-            self.tensorlang.seperator()
+            self.tensorlang.print(message=f"[COMPILER] file not found, suffix is not .tl") 
+            self.tensorlang.separator()
             sys.exit(1)
 
-        with open(file_path, 'r') as f:
-            code = f.read()
-
-        self.tensorlang.seperator()
-        self.tensorlang.print(type=f"{code}")
-        self.tensorlang.seperator()
-
         try:
-            with open('tensorlang.lark', 'r') as f:
+            self.tensorlang.separator()
+            grammar_file = 'tensorlang.lark'
+            with open(grammar_file, 'r') as f:
                 grammar = f.read()
             parser = Lark(grammar, start='program', parser='lalr')
-            if self.debug_mode:
-                self.tensorlang.print(message=f"Grammer tensorlang.lark opened.")
+            # if self.debug_mode:
+            self.tensorlang.print(type="[COMPILER]", message=f"Loaded Lark Grammer file: {grammar_file}")
+            
         except FileNotFoundError:
             if self.debug_mode:
-                self.tensorlang.print(message=f"Grammer error tensorlang.lark not found.")
+                self.tensorlang.print(message=f"[COMPILER] Missing Lark Grammer file: {grammar_file}")
             sys.exit(1)
 
         try:
-            self.tensorlang.print(type=f"TensorLang > Lark > Parser > Compiler > CUDA Kernel")
-            self.tensorlang.seperator()
+            with open(file_path, 'r') as f:
+                code = f.read()
+                self.tensorlang.print(type="[COMPILER]", message=f"Loaded TensorLang   file: {file_path}")
+        except FileNotFoundError:
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] Missing TensorLang file: {file_path}")
+            sys.exit(1)
+
+        try:
+            self.tensorlang.separator()
+            self.tensorlang.print(type=f"")
+            self.tensorlang.print(type=f"{code}")
+            self.tensorlang.separator()
+            
+            self.tensorlang.print(type=f"")
+            self.tensorlang.separator()
+            self.tensorlang.print(type=f"[COMPILER] TensorLang > Lark > Parser > Compiler > CUDA Kernel -> Results")
+            self.tensorlang.separator()
 
             parse_tree = parser.parse(code)
             if self.debug_ast:
@@ -139,14 +491,14 @@ class TensorCompiler:
             ast, output_tensor, functions = build_ast(parse_tree, self.debug_mode, self.debug_info)
 
             if self.debug_mode:
-                print(f"BUILT AST:\n{ast}")
-                print(f"Functions: {list(functions.keys())}")
-                print(f"Output Tensor: {output_tensor}")
+                self.tensorlang.print(message=f"[COMPILER] BUILT AST:\n{ast}")
+                self.tensorlang.print(message=f"[COMPILER] Functions: {list(functions.keys())}")
+                self.tensorlang.print(message=f"[COMPILER] Output Tensor: {output_tensor}")
 
             success, env = type_checker(ast, {}, self.debug_info, self.debug_mode)
 
             if self.debug_mode:
-                print(f"TYPE CHECKER ENV:\n{env}")
+                self.tensorlang.print(message=f"[COMPILER] TYPE CHECKER ENV:\n{env}")
 
             # CUDA generation and execution
             if success:
@@ -164,7 +516,7 @@ class TensorCompiler:
                         name = node['name']
                         self.requires_grad_tensors.add(name)
                         if self.debug_mode:
-                            print(f"[Autograd] Tensor '{name}' marked for gradient tracking")
+                            self.tensorlang.print(message=f"[COMPILER] [Autograd] Tensor '{name}' marked for gradient tracking")
 
                     if node['type'] == 'let' and isinstance(node['expr'], dict):
                         name = node['name']
@@ -175,7 +527,7 @@ class TensorCompiler:
                             continue
 
                         if self.debug_mode:
-                            self.tensorlang.print(message=f"Generating kernel for {name} ({expr['type']})")
+                            self.tensorlang.print(message=f"[COMPILER] Generating kernel for {name} ({expr['type']})")
 
                         # ========================================
                         # Tensor Literal
@@ -193,8 +545,9 @@ class TensorCompiler:
 
                             self._record_operation(expr['type'], name, [arg1, arg2])
 
-                            self.tensorlang.print(message=f"Tensor {expr['type']}")
-                            self.tensorlang.print(message=f"Tensor Shape1: {len(shape1)} Shape2: {len(shape2)}")
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"Tensor {expr['type']}")
+                                self.tensorlang.print(message=f"Tensor Shape1: {len(shape1)} Shape2: {len(shape2)}")
 
                             if shape1 == shape2:
                                 size = int(np.prod([int(dim) for dim in output_shape]))
@@ -229,7 +582,7 @@ class TensorCompiler:
                                 cuda_code += kernel
                             
                             else:
-                                print(f"Error: Cannot {expr['type']} tensors with incompatible shapes {shape1} and {shape2}. "
+                                self.tensorlang.print(message=f"[COMPILER] Error: Cannot {expr['type']} tensors with incompatible shapes {shape1} and {shape2}. "
                                     f"Broadcasting requires dimensions to match or be 1.")
                                 return False, env
 
@@ -292,9 +645,7 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
-                            #self._record_operation(expr['type'], name, [arg1]) 
                             self._record_operation('softmax', name, [tensor_name], metadata={'axis': axis})
-
 
                         # ========================================
                         # GREATER
@@ -501,6 +852,8 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
+                            self._record_operation('mse_loss', name, [pred_name, target_name])
+
                         # ================================================================
                         # Transpose, Reshape, Concat
                         # ================================================================
@@ -580,10 +933,11 @@ class TensorCompiler:
 
                     # Use relative path for cache based on file_path
                     cache_base = Path("cache")
-                    print (f"CACHE: {cache_base}")
-                    print (f"CACHE FILE_PATH: {file_path}")
-                    print (f"CACHE FILE_PATH STEM: {file_path.stem}")
-                    print (f"CACHE TENSORLANG_FILE: {tensorlang_file}")
+                    if self.debug_mode:
+                        self.tensorlang.print(message=f"[COMPILER] CACHE: {cache_base}")
+                        self.tensorlang.print(message=f"[COMPILER] CACHE FILE_PATH: {file_path}")
+                        self.tensorlang.print(message=f"[COMPILER] CACHE FILE_PATH STEM: {file_path.stem}")
+                        self.tensorlang.print(message=f"[COMPILER] CACHE TENSORLANG_FILE: {tensorlang_file}")
 
                     #cache_file_dir = cache_base / file_path.stem
                     cache_file_dir = cache_base / file_path
@@ -611,474 +965,98 @@ class TensorCompiler:
                             check=True
                         )
                         if self.debug_mode:
-                            self.tensorlang.print(message=f"CUDA compiled to {kernel_so_path}!")
+                            self.tensorlang.print(message=f"[COMPILER] CUDA compiled to {kernel_so_path}!")
 
                     except subprocess.CalledProcessError as e:
-                        print(f"CUDA compilation error: {e}")
+                        self.tensorlang.print(message=f"[COMPILER] CUDA compilation error: {e}")
                         sys.exit(1)
 
                     # =========================================
-                    # Execute with PyCUDA
+                    # Execute with PyCUDA - TWO-PHASE EXECUTION
                     # =========================================
                     try:
                         import pycuda.driver as cuda
                         import pycuda.autoinit
+                        import traceback
                         from ctypes import cdll
 
                         lib = cdll.LoadLibrary(str(kernel_so_path))
 
                         if self.debug_mode:
-                            self.tensorlang.print(message=f"CUDA Kernel loaded from {kernel_so_path}")
+                            self.tensorlang.print(message=f"[COMPILER] CUDA Kernel loaded from {kernel_so_path}")
 
-                        # Allocate GPU memory and copy inputs
+                        # ================================================================
+                        # PHASE 0: Find backward statement index in AST
+                        # ================================================================
+                        backward_index = None
+                        for i, node in enumerate(ast):
+                            if node['type'] == 'backward':
+                                backward_index = i
+                                if self.debug_mode:
+                                    self.tensorlang.print(message=f"[COMPILER] Found backward() at AST index {i}")
+                                break
+
+                        # ================================================================
+                        # PHASE 1: Allocate ALL GPU memory upfront
+                        # ================================================================
                         for name in env:
-                            shape            = tuple(int(dim) for dim in env[name]['shape'])
-                            size_bytes       = int(np.prod(shape) * np.float32().nbytes)
+                            shape = tuple(int(dim) for dim in env[name]['shape'])
+                            size_bytes = int(np.prod(shape) * np.float32().nbytes)
                             gpu_allocs[name] = cuda.mem_alloc(size_bytes)
+                            
                             if name in tensors:
                                 cuda.memcpy_htod(gpu_allocs[name], tensors[name])
                                 if self.debug_mode:
-                                    self.tensorlang.print(message=f"Copied {name} to GPU, shape: {tensors[name].shape}, sample: {tensors[name][:2] if tensors[name].ndim > 1 else tensors[name]}")
+                                    self.tensorlang.print(message=f"[COMPILER] Copied {name} to GPU, shape: {tensors[name].shape}, sample: {tensors[name][:2] if tensors[name].ndim > 1 else tensors[name]}")
                             else:
                                 if self.debug_mode:
-                                    self.tensorlang.print(message=f"Allocated GPU memory for {name} (uninitialized), shape: {shape}")
+                                    self.tensorlang.print(message=f"[COMPILER] Allocated GPU memory for {name} (uninitialized), shape: {shape}")
 
-                        # Kernel execution
-                        for kernel_info in kernels:
-                            op_type = kernel_info[0]
+                        # ================================================================
+                        # PHASE 2: Execute kernels BEFORE backward statement
+                        # ================================================================
+                        if backward_index is not None:
+                            # Build mapping: AST node index -> kernel index
+                            ast_to_kernel_map = {}
+                            kernel_idx = 0
                             
-                            # Handle general_broadcast specially BEFORE standard unpacking
-                            if op_type == 'general_broadcast':
-                                _, actual_op, name, arg1, arg2, padded_shape1, padded_shape2, output_shape_tuple, total_elements = kernel_info
-                                shape = tuple(int(dim) for dim in env[name]['shape'])
-                                
-                                if self.debug_mode:
-                                    self.tensorlang.print(type=f"TensorLang Executing {op_type} ({actual_op}) for {name}, shape: {shape}")
-                                
-                                ndim = len(output_shape_tuple)
-                                
-                                # Allocate GPU memory for shape arrays
-                                shape1_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
-                                shape2_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
-                                out_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
-                                
-                                # Copy shape data to GPU
-                                shape1_array = np.array(padded_shape1, dtype=np.int32)
-                                shape2_array = np.array(padded_shape2, dtype=np.int32)
-                                out_shape_array = np.array(output_shape_tuple, dtype=np.int32)
-                                
-                                cuda.memcpy_htod(shape1_gpu, shape1_array)
-                                cuda.memcpy_htod(shape2_gpu, shape2_array)
-                                cuda.memcpy_htod(out_shape_gpu, out_shape_array)
-                                
-                                # Launch kernel with actual operation type
-                                getattr(lib, f'launch_{actual_op}_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])),
-                                    c_void_p(int(gpu_allocs[arg2])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_void_p(int(shape1_gpu)),
-                                    c_void_p(int(shape2_gpu)),
-                                    c_void_p(int(out_shape_gpu)),
-                                    c_int(ndim),
-                                    c_int(total_elements)
-                                )
-                                continue  # skip to next iteration
+                            for ast_idx, node in enumerate(ast):
+                                if node['type'] == 'let' and isinstance(node.get('expr'), dict):
+                                    expr = node['expr']
+                                    # Skip aliases (they don't have kernels)
+                                    if expr['type'] != 'name' and expr['type'] != 'tensor_literal':
+                                        ast_to_kernel_map[ast_idx] = kernel_idx
+                                        kernel_idx += 1
+                                    # Tensor literals don't generate kernels but DO increment
+                                    # Actually tensor literals DON'T generate kernels in your code
                             
-
-                            # Standard unpacking for all other operations (moved OUTSIDE the if block)
-                            op_type, name, arg1, arg2, *dims = kernel_info
-                            shape = tuple(int(dim) for dim in env[name]['shape'])
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"[COMPILER] Executing {len([k for a, k in ast_to_kernel_map.items() if a < backward_index])} kernels before backward")
                             
-                            if op_type == 'matmul':
-                                m, n, p = dims
-                                getattr(lib, f'launch_matmul_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[arg2])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(m), c_int(n), c_int(p)
-                                )
+                            # Execute kernels for operations before backward
+                            for ast_idx in range(backward_index):
+                                if ast_idx in ast_to_kernel_map:
+                                    kernel_idx = ast_to_kernel_map[ast_idx]
+                                    if kernel_idx < len(kernels):
+                                        self._execute_single_kernel(
+                                            kernels[kernel_idx], lib, gpu_allocs, env, 
+                                            tensors, cache_file_dir, cuda
+                                        )
 
-                            elif op_type in ['add', 'minus', 'mult', 'div']:
-                                size = dims[0]
-                                getattr(lib, f'launch_{op_type}_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[arg2])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type in ['add_scalar', 'minus_scalar', 'mult_scalar', 'div_scalar']:
-                                size = dims[0]
-                                op_base = op_type.split('_')[0]
-                                getattr(lib, f'launch_{op_base}_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[arg2])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type in [
-                                    'add_broadcast', 'minus_broadcast', 'mult_broadcast', 'div_broadcast',
-                                    'greater_broadcast', 'less_broadcast', 'equal_broadcast'
-                                ]:
-                                op_name = op_type.split("_")[0]
-                                rows, cols = dims
-                                getattr(lib, f'launch_{op_name}_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[arg2])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type in ['relu', 'sigmoid', 'tanh']:
-                                op_name = op_type.split("_")[0]
-                                size = dims[0]
-                                getattr(lib, f'launch_{op_name}_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type in [
-                                    'greater', 'less', 'equal'
-                                ]:
-                                size = dims[0]
-                                getattr(lib, f'launch_{op_type}_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])),
-                                    c_void_p(int(gpu_allocs[arg2])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'softmax_1d':
-                                size = dims[0]
-                                getattr(lib, f'launch_softmax_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'softmax':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_softmax_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'sum_axis':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_sum_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'sum_axis0':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_sum_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-
-                            elif op_type == 'slice_2d':
-                                rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols = dims
-                                getattr(lib, f'launch_slice_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(rows), c_int(cols),
-                                    c_int(row_start), c_int(row_end), c_int(col_start), c_int(col_end),
-                                    c_int(out_rows), c_int(out_cols)
-                                )
-                            elif op_type == 'slice_1d':
-                                start, out_size = dims
-                                getattr(lib, f'launch_slice_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(start), c_int(out_size)
-                                )
-
-                            elif op_type == 'sum_full':
-                                size = dims[0]
-                                getattr(lib, f'launch_sum_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'mean_full':
-                                size = dims[0]
-                                getattr(lib, f'launch_mean_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'mean_axis':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_mean_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'mean_axis0':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_mean_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'max_full':
-                                size = dims[0]
-                                getattr(lib, f'launch_max_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'max_axis':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_max_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'max_axis0':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_max_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'min_full':
-                                size = dims[0]
-                                getattr(lib, f'launch_min_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'min_axis':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_min_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'min_axis0':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_min_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'argmax_full':
-                                size = dims[0]
-                                getattr(lib, f'launch_argmax_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(size)
-                                )
-
-                            elif op_type == 'argmax_axis':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_argmax_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'argmin_axis':
-                                rows, cols, axis = dims
-                                getattr(lib, f'launch_argmin_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'fill':
-                                size, value = dims
-                                getattr(lib, f'launch_fill_{name}')(
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_float(value), c_int(size)
-                                )
-
-                            elif op_type == 'linear_1d':
-                                input_name, weight_name, bias_name, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2]
-                                getattr(lib, f'launch_linear_{name}')(
-                                    c_void_p(int(gpu_allocs[input_name])),
-                                    c_void_p(int(gpu_allocs[weight_name])),
-                                    c_void_p(int(gpu_allocs[bias_name])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(in_features), c_int(out_features)
-                                )
+                        else:
+                            # No backward statement - execute all kernels normally
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"[COMPILER] No backward() found, executing all kernels")
                             
-                            # ================================================================
-                            # Execution: linear_2d, layer_norm_2d, layer_norm_axis0, layer_norm_1d
-                            # ================================================================
-                            elif op_type == 'linear_2d':
-                                ###############################################################
-                                # Save result for all computed tensors
-                                # Debug: Check input state before kernel
-                                #input_debug = np.zeros((batch_size, in_features), dtype=np.float32)
-                                #cuda.memcpy_dtoh(input_debug, gpu_allocs[input_name])
-                                #print(f"DEBUG LINEAR: Input before kernel = {input_debug}")
-                                ###############################################################
-
-                                input_name, weight_name, bias_name, batch_size, in_features, out_features = arg1, arg2, dims[0], dims[1], dims[2], dims[3]
-                                getattr(lib, f'launch_linear_{name}')(
-                                    c_void_p(int(gpu_allocs[input_name])),
-                                    c_void_p(int(gpu_allocs[weight_name])),
-                                    c_void_p(int(gpu_allocs[bias_name])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(batch_size), c_int(in_features), c_int(out_features)
+                            for kernel_info in kernels:
+                                self._execute_single_kernel(
+                                    kernel_info, lib, gpu_allocs, env, 
+                                    tensors, cache_file_dir, cuda
                                 )
 
-                                ###############################################################
-                                # Debug: Check output immediately after kernel
-                                #output_debug = np.zeros(shape, dtype=np.float32)
-                                #cuda.memcpy_dtoh(output_debug, gpu_allocs[name])
-                                #print(f"DEBUG LINEAR: Output immediately after kernel = {output_debug}")
-                                ###############################################################
-
-                            elif op_type in ['layer_norm_2d', 'layer_norm_axis0']:
-                                rows, cols, eps = dims
-                                getattr(lib, f'launch_layer_norm_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
-                                    c_int(rows), c_int(cols), c_float(eps)
-                                )
-
-                            elif op_type == 'layer_norm_1d':
-                                size, eps = dims
-                                getattr(lib, f'launch_layer_norm_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
-                                    c_int(size), c_float(eps)
-                                )
-
-                            # ================================================================
-                            # Execution: cross_entropy, mse_loss
-                            # ================================================================
-                            elif op_type == 'cross_entropy':
-                                batch_size, num_classes = dims
-                                getattr(lib, f'launch_cross_entropy_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(batch_size), c_int(num_classes)
-                                )
-                            elif op_type == 'mse_loss':
-                                total_elements = dims[0]
-                                getattr(lib, f'launch_mse_loss_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(total_elements)
-                                )
-
-                            # ================================================================
-                            # Execution: transpose_2d, reshape, concat_axis0
-                            # ================================================================
-                            elif op_type == 'transpose_2d':
-                                rows, cols = dims
-                                getattr(lib, f'launch_transpose_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
-                                    c_int(rows), c_int(cols)
-                                )
-                            elif op_type == 'reshape':
-                                total_elements = dims[0]
-                                getattr(lib, f'launch_reshape_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
-                                    c_int(total_elements)
-                                )
-                            elif op_type == 'concat_axis0':
-                                rows1, rows2, cols = dims
-                                getattr(lib, f'launch_concat_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])),
-                                    c_int(rows1), c_int(rows2), c_int(cols)
-                                )
-
-
-                            # ================================================================
-                            # Execution: batch_norm_2d, instance_norm_2d
-                            # ================================================================
-                            elif op_type == 'batch_norm_2d':
-                                running_mean_name, batch_size, num_features, eps, running_var_name = arg2, dims[0], dims[1], dims[2], dims[3]
-                                getattr(lib, f'launch_batch_norm_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])),  # input tensor
-                                    c_void_p(int(gpu_allocs[running_mean_name])),
-                                    c_void_p(int(gpu_allocs[running_var_name])), 
-                                    c_void_p(int(gpu_allocs[name])),  # output tensor
-                                    c_int(batch_size), c_int(num_features), c_float(eps)
-                                )
-
-                            elif op_type == 'instance_norm_2d':
-                                batch_size, num_features, eps = dims[-3], dims[-2], dims[-1]  # Get last 3 values
-                                getattr(lib, f'launch_instance_norm_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])),
-                                    c_void_p(int(gpu_allocs[name])),
-                                    c_int(batch_size), c_int(num_features), c_float(eps)
-                                )
-
-                            # ================================================================
-                            # Execution: function broadcasting
-                            # ================================================================
-                            elif op_type == 'minus_broadcast_rows':
-                                rows, cols = dims
-
-                                # Debug: Check if inputs have data
-                                #if DEBUG_MODE:
-                                if self.debug_mode:
-                                    test_data = np.zeros((rows,), dtype=np.float32)
-                                    cuda.memcpy_dtoh(test_data, gpu_allocs[arg2])
-                                    print(f"DEBUG: B tensor ({arg2}) before minus: {test_data}")
-
-                                getattr(lib, f'launch_minus_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[arg2])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            elif op_type == 'add_broadcast_rows':
-                                rows, cols = dims
-                                getattr(lib, f'launch_add_{name}')(
-                                    c_void_p(int(gpu_allocs[arg1])), 
-                                    c_void_p(int(gpu_allocs[arg2])), 
-                                    c_void_p(int(gpu_allocs[name])), 
-                                    c_int(rows), c_int(cols)
-                                )
-
-                            # else:
-                                # Normal unpacking for all other operations
-                                # op_type, name, arg1, arg2, *dims = kernel_info
-
-
-
-                            # Save result for all computed tensors
-                            if len(kernel_info) > 2:
-                                name = kernel_info[1] if op_type != 'general_broadcast' else kernel_info[2]
-                                if name in env:
-                                    shape = tuple(int(dim) for dim in env[name]['shape'])
-                                    output = np.zeros(shape, dtype=np.float32)
-                                    cuda.memcpy_dtoh(output, gpu_allocs[name])
-                                    tensors[name] = output
-
-                                    if self.cache_layers:
-                                        if self.debug_info:
-                                            tensorlang.print(message=f"Cache Layer {name} cache/{file_path.stem}/{name}.npy")
-                                        cache_npy_path = cache_file_dir / f"{name}.npy"
-                                        # cache_npy_path = f"{tensorlang_file}/{name}.npy"
-                                        np.save(cache_npy_path, output)
-
-                                    print(f"Result {name} ({op_type}):\n{output}")
-
-                        # Handle alias assignments
+                        # ================================================================
+                        # Handle alias assignments (can happen anytime)
+                        # ================================================================
                         for node in ast:
                             if node['type'] == 'let' and isinstance(node.get('expr'), dict) and node['expr']['type'] == 'name':
                                 alias_name = node['name']
@@ -1086,38 +1064,32 @@ class TensorCompiler:
                                 if source_name in tensors and alias_name not in tensors:
                                     tensors[alias_name] = tensors[source_name].copy()
                                     if self.debug_mode:
-                                        self.tensorlang.print(type=f"Created alias: {alias_name} -> {source_name}")
-                                    
-                                    print(f"Result {alias_name} (alias):\n{tensors[alias_name]}")
-                                    cache_npy_path = cache_file_dir / f"{alias_name}.npy"
-                                    # cache_npy_path = f"{tensorlang_file}/{alias_name}.npy"
-                                    
-                                    if self.cache_layers:
-                                        if self.debug_mode:
-                                            print(f"CACHE LAYER NPY: {cache_npy_path}")
-                                        np.save(cache_npy_path, tensors[alias_name])
+                                        self.tensorlang.print(message=f"[COMPILER] Created alias: {alias_name} -> {source_name}")
 
-                        # ==================================================
-                        # NEW: Cache tensor literals that weren't cached during kernel execution
+                        # ================================================================
+                        # Cache tensor literals
+                        # ================================================================
                         if self.cache_layers:
                             for name in tensors:
                                 cache_npy_path = cache_file_dir / f"{name}.npy"
                                 if not cache_npy_path.exists():
                                     np.save(cache_npy_path, tensors[name])
                                     if self.debug_mode:
-                                        print(f"Cached tensor literal: {name}")
+                                        self.tensorlang.print(message=f"[COMPILER] Cached tensor literal: {name}")
 
-                        # ==================================================
-                        # NEW: Register computed tensors in autograd graph
+                        # ================================================================
+                        # Register tensors in autograd graph
+                        # ================================================================
                         for name in tensors:
                             requires_grad = name in self.requires_grad_tensors
                             self.comp_graph.register_tensor(name, tensors[name], requires_grad)
                             
                             if self.debug_mode and requires_grad:
-                                print(f"[Autograd] Registered '{name}' with gradient tracking")
-                        
-                        # ==================================================
-                        # NEW: Handle backward() statements
+                                self.tensorlang.print(message=f"[COMPILER] [Autograd] Registered '{name}' with gradient tracking")
+
+                        # ================================================================
+                        # PHASE 3: Handle backward() statement
+                        # ================================================================
                         for node in ast:
                             if node['type'] == 'backward':
                                 loss_name = node['loss_tensor']
@@ -1136,50 +1108,90 @@ class TensorCompiler:
                                             continue
                                         
                                         grad_tensor = self.comp_graph.gradients[grad_name]
-                                        
-                                        # Print gradient
                                         print(f"\nGradient {grad_name}.grad:\n{grad_tensor}")
                                         
-                                        # Cache gradient if enabled
                                         if self.cache_layers:
                                             grad_cache_path = cache_file_dir / f"{grad_name}.grad.npy"
                                             np.save(grad_cache_path, grad_tensor)
                                     
                                     print('='*80)
                                     
+                                    # ================================================
+                                    # CRITICAL: Copy gradients to GPU tensors
+                                    # ================================================
+                                    for grad_name in self.comp_graph.requires_grad:
+                                        if grad_name in self.comp_graph.gradients:
+                                            grad_tensor = self.comp_graph.gradients[grad_name]
+                                            grad_tensor_name = f"{grad_name}_grad"
+                                            
+                                            tensors[grad_tensor_name] = grad_tensor
+                                            
+                                            if grad_tensor_name in gpu_allocs:
+                                                cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                                                if self.debug_mode:
+                                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Copied gradient {grad_tensor_name} to GPU")
+                                            else:
+                                                if self.debug_mode:
+                                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Warning: {grad_tensor_name} not in GPU allocations")
+                                            
+                                            env[grad_tensor_name] = {
+                                                'dtype': 'f32',
+                                                'shape': grad_tensor.shape
+                                            }
+                                            
+                                            if self.debug_mode:
+                                                self.tensorlang.print(message=f"[COMPILER] [Autograd] Made gradient accessible: {grad_tensor_name}")
+                                                
                                 except Exception as e:
-                                    print(f"\n[Autograd] Error during backward pass: {e}")
-                                    # if self.debug_mode:
-                                    #     import traceback
-                                    #     traceback.print_exc()
-                        # ==================================================
+                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
+                                    if self.debug_mode:
+                                        import traceback
+                                        traceback.print_exc()
+
+                        # ================================================================
+                        # PHASE 4: Execute kernels AFTER backward statement
+                        # ================================================================
+                        if backward_index is not None:
+                            if self.debug_mode:
+                                kernels_after = len([k for a, k in ast_to_kernel_map.items() if a > backward_index])
+                                self.tensorlang.print(message=f"[COMPILER] Executing {kernels_after} kernels after backward")
+                            
+                            # Execute kernels for operations after backward
+                            for ast_idx in range(backward_index + 1, len(ast)):
+                                if ast_idx in ast_to_kernel_map:
+                                    kernel_idx = ast_to_kernel_map[ast_idx]
+                                    if kernel_idx < len(kernels):
+                                        self._execute_single_kernel(
+                                            kernels[kernel_idx], lib, gpu_allocs, env,
+                                            tensors, cache_file_dir, cuda
+                                        )
 
                         # Free GPU memory
                         for name, alloc in gpu_allocs.items():
                             alloc.free()
                             if self.debug_mode:
-                                self.tensorlang.print(type=f"Freed GPU memory for {name}")
+                                self.tensorlang.print(message=f"[COMPILER] Freed GPU memory for {name}")
 
                     except ImportError as e:
-                        print(f"PyCUDA error: {e}. Run 'pip install pycuda' and ensure CUDA toolkit is installed.")
+                        self.tensorlang.print(message=f"[COMPILER] PyCUDA error: {e}. Run 'pip install pycuda' and ensure CUDA toolkit is installed.")
                         sys.exit(1)
                     except Exception as e:
-                        print(f"Error executing CUDA kernel: {e}")
+                        self.tensorlang.print(message=f"[COMPILER] Error executing CUDA kernel: {e}")
                         traceback.print_exc()
                         sys.exit(1)
 
         except ValueError as e:
-            print(f"TensorLang: Value Error: failed: {e}")
+            self.tensorlang.print(message=f"[COMPILER] Value Error: failed: {e}")
             sys.exit(1)
 
         except UnexpectedInput as e:
-            print(f"TensorLang: Parse error: {e}")
+            self.tensorlang.print(message=f"[COMPILER] Parse error: {e}")
             traceback.print_exc()
             sys.exit(1)
 
         except Exception as e:
-            print(f"TensorLang: Unexpected error during parsing or execution: {e}")
+            self.tensorlang.print(message=f"[COMPILER] Unexpected error during parsing or execution: {e}")
             traceback.print_exc()
             sys.exit(1)
 
-        self.tensorlang.seperator()
+        self.tensorlang.separator()
