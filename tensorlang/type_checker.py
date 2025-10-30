@@ -73,7 +73,8 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             elif isinstance(expr, dict) and expr['type'] in [
                     'matmul', 'add', 'minus', 'mult', 'div', 
                     'relu', 'sigmoid', 'tanh', 'gelu', 'swish', 'softmax', 
-                    'fill', 'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
+                    'fill', 'load',
+                    'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
                     'greater', 'less', 'equal', 
                     'linear', 'layer_norm', 'batch_norm', 'instance_norm', 'cross_entropy', 'mse_loss', 
                     'transpose', 'reshape', 'concat', 'slice'
@@ -84,6 +85,39 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned from fill: {env[name]}")
                 
+                elif expr['type'] == 'load':
+                    file_path = expr['file_path']
+                    
+                    # If type was explicitly declared, use it
+                    if ty:
+                        env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
+                        if DEBUG_MODE:
+                            tensorlang.print(message=f"[TYPE CHECKER] {name}: explicit shape from declaration: {env[name]}")
+                    else:
+                        # INFER: Load file and infer shape
+                        if DEBUG_MODE:
+                            tensorlang.print(message=f"[TYPE CHECKER] {name}: inferring shape from {file_path}")
+                        
+                        try:
+                            # Load file to infer shape
+                            loaded_data = np.load(file_path)
+                            inferred_shape = tuple(loaded_data.shape)
+                            
+                            env[name] = {
+                                'dtype': 'f32',
+                                'shape': inferred_shape
+                            }
+                            
+                            if DEBUG_MODE:
+                                tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from file")
+                            
+                        except FileNotFoundError:
+                            tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
+                            return False, env
+                        except Exception as e:
+                            tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
+                            return False, env
+
                 elif expr['type'] in ['sum', 'mean']:
                     tensor_name = expr['tensor']
                     if tensor_name not in env:
