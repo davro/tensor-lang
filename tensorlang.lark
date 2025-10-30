@@ -11,7 +11,6 @@ program: (statement)*
 ////////////////////////////////////////////////////////////////////////////////
 // Statement Rule
 ////////////////////////////////////////////////////////////////////////////////
-//statement: function_def | let_binding | expr
 statement: function_def 
          | let_binding 
          | if_statement 
@@ -31,8 +30,6 @@ expr_statement: expr
 return_statement: "return" expr
 
 // Bindings
-//let_binding: "let" NAME [":" type] "=" expr
-
 let_binding: "let" NAME [":" type] "=" expr [grad_marker]
 
 grad_marker: "with" "grad"
@@ -43,6 +40,7 @@ grad_marker: "with" "grad"
 ////////////////////////////////////////////////////////////////////////////////
 expr: tensor_literal 
     | fill_call 
+    | load_call
     | matmul_call 
     | add_call 
     | minus_call
@@ -50,10 +48,8 @@ expr: tensor_literal
     | div_call
     | relu_call 
     | sigmoid_call
-
     | gelu_call
     | swish_call
-
     | tanh_call
     | softmax_call
     | sum_call
@@ -81,42 +77,35 @@ expr: tensor_literal
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// Conditional statements TODO
+// Conditional statements
 ////////////////////////////////////////////////////////////////////////////////
 if_statement: "if" condition "{" (statement)* "}" (elif_clause)* (else_clause)?
 
 elif_clause: "elif" condition "{" (statement)* "}"
 else_clause: "else" "{" (statement)* "}"
 
-// Conditions - support both tensor comparisons and compile-time constants
-//condition: comparison_expr | NAME | "true" | "false"
-// Conditions - support both tensor comparisons and compile-time constants
 condition: comparison_expr | NAME | "true" | "false"
 
-// Allow any expression (function calls, names, literals) in comparisons
-//comparison_expr: NAME comp_op NAME | NAME comp_op NUMBER | reduction_call comp_op NUMBER
 comparison_expr: expr comp_op expr
 
 comp_op: ">" | "<" | ">=" | "<=" | "==" | "!="
 
-// Add reduction calls that can be used in conditions
 reduction_call: "any" "(" NAME ")" | "all" "(" NAME ")"
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// User-defined function calls (must come after built-in calls to avoid conflicts)
+// User-defined function calls
 ////////////////////////////////////////////////////////////////////////////////
 user_function_call: NAME "(" [arg_list] ")"
 arg_list: expr ("," expr)*
 
-// Types - concrete type takes priority over generic
+// Types
 type: "Tensor" "[" dtype "," shape "]"          -> concrete_type
     | "Tensor" "[" generic_shape "]"            -> generic_type
 
 dtype: "f32" | "f64"
 shape: "(" NUMBER ("," NUMBER)* [","] ")"
 
-// Generic shape parameters (for function signatures)
 generic_shape: generic_dim ("," generic_dim)*
 generic_dim: NAME | NUMBER
 
@@ -127,16 +116,21 @@ generic_dim: NAME | NUMBER
 tensor_literal: "[" (NUMBER ("," NUMBER)* | inner_array ("," inner_array)*) "]"
 inner_array: "[" NUMBER ("," NUMBER)* "]"
 fill_call: "fill" "(" NUMBER "," shape ")"
+
+// Binary operations - keep NAME for backward compatibility
 matmul_call: "matmul" "(" NAME "," NAME ")"
 add_call: "add" "(" NAME "," NAME ")"
 minus_call: "minus" "(" NAME "," NAME ")"
 mult_call: "mult" "(" NAME "," NAME ")"
 div_call: "div" "(" NAME "," NAME ")"
-relu_call: "relu" "(" NAME ")"
 
+// Unary operations
+relu_call: "relu" "(" NAME ")"
 gelu_call: "gelu" "(" NAME ")"
 swish_call: "swish" "(" NAME ")"
 
+// File I/O
+load_call: "load" "(" STRING ")"
 
 ////////////////////////////////////////////////////////////////////////////////
 // Reduction operations
@@ -211,7 +205,7 @@ backward_statement: "backward" "(" NAME ")"
 ////////////////////////////////////////////////////////////////////////////////
 NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 NUMBER: /-?\d+(\.\d+)?/
-
+STRING: /"[^"]*"/    // For file paths
 
 ////////////////////////////////////////////////////////////////////////////////
 // Comments

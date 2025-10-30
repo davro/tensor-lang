@@ -70,6 +70,51 @@ class TensorCompiler:
                 return False
         return True
 
+    def visit_load_call(self, tree):
+        """Handle load("path.npy") calls"""
+        # Extract file path
+        string_token = tree.children[0]
+        file_path = string_token.value.strip('"')  # Remove quotes
+        
+        print(f"[COMPILER] Loading tensor from: {file_path}")
+        
+        # Load the numpy file
+        try:
+            tensor_data = np.load(file_path)
+            
+            # Infer shape and dtype
+            shape = tensor_data.shape
+            dtype = tensor_data.dtype
+            
+            print(f"[COMPILER] Loaded tensor: shape={shape}, dtype={dtype}")
+            
+            # Create a unique name for this loaded tensor
+            load_id = f"loaded_{len(self.layers)}"
+            
+            # Add as a layer (similar to tensor_literal)
+            self.layers.append({
+                'name': load_id,
+                'op': 'load',
+                'file_path': file_path,
+                'shape': shape,
+                'dtype': dtype,
+                'data': tensor_data
+            })
+            
+            # Update symbol table
+            self.symbol_table[load_id] = {
+                'shape': shape,
+                'dtype': dtype,
+                'requires_grad': False  # Loaded tensors are frozen by default
+            }
+            
+            return load_id
+            
+        except FileNotFoundError:
+            raise CompileError(f"File not found: {file_path}")
+        except Exception as e:
+            raise CompileError(f"Error loading {file_path}: {e}")
+
     def _execute_single_kernel(self, kernel_info, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
         """Execute a single CUDA kernel and save results."""
         op_type = kernel_info[0]
@@ -413,7 +458,9 @@ class TensorCompiler:
 
     def compile_and_execute(self, tensorlang_file):
         """Compile and execute a single .tl file."""
-        
+
+        self.tensorlang.print_header(f"[COMPILER] TensorLang {self.version}")
+
         # Resolve the file path (handle both absolute and relative)
         if tensorlang_file:
             file_path = Path(tensorlang_file)
@@ -430,8 +477,6 @@ class TensorCompiler:
             self.tensorlang.print(message=f"[COMPILER] Error: {tensorlang_file} not found at {file_path}")
             sys.exit(1)
 
-        self.tensorlang.print_header(f"[COMPILER] {self.version}")
-        
         # Gather file details
         if file_path.suffix == '.tl':
             file_details = {
@@ -445,11 +490,13 @@ class TensorCompiler:
             self.tensorlang.print(type=details_str)
             self.tensorlang.print(type="// ============================================================================")
             self.tensorlang.print(type="// ============================================================================\n")
+
         else:
             self.tensorlang.print(message=f"[COMPILER] file not found, suffix is not .tl") 
             self.tensorlang.separator()
             sys.exit(1)
 
+        # Grammer lark
         try:
             self.tensorlang.separator()
             grammar_file = 'tensorlang.lark'
@@ -484,15 +531,36 @@ class TensorCompiler:
             self.tensorlang.print(type=f"[COMPILER] TensorLang > Lark > Parser > Compiler > CUDA Kernel -> Results")
             self.tensorlang.separator()
 
+            # CACHE Use relative path for cache based on file_path
+            cache_base = Path("cache")
+            #cache_file_dir = cache_base / file_path.stem
+            cache_file_dir = cache_base / file_path
+            cache_file_dir.mkdir(parents=True, exist_ok=True)
+            
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] CACHE: {cache_base}")
+                self.tensorlang.print(message=f"[COMPILER] CACHE FILE_PATH: {file_path}")
+                self.tensorlang.print(message=f"[COMPILER] CACHE FILE_PATH STEM: {file_path.stem}")
+                self.tensorlang.print(message=f"[COMPILER] CACHE TENSORLANG_FILE: {tensorlang_file}")
+            
+            if self.debug_info:
+                self.tensorlang.print(type="[INFO]", message=f"Created cache for tensor outputs directory")
+
+
+            # Parser
             parse_tree = parser.parse(code)
             if self.debug_ast:
                 self.tensorlang.print(message=f"Parsed AST:\n{parse_tree.pretty()}")
 
             ast, output_tensor, functions = build_ast(parse_tree, self.debug_mode, self.debug_info)
 
+            functions_called = list(functions.keys())
             if self.debug_mode:
-                self.tensorlang.print(message=f"[COMPILER] BUILT AST:\n{ast}")
-                self.tensorlang.print(message=f"[COMPILER] Functions: {list(functions.keys())}")
+                self.tensorlang.print(message=f"[COMPILER] AST:\n{ast}")
+                # self.tensorlang.print(message=f"[COMPILER] AST:\n{parse_tree.pretty()}")
+                if functions_called:
+                    self.tensorlang.print(message=f"[COMPILER] Functions: {functions_called}")
+
                 self.tensorlang.print(message=f"[COMPILER] Output Tensor: {output_tensor}")
 
             success, env = type_checker(ast, {}, self.debug_info, self.debug_mode)
@@ -511,6 +579,7 @@ class TensorCompiler:
                 kernels = []
                 cuda_code = generator.cuda_header()
                 for node in ast:
+                    # print (f"Compiler Node: {node}")
 
                     if node['type'] == 'let' and node.get('requires_grad', False):
                         name = node['name']
@@ -527,7 +596,7 @@ class TensorCompiler:
                             continue
 
                         if self.debug_mode:
-                            self.tensorlang.print(message=f"[COMPILER] Generating kernel for {name} ({expr['type']})")
+                            self.tensorlang.print(message=f"[COMPILER] Processing {name} ({expr['type']})")
 
                         # ========================================
                         # Tensor Literal
@@ -537,6 +606,47 @@ class TensorCompiler:
                             tensors[name] = np.array(expr['data'], dtype=np.float32).reshape(shape)
                             if self.debug_info:
                                 self.tensorlang.print(type="[INFO]", message=f"Kernel Tensor Initialized {name} with shape {shape}")
+
+                        # ========================================
+                        # LOAD npy
+                        # ========================================
+                        elif expr['type'] == 'load':
+                            file_path = expr['file_path']
+                            
+                            # if self.debug_mode:
+                            #     self.tensorlang.print(message=f"[COMPILER] Loading tensor from: {file_path}")
+                            
+                            try:
+                                # Load the numpy file
+                                loaded_data = np.load(file_path).astype(np.float32)
+
+                                # Verify shape matches declaration
+                                expected_shape = tuple(int(dim) for dim in env[name]['shape'])
+                                if loaded_data.shape != expected_shape:
+                                    self.tensorlang.print(message=f"[COMPILER] Expression load: tensor shape {loaded_data.shape} does not match declared shape {expected_shape}")
+                                    return False, env
+                                
+                                # Store in tensors dict
+                                tensors[name] = loaded_data
+                                
+                                # IMPORTANT: Cache immediately if caching is enabled
+                                if self.cache_layers:
+                                    cache_npy_path = cache_file_dir / f"{name}.npy"
+                                    np.save(cache_npy_path, loaded_data)
+                                    if self.debug_mode:
+                                        self.tensorlang.print(message=f"[COMPILER] Cached loaded tensor: {name} to {cache_npy_path}")
+                                
+                                # self.tensorlang.print(message=f"[COMPILER] Loaded {name}: shape={loaded_data.shape}, dtype={loaded_data.dtype}")
+                                
+                                if self.debug_info:
+                                    self.tensorlang.print(type="[INFO]", message=f"First few values: {loaded_data.flatten()[:5]}")
+                                
+                            except FileNotFoundError:
+                                self.tensorlang.print(message=f"[COMPILER] Error: File not found: {file_path}")
+                                return False, env
+                            except Exception as e:
+                                self.tensorlang.print(message=f"[COMPILER] Error loading {file_path}: {e}")
+                                return False, env
 
                         elif expr['type'] in ['add', 'minus', 'mult', 'div']:
                             arg1, arg2     = expr['args']
@@ -931,28 +1041,18 @@ class TensorCompiler:
                 # ================================================================
                 if kernels:
 
-                    # Use relative path for cache based on file_path
-                    cache_base = Path("cache")
-                    if self.debug_mode:
-                        self.tensorlang.print(message=f"[COMPILER] CACHE: {cache_base}")
-                        self.tensorlang.print(message=f"[COMPILER] CACHE FILE_PATH: {file_path}")
-                        self.tensorlang.print(message=f"[COMPILER] CACHE FILE_PATH STEM: {file_path.stem}")
-                        self.tensorlang.print(message=f"[COMPILER] CACHE TENSORLANG_FILE: {tensorlang_file}")
-
-                    #cache_file_dir = cache_base / file_path.stem
-                    cache_file_dir = cache_base / file_path
-                    cache_file_dir.mkdir(parents=True, exist_ok=True)
-
-                    if self.debug_info:
-                        self.tensorlang.print(type="[INFO]", message=f"Created cache for tensor outputs directory")
-                        self.tensorlang.print(type="[INFO]", message=f"Generated CUDA kernels:")
+                    self.tensorlang.print(message=f"[COMPILER] KERNEL CUDA!")
 
                     # Paths for Kernel cuda code and shared object files
                     kernel_cu_path = cache_file_dir / "kernel.cu"
                     kernel_so_path = cache_file_dir / "kernel.so"
 
+                    # Write cuda kernel to file
                     with open(kernel_cu_path, 'w') as f:
                         f.write(cuda_code)
+                        if self.debug_mode:
+                            self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_cu_path} written!")
+
                     try:
                         subprocess.run([
                                 'nvcc', '-o', str(kernel_so_path), 
@@ -965,10 +1065,10 @@ class TensorCompiler:
                             check=True
                         )
                         if self.debug_mode:
-                            self.tensorlang.print(message=f"[COMPILER] CUDA compiled to {kernel_so_path}!")
+                            self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_so_path} compiled!")
 
                     except subprocess.CalledProcessError as e:
-                        self.tensorlang.print(message=f"[COMPILER] CUDA compilation error: {e}")
+                        self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
                         sys.exit(1)
 
                     # =========================================
@@ -977,13 +1077,9 @@ class TensorCompiler:
                     try:
                         import pycuda.driver as cuda
                         import pycuda.autoinit
-                        import traceback
                         from ctypes import cdll
 
                         lib = cdll.LoadLibrary(str(kernel_so_path))
-
-                        if self.debug_mode:
-                            self.tensorlang.print(message=f"[COMPILER] CUDA Kernel loaded from {kernel_so_path}")
 
                         # ================================================================
                         # PHASE 0: Find backward statement index in AST
@@ -993,7 +1089,7 @@ class TensorCompiler:
                             if node['type'] == 'backward':
                                 backward_index = i
                                 if self.debug_mode:
-                                    self.tensorlang.print(message=f"[COMPILER] Found backward() at AST index {i}")
+                                    self.tensorlang.print(message=f"[COMPILER] CUDA Execute: found backward() at AST index {i}")
                                 break
 
                         # ================================================================
@@ -1007,10 +1103,19 @@ class TensorCompiler:
                             if name in tensors:
                                 cuda.memcpy_htod(gpu_allocs[name], tensors[name])
                                 if self.debug_mode:
-                                    self.tensorlang.print(message=f"[COMPILER] Copied {name} to GPU, shape: {tensors[name].shape}, sample: {tensors[name][:2] if tensors[name].ndim > 1 else tensors[name]}")
-                            else:
-                                if self.debug_mode:
-                                    self.tensorlang.print(message=f"[COMPILER] Allocated GPU memory for {name} (uninitialized), shape: {shape}")
+                                    self.tensorlang.print(
+                                        message=
+                                            f"[COMPILER] CUDA Execute: copied \"{name}\" to GPU\n"
+                                            f"shape: {tensors[name].shape} \n"
+                                            f"sample: {tensors[name][:2] if tensors[name].ndim > 1 else tensors[name]}"
+                                        )
+                            # else:
+                            #     if self.debug_mode:
+                            #         self.tensorlang.print(message=
+                            #             f"[COMPILER] CUDA Execute: allocated GPU memory for {name}\n"
+                            #             f"(uninitialized)\n"
+                            #             f"shape: {shape}"
+                            #         )
 
                         # ================================================================
                         # PHASE 2: Execute kernels BEFORE backward statement
@@ -1031,7 +1136,7 @@ class TensorCompiler:
                                     # Actually tensor literals DON'T generate kernels in your code
                             
                             if self.debug_mode:
-                                self.tensorlang.print(message=f"[COMPILER] Executing {len([k for a, k in ast_to_kernel_map.items() if a < backward_index])} kernels before backward")
+                                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: {len([k for a, k in ast_to_kernel_map.items() if a < backward_index])} kernels before backward")
                             
                             # Execute kernels for operations before backward
                             for ast_idx in range(backward_index):
@@ -1045,8 +1150,8 @@ class TensorCompiler:
 
                         else:
                             # No backward statement - execute all kernels normally
-                            if self.debug_mode:
-                                self.tensorlang.print(message=f"[COMPILER] No backward() found, executing all kernels")
+                            # if self.debug_mode:
+                            #     self.tensorlang.print(message=f"[COMPILER] CUDA Execute: no backward() found, executing all kernels")
                             
                             for kernel_info in kernels:
                                 self._execute_single_kernel(
@@ -1064,7 +1169,7 @@ class TensorCompiler:
                                 if source_name in tensors and alias_name not in tensors:
                                     tensors[alias_name] = tensors[source_name].copy()
                                     if self.debug_mode:
-                                        self.tensorlang.print(message=f"[COMPILER] Created alias: {alias_name} -> {source_name}")
+                                        self.tensorlang.print(message=f"[COMPILER] CUDA Execute: created alias: {alias_name} -> {source_name}")
 
                         # ================================================================
                         # Cache tensor literals
@@ -1075,7 +1180,7 @@ class TensorCompiler:
                                 if not cache_npy_path.exists():
                                     np.save(cache_npy_path, tensors[name])
                                     if self.debug_mode:
-                                        self.tensorlang.print(message=f"[COMPILER] Cached tensor literal: {name}")
+                                        self.tensorlang.print(message=f"[COMPILER] CUDA Execute: tensor literal: {name}")
 
                         # ================================================================
                         # Register tensors in autograd graph
@@ -1085,7 +1190,7 @@ class TensorCompiler:
                             self.comp_graph.register_tensor(name, tensors[name], requires_grad)
                             
                             if self.debug_mode and requires_grad:
-                                self.tensorlang.print(message=f"[COMPILER] [Autograd] Registered '{name}' with gradient tracking")
+                                self.tensorlang.print(message=f"[COMPILER] [Autograd] CUDA Execute: registered '{name}' with gradient tracking")
 
                         # ================================================================
                         # PHASE 3: Handle backward() statement
@@ -1152,9 +1257,9 @@ class TensorCompiler:
                         # PHASE 4: Execute kernels AFTER backward statement
                         # ================================================================
                         if backward_index is not None:
-                            if self.debug_mode:
-                                kernels_after = len([k for a, k in ast_to_kernel_map.items() if a > backward_index])
-                                self.tensorlang.print(message=f"[COMPILER] Executing {kernels_after} kernels after backward")
+                            # if self.debug_mode:
+                            #     kernels_after = len([k for a, k in ast_to_kernel_map.items() if a > backward_index])
+                            #     self.tensorlang.print(message=f"[COMPILER] Executing {kernels_after} kernels after backward")
                             
                             # Execute kernels for operations after backward
                             for ast_idx in range(backward_index + 1, len(ast)):
@@ -1186,12 +1291,17 @@ class TensorCompiler:
 
         except UnexpectedInput as e:
             self.tensorlang.print(message=f"[COMPILER] Parse error: {e}")
-            traceback.print_exc()
+            # traceback.print_exc()
             sys.exit(1)
 
         except Exception as e:
             self.tensorlang.print(message=f"[COMPILER] Unexpected error during parsing or execution: {e}")
-            traceback.print_exc()
+            # traceback.print_exc()
             sys.exit(1)
+
+        except (SyntaxError, RuntimeError) as e:
+            self.tensorlang.print(message=f"[COMPILER] Error during parsing or execution: {e}")
+            # traceback.print_exc()
+            sys.exit(errno.EINVAL)  # Example: Use specific errno code for invalid arguments
 
         self.tensorlang.separator()

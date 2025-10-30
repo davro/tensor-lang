@@ -7,6 +7,11 @@
 // - loss_before > loss_after (loss should decrease)
 // - w_updated should be closer to optimal value
 //
+// The Difference Between w_grad and w.grad
+// They are identified two different ways to access gradients:
+// w_grad - A synthesized variable name (not actually saved as a tensor)
+// w.grad - The actual gradient attribute attached to tensor w (w.grad.npy)
+// 
 // @EXPECTED
 // {
 //   "loss_before": 16.875,

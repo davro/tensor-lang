@@ -462,7 +462,20 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
             tensorlang.print(message=f"[AST] {tree.data} args: tensor={tensor_name}, eps={eps}")
         return {'type': 'instance_norm', 'tensor': tensor_name, 'eps': eps}
     
-    print(f"Unrecognized expr type: {tree.data}")
+    # Load from file
+    elif tree.data == 'load_call':
+        file_path = None
+        for child in tree.children:
+            if isinstance(child, Token) and child.type == 'STRING':
+                # Remove quotes from string
+                file_path = child.value.strip('"').strip("'")
+                print(f"[AST] build expression: {tree.data} {file_path}")
+        if DEBUG_INFO:
+            tensorlang.print(message=f"[AST] {tree.data} file_path: {file_path}")
+        return {'type': 'load', 'file_path': file_path}
+
+
+    print(f"[AST] Unrecognized expr type: {tree.data}")
     return None
 
 
