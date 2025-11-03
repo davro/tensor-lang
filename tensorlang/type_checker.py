@@ -73,7 +73,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             elif isinstance(expr, dict) and expr['type'] in [
                     'matmul', 'add', 'minus', 'mult', 'div', 
                     'relu', 'sigmoid', 'tanh', 'gelu', 'swish', 'softmax', 
-                    'fill', 'load',
+                    'fill', 'load', 'save',
                     'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
                     'greater', 'less', 'equal', 
                     'linear', 'layer_norm', 'batch_norm', 'instance_norm', 'cross_entropy', 'mse_loss', 
@@ -88,7 +88,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 elif expr['type'] == 'load':
                     file_path = expr['file_path']
                     
-                    # If type was explicitly declared, use it
+                    # Check If type was explicitly declared, use it
                     if ty:
                         env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
                         if DEBUG_MODE:
@@ -117,6 +117,17 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         except Exception as e:
                             tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
                             return False, env
+
+                elif node['type'] == 'save':
+                    tensor_name = node['tensor']
+                    
+                    # Verify tensor exists
+                    if tensor_name not in env:
+                        tensorlang.print(message=f"[TYPE CHECKER] Error: Cannot save undefined tensor '{tensor_name}'")
+                        return False, env
+                    
+                    if DEBUG_INFO:
+                        print(f"[INFO] Save statement validated for {tensor_name}")
 
                 elif expr['type'] in ['sum', 'mean']:
                     tensor_name = expr['tensor']
@@ -450,13 +461,30 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             return False, env
 
                             
-                        if expr['type'] == 'matmul':
-                            if args[0]['shape'][1] != args[1]['shape'][0]:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch")
-                                return False, env
-                            env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
-                            if DEBUG_INFO:
-                                print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                        # if expr['type'] == 'matmul':
+                        #     if args[0]['shape'][1] != args[1]['shape'][0]:
+                        #         tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch")
+                        #         return False, env
+                        #     env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
+                        #     if DEBUG_INFO:
+                        #         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+
+                        if node['type'] == 'matmul':
+                            a_shape = args[0]['shape']
+                            b_shape = args[1]['shape']
+
+                            if len(a_shape) == 2 and len(b_shape) == 2:
+                                # Matrix-Matrix multiply
+                                env[name] = {'dtype': 'f32', 'shape': (a_shape[0], b_shape[1])}
+                            elif len(a_shape) == 2 and len(b_shape) == 1:
+                                # Matrix-Vector multiply
+                                env[name] = {'dtype': 'f32', 'shape': (a_shape[0],)}
+                            elif len(a_shape) == 1 and len(b_shape) == 2:
+                                # Vector-Matrix multiply
+                                env[name] = {'dtype': 'f32', 'shape': (b_shape[1],)}
+                            else:
+                                raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
+
 
                         elif expr['type'] in ['add', 'minus', 'mult', 'div']:
                             shape1, shape2 = args[0]['shape'], args[1]['shape']

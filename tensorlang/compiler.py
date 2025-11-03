@@ -456,6 +456,75 @@ class TensorCompiler:
 
             self.tensorlang.print(type=f"[COMPILER] Result {name} ({op_type}):\n{output}")
 
+    def _execute_save_statement(self, save_node, tensors, gpu_allocs, env, cache_file_dir, cuda):
+        """
+        Execute a save statement: save(tensor, "path.npy")
+        
+        Args:
+            save_node: AST node with 'type'='save'
+            tensors: Dict of CPU tensors
+            gpu_allocs: Dict of GPU allocations
+            env: Type environment
+            cache_file_dir: Base cache directory
+            cuda: PyCUDA module
+        """
+        tensor_name = save_node['tensor']
+        file_path = save_node['file_path']
+        
+        if self.debug_mode:
+            self.tensorlang.print(message=f"[COMPILER] Executing save: {tensor_name} -> {file_path}")
+        
+        # ================================================================
+        # 1. Get tensor data (from CPU or GPU)
+        # ================================================================
+        if tensor_name in tensors:
+            # Already in CPU memory
+            tensor_data = tensors[tensor_name]
+        elif tensor_name in gpu_allocs and tensor_name in env:
+            # Need to copy from GPU
+            shape = tuple(int(dim) for dim in env[tensor_name]['shape'])
+            tensor_data = np.zeros(shape, dtype=np.float32)
+            cuda.memcpy_dtoh(tensor_data, gpu_allocs[tensor_name])
+            
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] Copied {tensor_name} from GPU for save")
+        else:
+            self.tensorlang.print(message=f"[COMPILER] Error: Tensor '{tensor_name}' not found for save")
+            return
+        
+        # ================================================================
+        # 2. Resolve path (relative to cache or absolute)
+        # ================================================================
+        save_path = Path(file_path)
+        
+        if not save_path.is_absolute():
+            # Relative path - save to cache directory
+            save_path = cache_file_dir / save_path
+        
+        # ================================================================
+        # 3. Create parent directories
+        # ================================================================
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # ================================================================
+        # 4. Save to disk
+        # ================================================================
+        try:
+            np.save(save_path, tensor_data)
+            
+            if self.debug_mode:
+                self.tensorlang.print(
+                    message=f"[COMPILER] Saved {tensor_name}\n"
+                            f"  Path:  {save_path}\n"
+                            f"  Shape: {tensor_data.shape}\n"
+                            f"  Size:  {save_path.stat().st_size} bytes"
+                )
+            else:
+                self.tensorlang.print(message=f"[COMPILER] Saved {tensor_name} to {save_path}")
+            
+        except IOError as e:
+            self.tensorlang.print(message=f"[COMPILER] Error saving {tensor_name} to {file_path}: {e}")
+
     def compile_and_execute(self, tensorlang_file):
         """Compile and execute a single .tl file."""
 
@@ -546,6 +615,7 @@ class TensorCompiler:
             if self.debug_info:
                 self.tensorlang.print(type="[INFO]", message=f"Created cache for tensor outputs directory")
 
+
             # Parser
             parse_tree = parser.parse(code)
             if self.debug_ast:
@@ -579,6 +649,19 @@ class TensorCompiler:
                 cuda_code = generator.cuda_header()
                 for node in ast:
                     # print (f"Compiler Node: {node}")
+
+                    if node['type'] == 'save':
+                        # Validate that tensor exists
+                        tensor_name = node['tensor']
+                        if tensor_name not in env:
+                            self.tensorlang.print(message=f"[COMPILER] Error: Cannot save undefined tensor '{tensor_name}'")
+                            return False, env
+                        if self.debug_mode:
+                            self.tensorlang.print(message=f"[COMPILER] Queued save operation: {tensor_name} -> {node['file_path']}")
+                        continue  # ← SKIP to next node - don't generate kernel for save
+                    
+                    if node['type'] == 'backward':
+                        continue  # ← SKIP backward too - it's handled in Phase 3
 
                     if node['type'] == 'let' and node.get('requires_grad', False):
                         name = node['name']
@@ -709,18 +792,58 @@ class TensorCompiler:
                         # ========================================
                         # MATMUL
                         # ========================================
+                        # elif expr['type'] == 'matmul':
+                        #     arg1, arg2 = expr['args']
+                        #     m, n       = int(env[arg1]['shape'][0]), int(env[arg1]['shape'][1])
+                        #     p          = int(env[arg2]['shape'][1])
+                        #     kernel, kernel_info = generator.matmul(
+                        #         expr['type'], name, arg1, arg2, m, n, p
+                        #     )
+                        #     kernels.append(kernel_info)
+                        #     cuda_code += kernel
+
+                        #     # NEW: Record in autograd graph
+                        #     self._record_operation('matmul', name, [arg1, arg2])
+
                         elif expr['type'] == 'matmul':
                             arg1, arg2 = expr['args']
-                            m, n       = int(env[arg1]['shape'][0]), int(env[arg1]['shape'][1])
-                            p          = int(env[arg2]['shape'][1])
+
+                            a_shape = env[arg1]['shape']
+                            b_shape = env[arg2]['shape']
+
+                            if len(a_shape) == 2 and len(b_shape) == 2:
+                                m, n, p = a_shape[0], a_shape[1], b_shape[1]
+                            elif len(a_shape) == 2 and len(b_shape) == 1:
+                                m, n, p = a_shape[0], a_shape[1], b_shape[0]
+                            else:
+                                raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
+
+                            # Generate CUDA kernel
                             kernel, kernel_info = generator.matmul(
-                                expr['type'], name, arg1, arg2, m, n, p
+                                expr['type'], name, arg1, arg2, int(m), int(n), int(p)
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
-                            # NEW: Record in autograd graph
+                            # Register output in env for save() and later ops
+                            if len(a_shape) == 2 and len(b_shape) == 2:
+                                out_shape = (a_shape[0], b_shape[1])
+                            elif len(a_shape) == 2 and len(b_shape) == 1:
+                                out_shape = (a_shape[0],)
+                            elif len(a_shape) == 1 and len(b_shape) == 2:
+                                out_shape = (b_shape[1],)
+                            else:
+                                raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
+
+                            env[name] = {
+                                "dtype": env[arg1]["dtype"],
+                                "shape": out_shape,
+                            }
+
+                            # Record autograd info
                             self._record_operation('matmul', name, [arg1, arg2])
+
+
 
                         # ========================================
                         # ReLU | SIGMOID | TANH
@@ -1035,6 +1158,7 @@ class TensorCompiler:
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
+
                 # ================================================================
                 # KERNEL COMPILATION, EXECUTION AND CACHING
                 # ================================================================
@@ -1270,6 +1394,22 @@ class TensorCompiler:
                                             tensors, cache_file_dir, cuda
                                         )
 
+                        # ================================================================
+                        # PHASE 5: Execute save statements
+                        # ================================================================
+                        save_count = sum(1 for n in ast if n['type'] == 'save')
+                        if save_count > 0:
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"[COMPILER] Executing {save_count} save statement(s)")
+                            
+                            for node in ast:
+                                if node['type'] == 'save':
+                                    self._execute_save_statement(
+                                        node, tensors, gpu_allocs, env, 
+                                        cache_file_dir, cuda
+                                    )
+
+
                         # Free GPU memory
                         for name, alloc in gpu_allocs.items():
                             alloc.free()
@@ -1286,17 +1426,21 @@ class TensorCompiler:
 
         except ValueError as e:
             self.tensorlang.print(message=f"[COMPILER] Value Error: failed: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
 
         except UnexpectedInput as e:
             self.tensorlang.print(message=f"[COMPILER] Parse error: {e}")
-            # traceback.print_exc()
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
 
         except Exception as e:
-            self.tensorlang.print(message=f"[COMPILER] Unexpected error during parsing or execution: {e}")
-            # traceback.print_exc()
-            sys.exit(1)
+            self.tensorlang.print(message=f"[COMPILER] Exception at: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
         except (SyntaxError, RuntimeError) as e:
             self.tensorlang.print(message=f"[COMPILER] Error during parsing or execution: {e}")

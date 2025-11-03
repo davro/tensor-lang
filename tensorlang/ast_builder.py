@@ -32,6 +32,11 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                     backward_node = build_backward_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if backward_node:
                         ast.append(backward_node)
+                
+                elif stmt.data == 'save_statement':
+                    save_node = build_save_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if save_node:
+                        ast.append(save_node)
 
                 # Let binding
                 elif stmt.data == 'let_binding':
@@ -122,49 +127,6 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
 
     
     return ast, output_tensor, functions
-
-
-# def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
-#     """Parse: let name: Type = expr"""
-#     if DEBUG_MODE:
-#         print(f"Building let_binding from {tree.data}")
-#     if tree.data != 'let_binding':
-#         if DEBUG_MODE:
-#             print(f"Invalid let_binding node: {tree.data}")
-#         return None
-    
-#     children = tree.children
-#     requires_grad = False
-
-#     # NEW: Check for 'with grad' marker
-#     for child in children:
-#         if isinstance(child, Tree) and child.data == 'grad_marker':
-#             requires_grad = True
-#             if DEBUG_MODE:
-#                 print(f"Found grad_marker - tensor will track gradients")
-
-#     if len(children) == 3:
-#         name = children[0].value
-#         if DEBUG_MODE:
-#             print(f"Processing let binding for {name}")
-#         if isinstance(children[1], Tree) and children[1].data == 'type':
-#             ty = build_type(children[1], DEBUG_MODE, DEBUG_INFO)
-#             expr = build_expression(children[2], DEBUG_MODE, DEBUG_INFO)
-#         else:
-#             ty = None
-#             expr = build_expression(children[2], DEBUG_MODE, DEBUG_INFO)
-#         return {
-#             'type': 'let', 
-#             'name': name, 
-#             'ty': ty, 
-#             'expr': expr, 
-#             'requires_grad': requires_grad,
-#             'tree': tree
-#         }
-#     else:
-#         if DEBUG_MODE:
-#             print(f"Unexpected number of children in let_binding: {len(children)}")
-#         return None
 
 def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
     """Parse: let name: Type = expr [with grad]"""
@@ -475,9 +437,42 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
         return {'type': 'load', 'file_path': file_path}
 
 
+
     print(f"[AST] Unrecognized expr type: {tree.data}")
     return None
 
+# def build_save_node(tree, debug_mode=False):
+#     """
+#     Parse save(tensor, "path.npy") statements
+    
+#     Args:
+#         tree: Lark parse tree for save_call
+        
+#     Returns:
+#         dict: AST node for save operation
+#     """
+#     # Extract tensor name (could be a name or expression)
+#     tensor_arg = tree.children[0]
+    
+#     if isinstance(tensor_arg, Token) and tensor_arg.type == 'NAME':
+#         tensor_name = str(tensor_arg.value)
+#     elif isinstance(tensor_arg, Tree) and tensor_arg.data == 'name':
+#         tensor_name = str(tensor_arg.children[0].value)
+#     else:
+#         raise ValueError(f"save() requires a tensor name, got {tensor_arg}")
+    
+#     # Extract file path
+#     file_path_token = tree.children[1]
+#     file_path = file_path_token.value.strip('"')
+    
+#     if debug_mode:
+#         print(f"[AST] save: {tensor_name} -> {file_path}")
+    
+#     return {
+#         'type': 'save',
+#         'tensor': tensor_name,
+#         'file_path': file_path
+#     }
 
 def build_slice_spec(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     """Parse slice specification like 0:2, :, 1:, etc."""
@@ -701,3 +696,41 @@ def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
             'loss_tensor': loss_tensor
         }
     return None
+
+
+def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+    """
+    Parse: save(tensor_name, "path.npy")
+    
+    Args:
+        tree: Lark parse tree for save_statement
+        
+    Returns:
+        dict: AST node for save operation
+    """
+    if tree.data != 'save_statement':
+        return None
+    
+    # Extract tensor name
+    tensor_name = None
+    file_path = None
+    
+    for child in tree.children:
+        if isinstance(child, Token):
+            if child.type == 'NAME':
+                tensor_name = child.value
+            elif child.type == 'STRING':
+                # Remove quotes
+                file_path = child.value.strip('"').strip("'")
+    
+    if DEBUG_MODE:
+        tensorlang.print(message=f"[AST] save: {tensor_name} -> {file_path}")
+    
+    if not tensor_name or not file_path:
+        raise ValueError(f"save() requires tensor name and file path")
+    
+    return {
+        'type': 'save',
+        'tensor': tensor_name,
+        'file_path': file_path
+    }

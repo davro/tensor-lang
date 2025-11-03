@@ -9,12 +9,13 @@ program: (statement)*
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// Statement Rule
+// Statement Rule (doesn't return a value)
 ////////////////////////////////////////////////////////////////////////////////
 statement: function_def 
          | let_binding 
          | if_statement 
-         | backward_statement   
+         | backward_statement
+         | save_statement
          | expr
 
 
@@ -34,9 +35,12 @@ let_binding: "let" NAME [":" type] "=" expr [grad_marker]
 
 grad_marker: "with" "grad"
 
+// ADD THIS - Define save_statement properly
+save_statement: "save" "(" NAME "," STRING ")"
+
 
 ////////////////////////////////////////////////////////////////////////////////
-// Expressions
+// Expressions (returns a value)
 ////////////////////////////////////////////////////////////////////////////////
 expr: tensor_literal 
     | fill_call 
@@ -131,6 +135,7 @@ swish_call: "swish" "(" NAME ")"
 
 // File I/O
 load_call: "load" "(" STRING ")"
+//save_call: "save" "(" expr "," STRING ")"
 
 ////////////////////////////////////////////////////////////////////////////////
 // Reduction operations
