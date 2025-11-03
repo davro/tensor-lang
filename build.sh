@@ -21,7 +21,12 @@ pip install ruff
 #pip install -r requirements.txt
 #pip freeze > requirements.txt
 
+# TensorLang remove cache
+rm -rf cache/
+
+# Code check linting
 ruff check tensorlang/
 
-# Test Runner for all tests
-#python3 tests/runner.py
+# Test suite for all tests
+python3 tensorlang.py --cache-layers --verify-tensors --test
+

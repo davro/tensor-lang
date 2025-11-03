@@ -35,12 +35,36 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             expr = node['expr']
             ty = node['ty']
 
+            arg_names = expr.get('args', [])
+            args = [env.get(a) for a in arg_names if a in env]
+
+            tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
+            tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
+
+            # if expr['type'] == 'matmul':
+            #     if len(args) != 2:
+            #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul needs 2 args for {name}, got {len(args)}")
+            #         return False, env
+
+            #     a, b = args
+            #     if len(a['shape']) != 2 or len(b['shape']) != 2:
+            #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul expects 2D tensors, got {a['shape']} and {b['shape']}")
+            #         return False, env
+
+            #     if a['shape'][1] != b['shape'][0]:
+            #         tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
+            #         return False, env
+
+            #     env[name] = {'dtype': 'f32', 'shape': (a['shape'][0], b['shape'][1])}
+
+
+
             if ty and isinstance(ty, dict) and 'dtype' in ty:
                 shape = ty['shape']
                 if any(isinstance(dim, str) for dim in shape):
                     if DEBUG_INFO:
                         tensorlang.print(message=f"[TYPE CHECKER] Generic type for {name}: {ty}")
-                    continue
+                    # continue
                 else:
                     env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
                     if DEBUG_INFO:
@@ -461,29 +485,63 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             return False, env
 
                             
+                        if expr['type'] == 'matmul':
+                            if args[0]['shape'][1] != args[1]['shape'][0]:
+                                tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch")
+                                return False, env
+                            env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
+                            if DEBUG_INFO:
+                                print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+
                         # if expr['type'] == 'matmul':
-                        #     if args[0]['shape'][1] != args[1]['shape'][0]:
-                        #         tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch")
+                        #     if len(args) != 2:
+                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul needs 2 args for {name}, got {len(args)}")
                         #         return False, env
-                        #     env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
-                        #     if DEBUG_INFO:
-                        #         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
 
-                        if node['type'] == 'matmul':
-                            a_shape = args[0]['shape']
-                            b_shape = args[1]['shape']
+                        #     a, b = args
+                        #     a_shape, b_shape = a['shape'], b['shape']
 
-                            if len(a_shape) == 2 and len(b_shape) == 2:
-                                # Matrix-Matrix multiply
-                                env[name] = {'dtype': 'f32', 'shape': (a_shape[0], b_shape[1])}
-                            elif len(a_shape) == 2 and len(b_shape) == 1:
-                                # Matrix-Vector multiply
-                                env[name] = {'dtype': 'f32', 'shape': (a_shape[0],)}
-                            elif len(a_shape) == 1 and len(b_shape) == 2:
-                                # Vector-Matrix multiply
-                                env[name] = {'dtype': 'f32', 'shape': (b_shape[1],)}
-                            else:
-                                raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
+                        #     # Matrix @ Matrix
+                        #     if len(a_shape) == 2 and len(b_shape) == 2:
+                        #         if a_shape[1] != b_shape[0]:
+                        #             tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
+                        #             return False, env
+                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0], b_shape[1])}
+
+                        #     # Matrix @ Vector
+                        #     elif len(a_shape) == 2 and len(b_shape) == 1:
+                        #         if a_shape[1] != b_shape[0]:
+                        #             tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
+                        #             return False, env
+                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0],)}
+
+                        #     # Vector @ Matrix
+                        #     elif len(a_shape) == 1 and len(b_shape) == 2:
+                        #         if a_shape[0] != b_shape[0]:
+                        #             tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
+                        #             return False, env
+                        #         env[name] = {'dtype': 'f32', 'shape': (b_shape[1],)}
+
+                        #     else:
+                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul expects 1D or 2D tensors, got {a_shape} and {b_shape}")
+                        #         return False, env
+
+
+                        # if node['type'] == 'matmul':
+                        #     a_shape = args[0]['shape']
+                        #     b_shape = args[1]['shape']
+
+                        #     if len(a_shape) == 2 and len(b_shape) == 2:
+                        #         # Matrix-Matrix multiply
+                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0], b_shape[1])}
+                        #     elif len(a_shape) == 2 and len(b_shape) == 1:
+                        #         # Matrix-Vector multiply
+                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0],)}
+                        #     elif len(a_shape) == 1 and len(b_shape) == 2:
+                        #         # Vector-Matrix multiply
+                        #         env[name] = {'dtype': 'f32', 'shape': (b_shape[1],)}
+                        #     else:
+                        #         raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
 
 
                         elif expr['type'] in ['add', 'minus', 'mult', 'div']:
@@ -660,35 +718,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             tensorlang.print(message=f"[TYPE CHECKER] ERROR: '{tensor_name}' not in env!")
             if DEBUG_MODE:
                 tensorlang.print(message=f"[TYPE CHECKER] Found {requires_grad_count} requires_grad tensors")
+
+
     if DEBUG_MODE:
         tensorlang.print(message=f"[TYPE CHECKER] Found {backward_count} backward statements")
         tensorlang.print(message=f"[TYPE CHECKER] Final environment keys: {list(env.keys())}")
     return True, env
-
-# ================================================================================
-# BACKWARD PASS from 'loss_before'
-# ================================================================================
-
-# Gradient loss_before.grad:
-# 1.0
-
-# Gradient w.grad:
-# [[-22.5]]
-
-# Gradient y_pred.grad:
-# [[-0.75]
-#  [-1.5 ]
-#  [-2.25]
-#  [-3.  ]]
-# ================================================================================
-# [COMPILER] Result update (mult):
-# [[-2.25]] 
-# [COMPILER] Result w_updated (minus):
-# [[2.75]] 
-# [COMPILER] Result y_pred_new (matmul):
-# [[ 2.75]
-#  [ 5.5 ]
-#  [ 8.25]
-#  [11.  ]] 
-# [COMPILER] Result loss_after (mse_loss):
-# 4.21875 
