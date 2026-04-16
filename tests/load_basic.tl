@@ -4,7 +4,7 @@
 // ============================================================================
 // Description: Test loading .npy files
 //
-// Setup: python3 scripts/generate_test_data.py
+// Depends on tests/basics.tl
 //
 // @EXPECTED
 // {

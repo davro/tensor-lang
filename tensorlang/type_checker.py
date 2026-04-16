@@ -30,6 +30,27 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
     # PASS 1: Type check all let bindings
     # ================================================================
     for node in ast:
+
+        # ----------------------------------------------------------------
+        # Skip rebind nodes — they reassign an existing name, so the shape
+        # is already in env from when it was first declared with 'let'.
+        # ----------------------------------------------------------------
+        if node['type'] == 'rebind':
+            continue
+
+        # ----------------------------------------------------------------
+        # For loops: run type inference over the body once (shapes are
+        # static — the loop doesn't change dimensionality, only values).
+        # All body let_bindings are added to the SAME env so the compiler
+        # can allocate GPU memory for them.
+        # ----------------------------------------------------------------
+        if node['type'] == 'for':
+            success, env = type_checker(node['body'], env, DEBUG_INFO, DEBUG_MODE)
+            if not success:
+                return False, env
+            continue
+
+
         if node['type'] == 'let':
             name = node['name']
             expr = node['expr']
@@ -40,24 +61,6 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
 
             tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
             tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
-
-            # if expr['type'] == 'matmul':
-            #     if len(args) != 2:
-            #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul needs 2 args for {name}, got {len(args)}")
-            #         return False, env
-
-            #     a, b = args
-            #     if len(a['shape']) != 2 or len(b['shape']) != 2:
-            #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul expects 2D tensors, got {a['shape']} and {b['shape']}")
-            #         return False, env
-
-            #     if a['shape'][1] != b['shape'][0]:
-            #         tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
-            #         return False, env
-
-            #     env[name] = {'dtype': 'f32', 'shape': (a['shape'][0], b['shape'][1])}
-
-
 
             if ty and isinstance(ty, dict) and 'dtype' in ty:
                 shape = ty['shape']
@@ -109,6 +112,39 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned from fill: {env[name]}")
                 
+                # elif expr['type'] == 'load':
+                #     file_path = expr['file_path']
+                    
+                #     # Check If type was explicitly declared, use it
+                #     if ty:
+                #         env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
+                #         if DEBUG_MODE:
+                #             tensorlang.print(message=f"[TYPE CHECKER] {name}: explicit shape from declaration: {env[name]}")
+                #     else:
+                #         # INFER: Load file and infer shape
+                #         if DEBUG_MODE:
+                #             tensorlang.print(message=f"[TYPE CHECKER] {name}: inferring shape from {file_path}")
+                        
+                #         try:
+                #             # Load file to infer shape
+                #             loaded_data = np.load(file_path)
+                #             inferred_shape = tuple(loaded_data.shape)
+                            
+                #             env[name] = {
+                #                 'dtype': 'f32',
+                #                 'shape': inferred_shape
+                #             }
+                            
+                #             if DEBUG_MODE:
+                #                 tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from file")
+                            
+                #         except FileNotFoundError:
+                #             tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
+                #             return False, env
+                #         except Exception as e:
+                #             tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
+                #             return False, env
+
                 elif expr['type'] == 'load':
                     file_path = expr['file_path']
                     
@@ -123,17 +159,66 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             tensorlang.print(message=f"[TYPE CHECKER] {name}: inferring shape from {file_path}")
                         
                         try:
-                            # Load file to infer shape
-                            loaded_data = np.load(file_path)
-                            inferred_shape = tuple(loaded_data.shape)
+                            from pathlib import Path
+                            path = Path(file_path)
+                            suffix = path.suffix.lower()
                             
+                            # ================================================================
+                            # Handle different file formats
+                            # ================================================================
+                            if suffix == '.npy':
+                                # NPY: Simple array load
+                                loaded_data = np.load(file_path)
+                                inferred_shape = tuple(loaded_data.shape)
+                            
+                            elif suffix == '.npz':
+                                # NPZ: Multiple arrays - need to open and extract
+                                npz_file = np.load(file_path)
+                                #npz_file = np.load(file_path, allow_pickle=True) 
+                                
+                                # Get 'data' array or first available array
+                                if 'data' in npz_file.files:
+                                    data_array = npz_file['data']
+                                elif len(npz_file.files) > 0:
+                                    data_array = npz_file[npz_file.files[0]]
+                                    if DEBUG_MODE:
+                                        tensorlang.print(message=f"[TYPE CHECKER] NPZ: Using array '{npz_file.files[0]}' (no 'data' array found)")
+                                else:
+                                    npz_file.close()
+                                    tensorlang.print(message=f"[TYPE CHECKER] error: NPZ file has no arrays: {file_path}")
+                                    return False, env
+                                
+                                inferred_shape = tuple(data_array.shape)
+                                npz_file.close()  # Important: close the file!
+                            
+                            elif suffix == '.csv':
+                                # CSV: Use pandas to infer shape
+                                try:
+                                    import pandas as pd
+                                    df = pd.read_csv(file_path)
+                                    
+                                    # Check if first column is index
+                                    first_col = df.columns[0]
+                                    if first_col.lower() in ['date', 'time', 'datetime', 'index', 'id']:
+                                        df = df.drop(columns=[first_col])
+                                    
+                                    inferred_shape = tuple(df.shape)
+                                except ImportError:
+                                    tensorlang.print(message=f"[TYPE CHECKER] error: pandas required for CSV loading")
+                                    return False, env
+                            
+                            else:
+                                tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported file format: {suffix}")
+                                return False, env
+                            
+                            # Register inferred type
                             env[name] = {
                                 'dtype': 'f32',
                                 'shape': inferred_shape
                             }
                             
                             if DEBUG_MODE:
-                                tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from file")
+                                tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from {suffix.upper()} file")
                             
                         except FileNotFoundError:
                             tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
@@ -141,6 +226,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         except Exception as e:
                             tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
                             return False, env
+
 
                 elif node['type'] == 'save':
                     tensor_name = node['tensor']
@@ -492,6 +578,24 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
                             if DEBUG_INFO:
                                 print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+
+
+                        # if expr['type'] == 'matmul':
+                        #     if len(args) != 2:
+                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul needs 2 args for {name}, got {len(args)}")
+                        #         return False, env
+
+                        #     a, b = args
+                        #     if len(a['shape']) != 2 or len(b['shape']) != 2:
+                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul expects 2D tensors, got {a['shape']} and {b['shape']}")
+                        #         return False, env
+
+                        #     if a['shape'][1] != b['shape'][0]:
+                        #         tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
+                        #         return False, env
+
+                        #     env[name] = {'dtype': 'f32', 'shape': (a['shape'][0], b['shape'][1])}
+
 
                         # if expr['type'] == 'matmul':
                         #     if len(args) != 2:

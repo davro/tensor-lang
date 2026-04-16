@@ -14,6 +14,8 @@ program: (statement)*
 statement: function_def 
          | let_binding 
          | if_statement 
+         | for_statement
+         | rebind_statement
          | backward_statement
          | save_statement
          | expr
@@ -35,8 +37,39 @@ let_binding: "let" NAME [":" type] "=" expr [grad_marker]
 
 grad_marker: "with" "grad"
 
+// Mutation — reassigns an existing binding (used inside for loops to advance state)
+// e.g.  w = w_updated
+rebind_statement: NAME "=" expr
+
 // ADD THIS - Define save_statement properly
 save_statement: "save" "(" NAME "," STRING ")"
+
+
+////////////////////////////////////////////////////////////////////////////////
+// For loop
+////////////////////////////////////////////////////////////////////////////////
+// Simple counted loop: for <var> in range(<n>) { ... }
+//
+// <var>  — loop counter, available as a NAME inside the body (read-only integer)
+// <n>    — literal integer iteration count (must be a positive whole number)
+//
+// Rebind pattern inside the body:
+//   let w_new = minus(w, mult(lr, w_grad))
+//   w = w_new        <- rebind_statement: advances 'w' to its updated value
+//
+// The executor compiles the body once, then iterates N times in Python,
+// swapping GPU buffer pointers for rebound names between iterations.
+
+for_statement: "for" NAME "in" "range" "(" NUMBER ")" "{" (for_body_statement)* "}"
+
+// for_body_statement mirrors statement but excludes nested for loops and
+// function definitions (keep it simple for now — can relax later).
+for_body_statement: let_binding
+                  | rebind_statement
+                  | backward_statement
+                  | if_statement
+                  | save_statement
+                  | expr
 
 
 ////////////////////////////////////////////////////////////////////////////////

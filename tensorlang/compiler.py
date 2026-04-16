@@ -6,6 +6,10 @@ import textwrap
 import traceback 
 import subprocess
 
+import pandas as pd
+from pathlib import Path
+from typing import Tuple, Optional, Dict, Any
+
 from pathlib import Path
 import numpy as np
 from lark import Lark, Tree, Token, UnexpectedInput
@@ -25,18 +29,19 @@ from tensorlang.autograd import ComputationGraph, AutogradContext
 
 class TensorCompiler:
 
-    def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False):
+    def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False):
         self.debug_mode   = debug_mode
         self.debug_info   = debug_info
         self.debug_ast    = debug_ast
         self.cache_layers = cache_layers
+        self.transpile    = transpile
+        # TensoLang options and information
         self.tensorlang   = TensorLang()
         self.version      = self.tensorlang.version
         
         # NEW: Autograd support
         self.comp_graph = ComputationGraph(debug_mode=debug_mode)
         self.requires_grad_tensors = set()
-
 
     def _should_track_gradients(self, tensor_name):
         """Check if a tensor should have gradients tracked."""
@@ -70,50 +75,168 @@ class TensorCompiler:
                 return False
         return True
 
-    def visit_load_call(self, tree):
-        """Handle load("path.npy") calls"""
-        # Extract file path
-        string_token = tree.children[0]
-        file_path = string_token.value.strip('"')  # Remove quotes
+
+    def _load_data_file(self, file_path: str, array_name: Optional[str] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """
+        Load data from various file formats with automatic detection.
         
-        print(f"[COMPILER] Loading tensor from: {file_path}")
+        Supports:
+            - .npy: NumPy binary format (single array)
+            - .npz: NumPy compressed format (multiple arrays)
+            - .csv: Comma-separated values
         
-        # Load the numpy file
-        try:
-            tensor_data = np.load(file_path)
+        Args:
+            file_path: Path to data file
+            array_name: For .npz files, which array to load (default: 'data')
+        
+        Returns:
+            (data_array, metadata_dict)
             
-            # Infer shape and dtype
-            shape = tensor_data.shape
-            dtype = tensor_data.dtype
+        Example:
+            data, meta = self._load_data_file("bitcoin_daily.npz")
+            # data: float32 array of shape (N, 8)
+            # meta: {'columns': [...], 'index': [...], 'format': 'npz'}
+        """
+        path = Path(file_path)
+        
+        # Handle relative paths
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        
+        if not path.exists():
+            raise FileNotFoundError(f"Data file not found: {file_path}")
+        
+        suffix = path.suffix.lower()
+        metadata = {'format': suffix[1:], 'path': str(path)}
+        
+        # ================================================================
+        # NPY Format - Single Array
+        # ================================================================
+        if suffix == '.npy':
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] Loading .npy file: {path.name}")
             
-            print(f"[COMPILER] Loaded tensor: shape={shape}, dtype={dtype}")
+            data = np.load(path).astype(np.float32)
+            metadata['shape'] = data.shape
+            metadata['dtype'] = 'f32'
             
-            # Create a unique name for this loaded tensor
-            load_id = f"loaded_{len(self.layers)}"
+            return data, metadata
+        
+        # ================================================================
+        # NPZ Format - Multiple Arrays (Compressed)
+        # ================================================================
+        elif suffix == '.npz':
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] Loading .npz file: {path.name}")
             
-            # Add as a layer (similar to tensor_literal)
-            self.layers.append({
-                'name': load_id,
-                'op': 'load',
-                'file_path': file_path,
-                'shape': shape,
-                'dtype': dtype,
-                'data': tensor_data
-            })
+            npz_file = np.load(path)            
+            #npz_file = np.load(path, allow_pickle=True)
             
-            # Update symbol table
-            self.symbol_table[load_id] = {
-                'shape': shape,
-                'dtype': dtype,
-                'requires_grad': False  # Loaded tensors are frozen by default
-            }
+            # List available arrays
+            available_arrays = list(npz_file.files)
+            metadata['available_arrays'] = available_arrays
             
-            return load_id
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER]   Available arrays: {available_arrays}")
             
-        except FileNotFoundError:
-            raise CompileError(f"File not found: {file_path}")
-        except Exception as e:
-            raise CompileError(f"Error loading {file_path}: {e}")
+            # Determine which array to load
+            if array_name:
+                # Explicit array name provided
+                if array_name not in available_arrays:
+                    raise KeyError(f"Array '{array_name}' not found in {path.name}. Available: {available_arrays}")
+                data = npz_file[array_name].astype(np.float32)
+                metadata['array_name'] = array_name
+            else:
+                # Default behavior: look for 'data', or use first array
+                if 'data' in available_arrays:
+                    data = npz_file['data'].astype(np.float32)
+                    metadata['array_name'] = 'data'
+                else:
+                    data = npz_file[available_arrays[0]].astype(np.float32)
+                    metadata['array_name'] = available_arrays[0]
+                    if self.debug_mode:
+                        self.tensorlang.print(
+                            message=f"[COMPILER]   No 'data' array found, using '{available_arrays[0]}'"
+                        )
+            
+            # Extract additional metadata if present
+            if 'columns' in available_arrays:
+                metadata['columns'] = npz_file['columns'].tolist()
+                if self.debug_mode:
+                    self.tensorlang.print(message=f"[COMPILER]   Columns: {metadata['columns']}")
+            
+            if 'index' in available_arrays:
+                # Handle byte strings from dates
+                index_data = npz_file['index']
+                if index_data.dtype.kind == 'S':  # Byte string
+                    metadata['index'] = [x.decode('utf-8') if isinstance(x, bytes) else x for x in index_data]
+                else:
+                    metadata['index'] = index_data.tolist()
+                
+                if self.debug_mode:
+                    self.tensorlang.print(
+                        message=f"[COMPILER]   Index: {len(metadata['index'])} entries "
+                                f"({metadata['index'][0]} to {metadata['index'][-1]})"
+                    )
+            
+            metadata['shape'] = data.shape
+            metadata['dtype'] = 'f32'
+            
+            return data, metadata
+        
+        # ================================================================
+        # CSV Format - Text
+        # ================================================================
+        elif suffix == '.csv':
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] Loading .csv file: {path.name}")
+            
+            # Read CSV with pandas for robust parsing
+            try:
+                df = pd.read_csv(path)
+            except Exception as e:
+                raise ValueError(f"Failed to parse CSV file {path.name}: {e}")
+            
+            # Extract metadata
+            metadata['columns'] = df.columns.tolist()
+            metadata['rows'] = len(df)
+            
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER]   Columns: {metadata['columns']}")
+                self.tensorlang.print(message=f"[COMPILER]   Rows: {metadata['rows']}")
+            
+            # Check if first column looks like an index (dates, sequential numbers, etc.)
+            first_col = df.columns[0]
+            if first_col.lower() in ['date', 'time', 'datetime', 'index', 'id']:
+                metadata['index'] = df[first_col].tolist()
+                df = df.drop(columns=[first_col])
+                if self.debug_mode:
+                    self.tensorlang.print(message=f"[COMPILER]   Index column detected: {first_col}")
+            
+            # Convert to numpy array
+            try:
+                data = df.to_numpy().astype(np.float32)
+            except ValueError as e:
+                # Handle non-numeric data
+                raise ValueError(
+                    f"CSV contains non-numeric data that cannot be converted to float32. "
+                    f"Columns: {df.columns.tolist()}. Error: {e}"
+                )
+            
+            metadata['shape'] = data.shape
+            metadata['dtype'] = 'f32'
+            metadata['columns'] = df.columns.tolist()  # Update after potential index drop
+            
+            return data, metadata
+        
+        else:
+            raise ValueError(
+                f"Unsupported file format: {suffix}. "
+                f"Supported formats: .npy, .npz, .csv"
+            )
+
+
+
 
     def _execute_single_kernel(self, kernel_info, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
         """Execute a single CUDA kernel and save results."""
@@ -663,6 +786,21 @@ class TensorCompiler:
                     if node['type'] == 'backward':
                         continue  # ← SKIP backward too - it's handled in Phase 3
 
+
+                    if node['type'] == 'rebind':
+                        continue   # rebind has no kernel — it just swaps pointers at runtime
+            
+                    if node['type'] == 'for':
+                        # Compile the loop body exactly like top-level let_bindings.
+                        # We recurse into _compile_ast_nodes (see NEW METHOD below).
+                        body_kernels, body_cuda = self._compile_ast_nodes(
+                            node['body'], env, generator, debug=self.debug_mode
+                        )
+                        kernels.extend(body_kernels)
+                        cuda_code += body_cuda
+                        continue
+
+
                     if node['type'] == 'let' and node.get('requires_grad', False):
                         name = node['name']
                         self.requires_grad_tensors.add(name)
@@ -692,43 +830,199 @@ class TensorCompiler:
                         # ========================================
                         # LOAD npy
                         # ========================================
+
+                        # ============================================================================
+                        # Modified load() expression handler in compile_and_execute()
+                        # ============================================================================
+                        # Replace the existing load handling (around line 600) with:
+
                         elif expr['type'] == 'load':
                             file_path = expr['file_path']
-                            
-                            # if self.debug_mode:
-                            #     self.tensorlang.print(message=f"[COMPILER] Loading tensor from: {file_path}")
+                            array_name = expr.get('array_name')  # For .npz files
                             
                             try:
-                                # Load the numpy file
-                                loaded_data = np.load(file_path).astype(np.float32)
-
-                                # Verify shape matches declaration
-                                expected_shape = tuple(int(dim) for dim in env[name]['shape'])
-                                if loaded_data.shape != expected_shape:
-                                    self.tensorlang.print(message=f"[COMPILER] Expression load: tensor shape {loaded_data.shape} does not match declared shape {expected_shape}")
-                                    return False, env
+                                # ============================================================
+                                # Load data with automatic format detection
+                                # ============================================================
+                                loaded_data, metadata = self._load_data_file(file_path, array_name)
+                                
+                                if self.debug_mode:
+                                    self.tensorlang.print(
+                                        message=f"[COMPILER] Loaded {metadata['format'].upper()}: "
+                                                f"shape={loaded_data.shape}, "
+                                                f"size={loaded_data.size:,} elements"
+                                    )
+                                
+                                # ============================================================
+                                # Dynamic vs Explicit Shape Handling
+                                # ============================================================
+                                if name in env:
+                                    # EXPLICIT: Type was declared, verify match
+                                    expected_shape = tuple(int(dim) for dim in env[name]['shape'])
+                                    
+                                    if loaded_data.shape != expected_shape:
+                                        self.tensorlang.print(
+                                            message=f"[COMPILER] Shape mismatch: {file_path}\n"
+                                                    f"  File shape:     {loaded_data.shape}\n"
+                                                    f"  Declared shape: {expected_shape}"
+                                        )
+                                        return False, env
+                                    
+                                    if self.debug_mode:
+                                        self.tensorlang.print(message=f"[COMPILER]   Shape validated: {expected_shape} ✓")
+                                
+                                else:
+                                    # DYNAMIC: No type declared, infer from file
+                                    env[name] = {
+                                        'dtype': 'f32',
+                                        'shape': loaded_data.shape,
+                                        'metadata': metadata  # Store metadata for potential future use
+                                    }
+                                    
+                                    if self.debug_mode:
+                                        self.tensorlang.print(
+                                            message=f"[COMPILER]   Dynamic shape inferred: {loaded_data.shape}"
+                                        )
                                 
                                 # Store in tensors dict
                                 tensors[name] = loaded_data
                                 
-                                # IMPORTANT: Cache immediately if caching is enabled
+                                # Cache if enabled
                                 if self.cache_layers:
                                     cache_npy_path = cache_file_dir / f"{name}.npy"
                                     np.save(cache_npy_path, loaded_data)
                                     if self.debug_mode:
-                                        self.tensorlang.print(message=f"[COMPILER] Cached loaded tensor: {name} to {cache_npy_path}")
+                                        self.tensorlang.print(message=f"[COMPILER]   Cached: {cache_npy_path.name}")
                                 
-                                # self.tensorlang.print(message=f"[COMPILER] Loaded {name}: shape={loaded_data.shape}, dtype={loaded_data.dtype}")
-                                
+                                # Show data preview in debug mode
                                 if self.debug_info:
-                                    self.tensorlang.print(type="[INFO]", message=f"First few values: {loaded_data.flatten()[:5]}")
+                                    if 'columns' in metadata:
+                                        self.tensorlang.print(
+                                            type="[INFO]",
+                                            message=f"Columns: {metadata['columns']}"
+                                        )
+                                    
+                                    preview = loaded_data.flatten()[:5]
+                                    self.tensorlang.print(
+                                        type="[INFO]",
+                                        message=f"First values: {preview}"
+                                    )
                                 
-                            except FileNotFoundError:
-                                self.tensorlang.print(message=f"[COMPILER] Error: File not found: {file_path}")
+                            except FileNotFoundError as e:
+                                self.tensorlang.print(message=f"[COMPILER] Error: {e}")
                                 return False, env
                             except Exception as e:
                                 self.tensorlang.print(message=f"[COMPILER] Error loading {file_path}: {e}")
+                                if self.debug_mode:
+                                    import traceback
+                                    traceback.print_exc()
                                 return False, env
+
+
+
+                        # NEW VERSION:
+                        # elif expr['type'] == 'load':
+                        #     file_path = expr['file_path']
+                            
+                        #     try:
+                        #         # Load the numpy file
+                        #         loaded_data = np.load(file_path).astype(np.float32)
+                                
+                        #         # ================================================================
+                        #         # Dynamic vs Explicit Shape Handling
+                        #         # ================================================================
+                        #         if name in env:
+                        #             # EXPLICIT: Type was declared, verify match
+                        #             expected_shape = tuple(int(dim) for dim in env[name]['shape'])
+                                    
+                        #             if loaded_data.shape != expected_shape:
+                        #                 self.tensorlang.print(
+                        #                     message=f"[COMPILER] Shape mismatch: {file_path} has shape {loaded_data.shape}, "
+                        #                             f"but declared type expects {expected_shape}"
+                        #                 )
+                        #                 return False, env
+                                    
+                        #             if self.debug_mode:
+                        #                 self.tensorlang.print(message=f"[COMPILER] Loaded {name} (explicit shape): {loaded_data.shape}")
+                                
+                        #         else:
+                        #             # DYNAMIC: No type declared, infer from file
+                        #             inferred_shape = loaded_data.shape
+                                    
+                        #             # Register in environment with inferred shape
+                        #             env[name] = {
+                        #                 'dtype': 'f32',  # We cast to float32 above
+                        #                 'shape': inferred_shape
+                        #             }
+                                    
+                        #             if self.debug_mode:
+                        #                 self.tensorlang.print(
+                        #                     message=f"[COMPILER] Loaded {name} (dynamic shape inferred): {inferred_shape}"
+                        #                 )
+                                
+                        #         # Store in tensors dict
+                        #         tensors[name] = loaded_data
+                                
+                        #         # Cache if enabled
+                        #         if self.cache_layers:
+                        #             cache_npy_path = cache_file_dir / f"{name}.npy"
+                        #             np.save(cache_npy_path, loaded_data)
+                        #             if self.debug_mode:
+                        #                 self.tensorlang.print(message=f"[COMPILER] Cached loaded tensor: {name}")
+                                
+                        #         if self.debug_info:
+                        #             self.tensorlang.print(
+                        #                 type="[INFO]", 
+                        #                 message=f"Shape: {loaded_data.shape}, First values: {loaded_data.flatten()[:5]}"
+                        #             )
+                                
+                        #     except FileNotFoundError:
+                        #         self.tensorlang.print(message=f"[COMPILER] Error: File not found: {file_path}")
+                        #         return False, env
+                        #     except Exception as e:
+                        #         self.tensorlang.print(message=f"[COMPILER] Error loading {file_path}: {e}")
+                        #         return False, env
+
+                        # OLD VERSION:
+                        # elif expr['type'] == 'load':
+                        #     file_path = expr['file_path']
+                            
+                        #     # if self.debug_mode:
+                        #     #     self.tensorlang.print(message=f"[COMPILER] Loading tensor from: {file_path}")
+                            
+                        #     try:
+                        #         # Load the numpy file
+                        #         loaded_data = np.load(file_path).astype(np.float32)
+
+                        #         # Verify shape matches declaration
+                        #         expected_shape = tuple(int(dim) for dim in env[name]['shape'])
+                        #         if loaded_data.shape != expected_shape:
+                        #             self.tensorlang.print(message=f"[COMPILER] Expression load: tensor shape {loaded_data.shape} does not match declared shape {expected_shape}")
+                        #             return False, env
+                                
+                        #         # Store in tensors dict
+                        #         tensors[name] = loaded_data
+                                
+                        #         # IMPORTANT: Cache immediately if caching is enabled
+                        #         if self.cache_layers:
+                        #             cache_npy_path = cache_file_dir / f"{name}.npy"
+                        #             np.save(cache_npy_path, loaded_data)
+                        #             if self.debug_mode:
+                        #                 self.tensorlang.print(message=f"[COMPILER] Cached loaded tensor: {name} to {cache_npy_path}")
+                                
+                        #         # self.tensorlang.print(message=f"[COMPILER] Loaded {name}: shape={loaded_data.shape}, dtype={loaded_data.dtype}")
+                                
+                        #         if self.debug_info:
+                        #             self.tensorlang.print(type="[INFO]", message=f"First few values: {loaded_data.flatten()[:5]}")
+                                
+                        #     except FileNotFoundError:
+                        #         self.tensorlang.print(message=f"[COMPILER] Error: File not found: {file_path}")
+                        #         return False, env
+                        #     except Exception as e:
+                        #         self.tensorlang.print(message=f"[COMPILER] Error loading {file_path}: {e}")
+                        #         return False, env
+
+
 
                         elif expr['type'] in ['add', 'minus', 'mult', 'div']:
                             arg1, arg2     = expr['args']
@@ -1170,12 +1464,13 @@ class TensorCompiler:
                     kernel_cu_path = cache_file_dir / "kernel.cu"
                     kernel_so_path = cache_file_dir / "kernel.so"
 
-                    # Write cuda kernel to file
+                    # CUDA kernel write to file
                     with open(kernel_cu_path, 'w') as f:
                         f.write(cuda_code)
                         if self.debug_mode:
                             self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_cu_path} written!")
 
+                    # CUDA kernel compile to shared object file
                     try:
                         subprocess.run([
                                 'nvcc', '-o', str(kernel_so_path), 
@@ -1193,6 +1488,27 @@ class TensorCompiler:
                     except subprocess.CalledProcessError as e:
                         self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
                         sys.exit(1)
+
+                    # CUDA kernel transpile to WGSL
+                    if self.transpile:
+                        try:
+                            import json
+                            from tensorlang.transpiler.wgsl import WGSLTranspiler
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"[TRANSPILE] Reading {kernel_cu_path} for WGSL...")
+                                self.tensorlang.print(message=f"[TRANSPILE] First 200 chars of CUDA:\n{cuda_code[:200]}")
+                            transpiler = WGSLTranspiler(wgsl_workgroup_size=64)
+                            wgsl = transpiler.transpile(cuda_code)
+                            transpiler.save(wgsl, cache_file_dir)
+                            if self.debug_mode:
+                                self.tensorlang.print(f"[WGSL] Saved to {cache_file_dir}")
+                                self.tensorlang.print(f"[WGSL] Kernels: {list(transpiler.kernels.keys())}")
+                        except Exception as e:  # Broader catch – not subprocess
+                            self.tensorlang.print(message=f"[TRANSPILE] ERROR: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            sys.exit(1)
+
 
                     # =========================================
                     # Execute with PyCUDA - TWO-PHASE EXECUTION

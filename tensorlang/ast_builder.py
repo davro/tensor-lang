@@ -26,17 +26,26 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                         functions[func_def['name']] = func_def
                         if DEBUG_MODE:
                             tensorlang.print(message=f"[AST] Registered function: {func_def['name']}")
-                
-                # Add this elif block after the function_def handling:
+
                 elif stmt.data == 'backward_statement':
                     backward_node = build_backward_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if backward_node:
                         ast.append(backward_node)
-                
+
                 elif stmt.data == 'save_statement':
                     save_node = build_save_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if save_node:
                         ast.append(save_node)
+
+                elif stmt.data == 'rebind_statement':                          # <-- NEW
+                    rebind_node = build_rebind_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if rebind_node:
+                        ast.append(rebind_node)
+
+                elif stmt.data == 'for_statement':                             # <-- NEW
+                    for_node = build_for_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if for_node:
+                        ast.append(for_node)
 
                 # Let binding
                 elif stmt.data == 'let_binding':
@@ -734,3 +743,106 @@ def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Opti
         'tensor': tensor_name,
         'file_path': file_path
     }
+
+
+# ----------------------------------------------------------------------------
+# NEW FUNCTION 1: build_rebind_statement
+# Add after build_save_statement (~line 736)
+# ----------------------------------------------------------------------------
+
+def build_rebind_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+    """
+    Parse: NAME "=" expr
+    This is a mutation of an existing binding — no 'let', no type annotation.
+    Used inside for loops to advance weights: w = w_updated
+
+    Returns AST node:
+        {'type': 'rebind', 'name': 'w', 'expr': {'type': 'name', 'name': 'w_updated'}}
+    """
+    if tree.data != 'rebind_statement':
+        return None
+
+    name_token = tree.children[0]          # NAME token
+    expr_tree  = tree.children[1]          # expr subtree
+
+    name = name_token.value
+    expr = build_expression(expr_tree, DEBUG_MODE, DEBUG_INFO)
+
+    if DEBUG_MODE:
+        tensorlang.print(message=f"[AST] rebind: {name} = {expr}")
+
+    return {
+        'type': 'rebind',
+        'name': name,
+        'expr': expr,
+    }
+
+
+# ----------------------------------------------------------------------------
+# NEW FUNCTION 2: build_for_statement
+# Add after build_rebind_statement
+# ----------------------------------------------------------------------------
+
+def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+    """
+    Parse: for NAME in range(NUMBER) { (for_body_statement)* }
+
+    Returns AST node:
+        {
+            'type':       'for',
+            'loop_var':   'epoch',
+            'iterations': 10,
+            'body':       [list of AST nodes — same format as top-level ast]
+        }
+    """
+    if tree.data != 'for_statement':
+        return None
+
+    # Grammar: for_statement children are [NAME, NUMBER, *for_body_statement]
+    loop_var   = tree.children[0].value              # NAME token  e.g. "epoch"
+    iterations = int(float(tree.children[1].value))  # NUMBER token e.g. 10
+
+    body_nodes = []
+    for child in tree.children[2:]:
+        # Each child is a for_body_statement tree — unwrap it
+        if isinstance(child, Tree) and child.data == 'for_body_statement':
+            inner = child.children[0]
+        else:
+            inner = child
+
+        if inner.data == 'let_binding':
+            node = build_let_binding(inner, DEBUG_MODE, DEBUG_INFO)
+            if node:
+                body_nodes.append(node)
+
+        elif inner.data == 'rebind_statement':
+            node = build_rebind_statement(inner, DEBUG_MODE, DEBUG_INFO)
+            if node:
+                body_nodes.append(node)
+
+        elif inner.data == 'backward_statement':
+            node = build_backward_statement(inner, DEBUG_MODE, DEBUG_INFO)
+            if node:
+                body_nodes.append(node)
+
+        elif inner.data == 'save_statement':
+            node = build_save_statement(inner, DEBUG_MODE, DEBUG_INFO)
+            if node:
+                body_nodes.append(node)
+
+        # if_statement inside a loop is allowed by grammar — skip for now,
+        # can be wired in later when if_statement builds an AST node.
+
+    if DEBUG_MODE:
+        tensorlang.print(
+            message=f"[AST] for {loop_var} in range({iterations}): "
+                    f"{len(body_nodes)} body nodes"
+        )
+
+    return {
+        'type':       'for',
+        'loop_var':   loop_var,
+        'iterations': iterations,
+        'body':       body_nodes,
+    }
+

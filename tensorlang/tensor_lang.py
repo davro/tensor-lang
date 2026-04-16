@@ -52,14 +52,57 @@ class TensorLang:
 
     def parse_arguments(self):
         """Parse and return command-line configuration for TensorLang."""
-        parser = argparse.ArgumentParser(description=self.version_description)
+        parser = argparse.ArgumentParser(
+            description=self.version_description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Examples:
+  # Run a .tl file
+  python tensorlang.py script.tl
+  python tensorlang.py --file script.tl
+  
+  # Run core tests
+  python tensorlang.py --test
+  python tensorlang.py --test --filter matrix
+  
+  # List available apps
+  python tensorlang.py --list-apps
+  python tensorlang.py --list-apps --category ml
+  
+  # Run an app
+  python tensorlang.py --app web/dynamic/bitcoin
+  python tensorlang.py --app ml/training/mnist --benchmark
+  
+  # Run app tests
+  python tensorlang.py --app web/dynamic/bitcoin --test
+            """
+        )
 
-        # Core arguments
+        # Core arguments - file is now optional since we have --app and --list-apps
         parser.add_argument(
             "file",
             nargs="?",
             help="TensorLang source file or test directory"
         )
+        
+        # Main execution modes
+        parser.add_argument(
+            "--test",
+            action="store_true",
+            help="Run in test mode (discover and run .tl tests)"
+        )
+        parser.add_argument(
+            "--app",
+            type=str,
+            help="Run an application from apps/ directory (e.g., web/dynamic/bitcoin)"
+        )
+        parser.add_argument(
+            "--list-apps",
+            action="store_true",
+            help="List all available applications"
+        )
+        
+        # Debug and compilation options
         parser.add_argument(
             "--debug",
             action="store_true",
@@ -81,13 +124,18 @@ class TensorLang:
             action="store_true",
             help="Enable cache layers (shown in output)"
         )
+        parser.add_argument(
+            "--transpile",
+            action="store_true",
+            help="Transpile CUDA to WGSL (BETA)"
+        )
+        parser.add_argument(
+            "--verify-tensors",
+            action="store_true",
+            help="Enable tensor verification (requires tensor_verifier.py)"
+        )
 
         # Test mode arguments
-        parser.add_argument(
-            "--test",
-            action="store_true",
-            help="Run in test mode (discover and run .tl tests)"
-        )
         parser.add_argument(
             "--no-parallel",
             action="store_true",
@@ -105,13 +153,41 @@ class TensorLang:
             default=None,
             help="Filter tests by name pattern"
         )
+        
+        # App-specific options
         parser.add_argument(
-            "--verify-tensors",
+            "--category",
+            type=str,
+            help="Filter apps by category when listing (e.g., ml, web, cuda)"
+        )
+        parser.add_argument(
+            "--dev",
             action="store_true",
-            help="Enable tensor verification (requires tensor_verifier.py)"
+            help="Run app in development mode with hot reload"
+        )
+        parser.add_argument(
+            "--benchmark",
+            action="store_true",
+            help="Run app in benchmark mode"
+        )
+        parser.add_argument(
+            "--app-args",
+            nargs="*",
+            help="Arguments to pass to the application"
         )
 
         args = parser.parse_args()
+        
+        # Validation: some options only make sense with specific modes
+        if args.category and not args.list_apps:
+            parser.error("--category requires --list-apps")
+        
+        if (args.dev or args.benchmark) and not args.app:
+            parser.error("--dev and --benchmark require --app")
+        
+        if args.app_args and not args.app:
+            parser.error("--app-args requires --app")
+        
         self.config = args
         return args
     
@@ -130,4 +206,4 @@ class TensorLang:
             return True
         if value_lower in falsy:
             return False
-        raise argparse.ArgumentTypeError(f"Boolean value expected, got '{value}'")    
+        raise argparse.ArgumentTypeError(f"Boolean value expected, got '{value}'")

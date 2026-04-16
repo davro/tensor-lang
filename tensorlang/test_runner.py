@@ -66,7 +66,7 @@ class TestRunner:
                 return (test_file, False, timing_str, "No @EXPECTED block found in .tl file", None)
             
             # Run tensorlang.py in normal mode (not test mode)
-            cmd = ["python3", "tensorlang.py", f"tests/{test_file}", "--cache-layers"]
+            cmd = ["python3", "tensorlang.py", f"tests/{test_file}", "--cache-layers", "--verify-tensors"]
             if self.debug_mode:
                 cmd.append("--debug")
             
