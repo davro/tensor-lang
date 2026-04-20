@@ -11,6 +11,11 @@ class KernelGenerator:
 
     def __init__(self, DEBUG_MODE):
         self.DEBUG_MODE = DEBUG_MODE
+        # Guard flag: compute_broadcast_index is a file-scope __device__ helper
+        # used by every general broadcast kernel. It must appear exactly once
+        # per compilation unit. This flag prevents duplicate emission when
+        # multiple broadcast ops appear in the same program.
+        self._broadcast_helper_emitted = False
 
 
     def _validate(self, kernel_type, op_type):
@@ -397,28 +402,32 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) 
         shape2_str = ', '.join(map(str, [int(d) for d in padded_shape2]))
         output_shape_str = ', '.join(map(str, [int(d) for d in output_shape]))
         
-        kernel = f"""
-__device__ int compute_broadcast_index(int linear_idx, const int* out_shape, const int* in_shape, int ndim) {{
+        # Emit the shared __device__ helper once per compilation unit.
+        # If this generator instance has already emitted it (i.e. another
+        # general broadcast op appeared earlier in the same program), skip it.
+        if not self._broadcast_helper_emitted:
+            broadcast_helper = """
+__device__ int compute_broadcast_index(int linear_idx, const int* out_shape, const int* in_shape, int ndim) {
     int in_idx = 0;
     int temp_idx = linear_idx;
     int out_stride = 1;
-    
-    // Compute index by iterating dimensions from right to left
-    for (int i = ndim - 1; i >= 0; i--) {{
+    for (int i = ndim - 1; i >= 0; i--) {
         int out_coord = temp_idx % out_shape[i];
         temp_idx /= out_shape[i];
-        
-        // If input dimension is 1, use index 0 (broadcast), else use coordinate
         int in_coord = (in_shape[i] == 1) ? 0 : out_coord;
         in_idx += in_coord * out_stride;
-        
-        if (i > 0) {{
+        if (i > 0) {
             out_stride *= in_shape[i];
-        }}
-    }}
+        }
+    }
     return in_idx;
-}}
+}
+"""
+            self._broadcast_helper_emitted = True
+        else:
+            broadcast_helper = ""
 
+        kernel = broadcast_helper + f"""
 __global__ void {op_type}_general_broadcast_kernel_{name}(
     float* A, float* B, float* C, 
     int* shape1, int* shape2, int* out_shape, 
