@@ -10,6 +10,7 @@ TensorLang is an open-source, native machine learning (ML) language designed to 
 * [Features](#features)
 * [Operations](#operations)
 * [Automatic Differentiation](#automatic-differentiation)
+* [Training Loops](#training-loops)
 * [Setup](#setup)
   + [System Requirements](#system-requirements)
   + [Clone](#clone)
@@ -27,7 +28,7 @@ TensorLang is an open-source, native machine learning (ML) language designed to 
 
 ## Overview
 
-TensorLang eliminates Python bottlenecks by providing a unified stack for parsing, type checking, and GPU code generation. The language compiles directly to optimized CUDA kernels, enabling native GPU acceleration for machine learning workloads — including forward passes, loss computation, and gradient-based weight updates.
+TensorLang eliminates Python bottlenecks by providing a unified stack for parsing, type checking, and GPU code generation. The language compiles directly to optimised CUDA kernels, enabling native GPU acceleration for machine learning workloads — including forward passes, loss computation, gradient-based weight updates, and multi-step training loops.
 
 **Key Benefits:**
 
@@ -36,14 +37,16 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **Zero Python overhead** - Native tensor operations without interpreter bottlenecks
 * **ML-first design** - Built specifically for neural network operations
 * **Automatic differentiation** - Reverse-mode autograd with broadcast-aware gradient reduction
+* **Training loops** - `for` loops with `backward()` and weight rebinding for multi-step SGD
 * **Extensible architecture** - Clean separation of parsing, type checking, and code generation
 
 ## Features
 
 * **Tensor Declarations**: Explicit tensor types with shape inference (`Tensor[f32, (batch, features)]`)
 * **Comprehensive Operations**: 40+ operations covering linear algebra, activations, reductions, and comparisons
-* **GPU Acceleration**: Compiles to optimized CUDA kernels with shared memory and broadcasting
+* **GPU Acceleration**: Compiles to optimised CUDA kernels with shared memory and broadcasting
 * **Automatic Differentiation**: Reverse-mode autograd with `with grad` tagging and `backward()` — gradients flow through `matmul`, `add`, `mse_loss`, and more
+* **Training Loops**: `for epoch in range(N)` with `backward()` and weight rebinding (`w = w_updated`)
 * **Neural Network Support**: Build complete MLPs, classification networks, and feature extractors
 * **Batch Processing**: Efficient handling of mini-batch training and inference
 * **Memory Management**: Automatic GPU memory allocation and cleanup
@@ -52,7 +55,7 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **User-Defined Functions**: `fn` definitions with typed parameters and return values
 * **File I/O**: `load()` and `save()` for tensor persistence
 * **Comment Support**: Single-line (`//`) and multi-line (`/* */`) comments
-* **Comprehensive Testing**: 51+ test cases with expected results validation
+* **Comprehensive Testing**: 97+ test cases with expected results validation
 
 ## Operations
 
@@ -125,16 +128,15 @@ backward(loss)
 
 ### Accessing Gradients
 
-After `backward()`, gradients are available in two equivalent ways:
+After `backward()`, gradients are available as a synthesised variable usable in subsequent expressions:
 
 ```
-// Dot notation (attribute style)
-// w.grad is saved as w.grad.npy in the cache
-
-// Synthesised variable (usable in subsequent expressions)
+// w_grad is automatically available after backward(loss)
 let update = mult(learning_rate, w_grad)
 let w_new  = minus(w, update)
 ```
+
+Gradients are also saved to the cache as `w.grad.npy` for inspection and integration with Python workflows.
 
 ### Supported Gradient Operations
 
@@ -185,36 +187,119 @@ backward(loss)
 // b.grad = [3.0, 3.0]  (summed over the 3-row broadcast dimension)
 ```
 
-**Single SGD weight update step:**
+---
+
+## Training Loops
+
+TensorLang supports multi-step gradient descent natively via `for` loops. The loop body can contain a full forward pass, `backward()`, and a weight update step. The `w = w_updated` rebind syntax advances the weight to its updated value for the next iteration — no GPU memory copy is performed, only a pointer swap.
+
+### Syntax
+
+```
+for <var> in range(<N>) {
+    // forward pass
+    // backward()
+    // weight update via let + rebind
+}
+```
+
+### Weight Rebinding
+
+Inside a loop, compute the updated weight with `let`, then rebind the original name with a plain assignment (no `let`):
+
+```
+let w_updated = minus(w, mult_result)
+w = w_updated    // rebind: w now points at w_updated's GPU buffer
+```
+
+### Naming Constraints
+
+Because all kernels from both the loop body and the top level are compiled into a single `.cu` file, **tensor names used inside a `for` loop body cannot be reused at the top level**. Use distinct names for any post-loop computations:
+
+```
+for epoch in range(5) {
+    let y_pred = matmul(x, w)   // defines 'y_pred' kernel
+    let loss   = mse_loss(...)
+    ...
+}
+
+// Post-loop: must use different names to avoid CUDA symbol collisions
+let y_pred_final = matmul(x, w)
+let loss_final   = mse_loss(y_pred_final, y_true)
+```
+
+### Expression Constraint
+
+Operation arguments must be named tensors, not inline expressions. Break nested calls into intermediate `let` bindings:
+
+```
+// Correct
+let grad_step = mult(lr, w_grad)
+let w_updated = minus(w, grad_step)
+
+// Not yet supported
+// let w_updated = minus(w, mult(lr, w_grad))
+```
+
+### Post-Loop Variable Persistence
+
+Variables declared inside a `for` loop body are not automatically saved to the `.npy` cache on loop exit. To inspect or verify a value after the loop, recompute it at the top level with a distinct name:
+
+```
+for epoch in range(5) {
+    let loss = mse_loss(y_pred, y_true)   // not persisted after loop
+    ...
+}
+
+let loss_final = mse_loss(y_pred_final, y_true)   // this IS saved to cache
+```
+
+### Complete Training Loop Example
+
+5-step SGD on linear regression (`y = 2x`), converging from `w=0.5` toward `w=2.0`:
+
 ```
 let x:      Tensor[f32, (4, 1)] = [[1.0], [2.0], [3.0], [4.0]]
 let y_true: Tensor[f32, (4, 1)] = [[2.0], [4.0], [6.0], [8.0]]
 let w:      Tensor[f32, (1, 1)] = [[0.5]] with grad
+let lr:     Tensor[f32, (1, 1)] = [[0.1]]
 
-let y_pred    = matmul(x, w)
-let loss      = mse_loss(y_pred, y_true)
-backward(loss)
+for epoch in range(5) {
+    let y_pred    = matmul(x, w)
+    let loss      = mse_loss(y_pred, y_true)
+    backward(loss)
+    let grad_step = mult(lr, w_grad)
+    let w_updated = minus(w, grad_step)
+    w = w_updated
+}
 
-let lr        = [[0.1]]
-let w_updated = minus(w, mult(lr, w_grad))
-
-let y_pred_new = matmul(x, w_updated)
-let loss_after = mse_loss(y_pred_new, y_true)
-// loss_after < loss  (16.875 → 4.21875)
+// Post-loop evaluation with distinct names
+let y_pred_final = matmul(x, w)
+let loss_final   = mse_loss(y_pred_final, y_true)
+// loss_final = 0.0164794921875
+// w          = [[2.046875]]
 ```
+
+**Step-by-step convergence:**
+
+| Iteration | Loss | w after update |
+|-----------|------|----------------|
+| 1 | 16.875000 | [[2.75]] |
+| 2 | 4.218750 | [[1.625]] |
+| 3 | 1.054688 | [[2.1875]] |
+| 4 | 0.263672 | [[1.90625]] |
+| 5 | 0.065918 | [[2.046875]] |
+| post-loop | 0.016479 | — |
 
 ---
 
 ## Setup
-
-Clone the repository and prepare the environment to build and run TensorLang:
 
 ### System Requirements
 
 ```
 sudo apt install nvidia-cuda-toolkit python3-dev
 sudo apt install python3.12-venv
-pip install pycuda lark numpy
 ```
 
 ### Clone
@@ -227,34 +312,47 @@ cd tensor-lang
 ### Build
 
 ```
-# Ensure the build script is executable
 chmod +x build.sh
 
-# Activate the environment
+# Install dependencies
+source build.sh --install
+
+# Run the full test suite
 source build.sh
 ```
 
 ## Tests
 
-### Single Test Execution
+### Single File
 
 ```
-# Run individual TensorLang programs
-python3 tensorlang.py tests/mlp_network.tl
-python3 tensorlang.py tests/linear_classification.tl
+python3 tensorlang.py tests/for_loop_basic.tl
+python3 tensorlang.py tests/mlp_network.tl --debug
 ```
 
 ### Full Test Suite
 
 ```
-# Run all tests with validation
-python3 tensorlang.py --test
+# Via build script (recommended — clears cache automatically)
+source build.sh
 
-# Run tests in parallel (default: 4 jobs)
-python3 tensorlang.py --test --jobs 8
+# Directly
+python3 tensorlang.py --test --cache-layers --verify-tensors
 
-# Filter to a specific group
-python3 tensorlang.py --test --filter autograd
+# Filter to a group
+source build.sh --test --filter autograd
+source build.sh --test --filter for_loop
+```
+
+### Build Script Reference
+
+```
+source build.sh                        # full test suite (clears cache first)
+source build.sh --install              # install/upgrade all dependencies
+source build.sh --lint                 # ruff lint check
+source build.sh --test --filter NAME   # run tests matching NAME
+source build.sh --debug FILE.tl        # compile a single file with debug output
+source build.sh --clean                # wipe cache/ only
 ```
 
 **Test Coverage:**
@@ -268,6 +366,7 @@ python3 tensorlang.py --test --filter autograd
 * **Normalisations**: Layer norm, batch norm, instance norm
 * **Loss Functions**: MSE loss, cross entropy
 * **Autograd**: Gradient tracking, chain rule, broadcast reduction, weight update
+* **Training Loops**: Multi-step SGD with `for` loops and weight rebinding
 * **Neural Networks**: Complete MLP construction and classification
 * **Pipeline Operations**: Multi-stage tensor transformations
 * **Performance**: Large tensor operations (4096×4096 matrices)
@@ -275,7 +374,7 @@ python3 tensorlang.py --test --filter autograd
 ### Autograd Tests
 
 ```
-python3 tensorlang.py --test --filter autograd
+source build.sh --test --filter autograd
 ```
 
 ```
@@ -302,12 +401,20 @@ TensorLang stores all compilation artifacts in a cache directory organised by in
 * **`tensor_name.grad.npy`**: Gradient arrays for tensors declared `with grad`
 * **Logs**: Detailed compilation and execution information
 
+### Stale Cache Warning
+
+The full test suite (`source build.sh`) always clears `cache/` before running to prevent stale `.npy` files causing false passes or wrong `@EXPECTED` comparisons. If you modify a test and re-run it in isolation, clear its cache entry first:
+
+```
+rm -rf cache/tests/my_test.tl/
+python3 tensorlang.py tests/my_test.tl --cache-layers
+```
+
 ### Cache Benefits
 
 * **Reusability**: Compiled kernels can be loaded directly in Python
 * **Debugging**: Inspect generated CUDA code, intermediate results, and gradients
 * **Integration**: Use TensorLang computations in existing Python workflows
-* **Performance**: Skip recompilation for repeated executions
 
 ## Architecture
 
@@ -315,10 +422,10 @@ TensorLang stores all compilation artifacts in a cache directory organised by in
 
 1. **Lexing & Parsing**: Lark-based grammar with comprehensive syntax support
 2. **AST Construction**: Build abstract syntax tree with operation dependencies
-3. **Type Checking**: Validate tensor shapes, broadcasting rules, and operation compatibility
-4. **CUDA Generation**: Emit optimised forward and backward GPU kernels
+3. **Type Checking**: Validate tensor shapes, broadcasting rules, and operation compatibility — including pre-registration of gradient tensor shapes for `with grad` tensors
+4. **CUDA Generation**: Emit optimised forward and backward GPU kernels; `for` loop bodies are compiled once into the shared kernel file
 5. **Compilation**: `nvcc` compilation to shared libraries
-6. **Execution**: PyCUDA-based kernel launching with memory management and gradient accumulation
+6. **Execution**: PyCUDA-based kernel launching with memory management, gradient accumulation, and loop iteration with pointer-swap weight rebinding
 
 ### Design Principles
 
@@ -334,33 +441,38 @@ TensorLang stores all compilation artifacts in a cache directory organised by in
 
 * **Matrix Multiplication**: 4096×4096 matrices execute efficiently
 * **Batch Processing**: Linear layers handle large batch sizes
-* **Memory Efficiency**: Automatic GPU memory management with cleanup
-* **Test Suite**: 51+ tests complete in ~2 minutes including compilation
+* **Memory Efficiency**: Weight updates in training loops use pointer swaps — no GPU memory copy between iterations
+* **Test Suite**: 97 tests complete in ~90 seconds including compilation
 
 **Optimisation Features:**
 
 * **Shared Memory**: Reduction operations use efficient parallel patterns
 * **Broadcasting**: Hardware-accelerated element-wise operations with gradient reduction
+* **Zero-Copy Rebinding**: Training loop weight updates swap GPU buffer pointers rather than copying memory
 * **Kernel Fusion**: Potential for combining operations (future work)
 * **Numerical Stability**: Softmax uses max subtraction, comparisons use tolerance
 
 ## Code Examples
 
-### Single SGD Training Step
+### Multi-Step Training Loop
 
 ```
-// Linear regression: y = 2x, learning from data
 let x:      Tensor[f32, (4, 1)] = [[1.0], [2.0], [3.0], [4.0]]
 let y_true: Tensor[f32, (4, 1)] = [[2.0], [4.0], [6.0], [8.0]]
+let w:      Tensor[f32, (1, 1)] = [[0.5]] with grad
+let lr:     Tensor[f32, (1, 1)] = [[0.1]]
 
-let w: Tensor[f32, (1, 1)] = [[0.5]] with grad
+for epoch in range(5) {
+    let y_pred    = matmul(x, w)
+    let loss      = mse_loss(y_pred, y_true)
+    backward(loss)
+    let grad_step = mult(lr, w_grad)
+    let w_updated = minus(w, grad_step)
+    w = w_updated
+}
 
-let y_pred = matmul(x, w)
-let loss   = mse_loss(y_pred, y_true)
-backward(loss)
-
-let lr        = [[0.1]]
-let w_updated = minus(w, mult(lr, w_grad))
+let y_pred_final = matmul(x, w)
+let loss_final   = mse_loss(y_pred_final, y_true)
 ```
 
 ### Neural Network Inference
@@ -369,12 +481,10 @@ let w_updated = minus(w, mult(lr, w_grad))
 // 2-layer MLP for binary classification
 let input: Tensor[f32, (batch, 784)] = load("input.npy")
 
-// Hidden layer: 784 -> 256 features
 let w1: Tensor[f32, (784, 256)] = load("w1.npy")
 let b1: Tensor[f32, (256,)]     = load("b1.npy")
 let hidden = relu(linear(input, w1, b1))
 
-// Output layer: 256 -> 2 classes
 let w2: Tensor[f32, (256, 2)] = load("w2.npy")
 let b2: Tensor[f32, (2,)]     = load("b2.npy")
 let logits      = linear(hidden, w2, b2)
@@ -385,34 +495,31 @@ let predictions = argmax(probs, axis=1)
 ### Data Processing Pipeline
 
 ```
-// Feature extraction and normalisation
 let raw_data: Tensor[f32, (1000, 50)] = load("features.npy")
 
-// Remove negatives using masking
 let zeros    = fill(0.0, (1000, 50))
 let mask     = greater(raw_data, zeros)
 let filtered = mult(raw_data, mask)
 
-// Normalise by column means
-let col_means  = mean(filtered, axis=0)
-let centered   = minus(filtered, col_means)
+let col_means = mean(filtered, axis=0)
+let centered  = minus(filtered, col_means)
 ```
 
 ## Future Work
 
 ### Short Term
 
-* **Training Loops**: `for` loop construct to drive multi-step gradient descent natively in the language
+* **Inline Expressions**: Allow nested calls like `minus(w, mult(lr, w_grad))` without intermediate `let` bindings — requires changing operation argument grammar from `NAME` to `expr`
+* **Scoped Kernel Names**: Prefix loop-body kernel symbols with the loop variable to eliminate the post-loop naming constraint
 * **Autograd Coverage**: Gradient kernels for activation functions (`relu`, `sigmoid`, `softmax`, `cross_entropy`)
-* **Inline Expressions**: Allow nested calls like `relu(linear(x, w, b))` without intermediate `let` bindings
 * **Error Messages**: Descriptive shape mismatch errors from the type checker
 
 ### Medium Term
 
-* **Control Flow**: Loop constructs for training iteration
-* **Custom Functions**: User-defined reusable layers
-* **Optimisers**: Built-in SGD, Adam update rules
+* **Optimisers**: Built-in SGD, Adam update rules as language primitives
+* **Custom Functions**: User-defined reusable layers callable inside loops
 * **Memory Optimisation**: Memory pooling and buffer reuse strategies
+* **Nested Loops**: Support for inner loops (e.g. mini-batch iteration inside an epoch loop)
 
 ### Long Term
 
@@ -427,7 +534,7 @@ Contributions welcome! TensorLang is designed for extensibility:
 
 * **New Operations**: Add grammar rules, type checking, forward kernels, and backward gradient kernels
 * **Optimisations**: Improve existing kernel implementations
-* **Testing**: Add test cases with `@EXPECTED` annotations for new operations
+* **Testing**: Add test cases with `@EXPECTED` annotations — use exact values from a real run rather than manually rounded approximations
 * **Documentation**: Improve examples and architectural documentation
 
 See `CONTRIBUTING.md` for detailed guidelines.
@@ -438,4 +545,4 @@ Licensed under GNU Lesser General Public License v3 (LGPL-3.0) - see `LICENSE` f
 
 ---
 
-**TensorLang** - Native ML language with GPU acceleration and automatic differentiation. Built for performance, designed for productivity.
+**TensorLang** - Native ML language with GPU acceleration, automatic differentiation, and training loops. Built for performance, designed for productivity.
