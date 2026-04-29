@@ -7,8 +7,95 @@ from tensorlang.tensor_lang import TensorLang
 
 tensorlang = TensorLang()
 
+# ============================================================================
+# Inline expression flattening
+# ============================================================================
+import threading
+
+# Thread-local counter so parallel test runs don't race on __tmp names.
+# Each thread gets its own counter, scoped to the current compilation.
+_tls = threading.local()
+
+def _next_tmp() -> str:
+    if not hasattr(_tls, 'counter'):
+        _tls.counter = 0
+    name = f"__tmp_{_tls.counter}"
+    _tls.counter += 1
+    return name
+
+def _reset_tmp_counter():
+    """Call at the start of each compilation to reset the counter for this thread."""
+    _tls.counter = 0
+
+
+def flatten_expr_args(expr_node: Dict, synthetic_nodes: List, DEBUG_MODE=False) -> Dict:
+    """
+    Recursively flatten a nested expression node so all args are name strings.
+    Appends required synthetic let bindings to synthetic_nodes.
+    Returns updated expr_node with string args.
+    """
+    if expr_node is None:
+        return expr_node
+
+    node_type = expr_node.get('type')
+
+    if node_type == 'name':
+        return expr_node
+
+    if node_type in ('matmul', 'add', 'minus', 'mult', 'div'):
+        new_args = []
+        for arg in expr_node.get('args', []):
+            if isinstance(arg, str):
+                new_args.append(arg)
+            elif isinstance(arg, dict):
+                new_args.append(flatten_expr_arg(arg, synthetic_nodes, DEBUG_MODE))
+            else:
+                new_args.append(arg)
+        expr_node = dict(expr_node)
+        expr_node['args'] = new_args
+
+    return expr_node
+
+
+def flatten_expr_arg(arg_node, synthetic_nodes: List, DEBUG_MODE=False) -> str:
+    """
+    Ensure a single argument resolves to a name string.
+    If it is already a name, return its string. Otherwise synthesise a
+    __tmp_N let binding and return that name.
+    """
+    if arg_node is None:
+        return None
+
+    # Bare Token (e.g. NAME token passed directly)
+    if isinstance(arg_node, Token):
+        if arg_node.type == 'NAME':
+            return arg_node.value
+        return str(arg_node.value)
+
+    if arg_node.get('type') == 'name':
+        return arg_node['name']
+
+    # Recursively flatten the nested node's own args first
+    arg_node = flatten_expr_args(arg_node, synthetic_nodes, DEBUG_MODE)
+
+    tmp_name = _next_tmp()
+    synthetic_nodes.append({
+        'type':          'let',
+        'name':          tmp_name,
+        'ty':            None,
+        'expr':          arg_node,
+        'requires_grad': False,
+        'tree':          None,
+    })
+    if DEBUG_MODE:
+        tensorlang.print(message=f"[AST] Synthesised binding: {tmp_name} = {arg_node['type']}(...)")
+    return tmp_name
+
+
 def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Optional[str], Dict]:
     """Build AST from parse tree, handling function definitions and inlining"""
+    # Reset per-thread synthetic name counter for this compilation unit.
+    _reset_tmp_counter()
     functions = {}
     ast = []
     output_tensor = None
@@ -26,26 +113,17 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                         functions[func_def['name']] = func_def
                         if DEBUG_MODE:
                             tensorlang.print(message=f"[AST] Registered function: {func_def['name']}")
-
+                
+                # Add this elif block after the function_def handling:
                 elif stmt.data == 'backward_statement':
                     backward_node = build_backward_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if backward_node:
                         ast.append(backward_node)
-
+                
                 elif stmt.data == 'save_statement':
                     save_node = build_save_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if save_node:
                         ast.append(save_node)
-
-                elif stmt.data == 'rebind_statement':                          # <-- NEW
-                    rebind_node = build_rebind_statement(stmt, DEBUG_MODE, DEBUG_INFO)
-                    if rebind_node:
-                        ast.append(rebind_node)
-
-                elif stmt.data == 'for_statement':                             # <-- NEW
-                    for_node = build_for_statement(stmt, DEBUG_MODE, DEBUG_INFO)
-                    if for_node:
-                        ast.append(for_node)
 
                 # Let binding
                 elif stmt.data == 'let_binding':
@@ -55,6 +133,16 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                             if DEBUG_MODE:
                                 tensorlang.print(message=f"[AST] Warning: let_node has no expr: {let_node}")
                             continue
+
+                        # Flatten any nested inline expressions into synthetic
+                        # __tmp_N let bindings that precede the parent node.
+                        synthetic_nodes = []
+                        let_node['expr'] = flatten_expr_args(
+                            let_node['expr'], synthetic_nodes, DEBUG_MODE
+                        )
+                        # Emit synthetic bindings first so they are defined
+                        # before the parent expression references them.
+                        ast.extend(synthetic_nodes)
                         
                         # Check if expression is a user function call
                         if let_node['expr']['type'] == 'user_function_call':
@@ -94,10 +182,17 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                                         else:
                                             expanded_stmts.append(stmt)
                                     else:
-                                        if stmt['type'] == 'let' and 'args' in stmt['expr']:
+                                        if stmt['type'] == 'let' and 'args' in stmt.get('expr', {}):
                                             new_args = []
                                             for arg in stmt['expr']['args']:
-                                                new_args.append(local_mappings.get(arg, arg))
+                                                # args may be plain strings or {'type':'name','name':...} dicts
+                                                if isinstance(arg, str):
+                                                    new_args.append(local_mappings.get(arg, arg))
+                                                elif isinstance(arg, dict) and arg.get('type') == 'name':
+                                                    resolved = local_mappings.get(arg['name'], arg['name'])
+                                                    new_args.append(resolved)
+                                                else:
+                                                    new_args.append(arg)
                                             stmt['expr']['args'] = new_args
                                         expanded_stmts.append(stmt)
                                 
@@ -122,6 +217,16 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                     expr_node = build_expression(stmt, DEBUG_MODE, DEBUG_INFO)
                     if expr_node and expr_node['type'] == 'name':
                         output_tensor = expr_node['name']
+
+                elif stmt.data == 'rebind_statement':
+                    rebind_node = build_rebind_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if rebind_node:
+                        ast.append(rebind_node)
+
+                elif stmt.data == 'for_statement':
+                    for_node = build_for_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if for_node:
+                        ast.append(for_node)
     
     # Default to last tensor if no explicit output
     # if not output_tensor and ast:
@@ -242,8 +347,25 @@ def build_shape(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple:
 
 def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     """Parse any expression"""
+    # Guard: build_expression may receive a bare Token when called recursively
+    # from the inline_expr handler. Handle it here rather than crashing on .data
+    if isinstance(tree, Token):
+        if tree.type == 'NAME':
+            return {'type': 'name', 'name': tree.value}
+        elif tree.type == 'NUMBER':
+            return {'type': 'number', 'value': float(tree.value)}
+        return {'type': 'name', 'name': str(tree.value)}
+
     if tree.data == 'expr':
         tree = tree.children[0]
+
+    # After unwrapping expr, the child might still be a Token
+    if isinstance(tree, Token):
+        if tree.type == 'NAME':
+            return {'type': 'name', 'name': tree.value}
+        elif tree.type == 'NUMBER':
+            return {'type': 'number', 'value': float(tree.value)}
+        return {'type': 'name', 'name': str(tree.value)}
     
     if isinstance(tree, Token) and tree.type == 'NAME':
         if DEBUG_MODE:
@@ -259,8 +381,39 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         return {'type': expr_name, 'args': args}
     
-    # Binary operations
-    elif tree.data in ['matmul_call', 'equal_call', 'greater_call', 'add_call', 'minus_call', 'mult_call', 'div_call', 'linear_call']:
+    # Binary operations — arguments are now inline_expr subtrees (not just NAME tokens)
+    elif tree.data in ['matmul_call', 'add_call', 'minus_call', 'mult_call', 'div_call']:
+        expr_name = tree.data.replace("_call", "")
+        args = []
+        for child in tree.children:
+            if isinstance(child, Token) and child.type == 'NAME':
+                # Plain NAME token (top-level argument, no wrapping tree)
+                args.append({'type': 'name', 'name': child.value})
+            elif isinstance(child, Tree) and child.data == 'inline_expr':
+                # inline_expr wraps either a NAME token or a nested op tree
+                inner = child.children[0] if child.children else child
+                if isinstance(inner, Token) and inner.type == 'NAME':
+                    # inline_expr: NAME — just a name reference
+                    args.append({'type': 'name', 'name': inner.value})
+                elif isinstance(inner, Tree):
+                    # inline_expr: some_call — recurse
+                    args.append(build_expression(inner, DEBUG_MODE, DEBUG_INFO))
+                else:
+                    args.append({'type': 'name', 'name': str(inner)})
+            elif isinstance(child, Tree) and child.data == 'expr':
+                # Legacy expr wrapping (backward compat)
+                inner = child.children[0] if child.children else child
+                if isinstance(inner, Token) and inner.type == 'NAME':
+                    args.append({'type': 'name', 'name': inner.value})
+                elif isinstance(inner, Tree):
+                    args.append(build_expression(inner, DEBUG_MODE, DEBUG_INFO))
+            elif isinstance(child, Tree):
+                # Directly nested op tree (no wrapping inline_expr)
+                args.append(build_expression(child, DEBUG_MODE, DEBUG_INFO))
+        return {'type': expr_name, 'args': args}
+
+    # Ops that still use NAME-only arguments
+    elif tree.data in ['equal_call', 'greater_call', 'linear_call']:
         expr_name = tree.data.replace("_call", "")
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         return {'type': expr_name, 'args': args}
@@ -598,7 +751,14 @@ def inline_function_call(func_def: Dict, args: List, env: Dict, unique_suffix: s
     """Inline a function call by creating new let bindings with unique names"""
     param_map = {}
     for param, arg in zip(func_def['params'], args):
-        param_map[param['name']] = arg
+        # args may be plain strings or {'type':'name','name':...} dicts —
+        # normalise to a name-dict so substitute_names always gets a consistent type
+        if isinstance(arg, str):
+            param_map[param['name']] = {'type': 'name', 'name': arg}
+        elif isinstance(arg, dict) and arg.get('type') == 'name':
+            param_map[param['name']] = arg
+        else:
+            param_map[param['name']] = arg
     
     inlined_statements = []
     name_mapping = {}
@@ -638,12 +798,16 @@ def inline_function_call(func_def: Dict, args: List, env: Dict, unique_suffix: s
 
 
 def substitute_names(expr: Dict, param_map: Dict, name_mapping: Dict) -> Dict:
-    """Recursively substitute parameter names and local variable names in an expression"""
+    """Recursively substitute parameter names and local variable names in an expression.
+
+    Handles args that are either plain strings (legacy) or {'type':'name','name':...}
+    dicts (produced by the inline_expr binary op handler).
+    """
     if not isinstance(expr, dict):
         return expr
-    
+
     new_expr = expr.copy()
-    
+
     if expr['type'] == 'name':
         name = expr['name']
         if name in param_map:
@@ -654,16 +818,17 @@ def substitute_names(expr: Dict, param_map: Dict, name_mapping: Dict) -> Dict:
         if name in name_mapping:
             new_expr['name'] = name_mapping[name]
         return new_expr
-    
+
     if expr['type'] == 'user_function_call':
-        new_expr['args'] = [substitute_names(arg, param_map, name_mapping) 
+        new_expr['args'] = [substitute_names(arg, param_map, name_mapping)
                             for arg in expr.get('args', [])]
         return new_expr
-    
+
     if 'args' in expr:
         new_args = []
         for arg in expr['args']:
             if isinstance(arg, str):
+                # Legacy plain string arg
                 if arg in param_map:
                     param_expr = param_map[arg]
                     if isinstance(param_expr, dict) and param_expr.get('type') == 'name':
@@ -674,21 +839,101 @@ def substitute_names(expr: Dict, param_map: Dict, name_mapping: Dict) -> Dict:
                     new_args.append(name_mapping[arg])
                 else:
                     new_args.append(arg)
+            elif isinstance(arg, dict) and arg.get('type') == 'name':
+                # Dict name arg — substitute and return the resolved name string
+                # so downstream code (type_checker, compiler) gets plain strings
+                name = arg['name']
+                if name in param_map:
+                    param_expr = param_map[name]
+                    if isinstance(param_expr, dict) and param_expr.get('type') == 'name':
+                        new_args.append(param_expr['name'])
+                    else:
+                        new_args.append(name)
+                elif name in name_mapping:
+                    new_args.append(name_mapping[name])
+                else:
+                    new_args.append(name)
+            elif isinstance(arg, dict):
+                # Nested expression dict — recurse
+                new_args.append(substitute_names(arg, param_map, name_mapping))
             else:
                 new_args.append(arg)
         new_expr['args'] = new_args
         return new_expr
-    
+
     if 'tensor' in expr:
         tensor_name = expr['tensor']
         if tensor_name in param_map:
             param_expr = param_map[tensor_name]
-            if param_expr['type'] == 'name':
+            if isinstance(param_expr, dict) and param_expr.get('type') == 'name':
                 new_expr['tensor'] = param_expr['name']
         elif tensor_name in name_mapping:
             new_expr['tensor'] = name_mapping[tensor_name]
-    
+
     return new_expr
+
+
+def build_rebind_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+    """Parse: NAME "=" expr  (mutation of existing binding, no 'let')"""
+    if tree.data != 'rebind_statement':
+        return None
+    name_token = tree.children[0]
+    expr_tree   = tree.children[1]
+    name = name_token.value
+    expr = build_expression(expr_tree, DEBUG_MODE, DEBUG_INFO)
+    if DEBUG_MODE:
+        tensorlang.print(message=f"[AST] rebind: {name} = {expr}")
+    return {'type': 'rebind', 'name': name, 'expr': expr}
+
+
+def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
+    """Parse: for NAME in range(NUMBER) { (for_body_statement)* }"""
+    if tree.data != 'for_statement':
+        return None
+
+    loop_var   = tree.children[0].value
+    iterations = int(float(tree.children[1].value))
+    body_nodes = []
+
+    for child in tree.children[2:]:
+        inner = child.children[0] if (isinstance(child, Tree) and child.data == 'for_body_statement') else child
+
+        if isinstance(inner, Tree):
+            if inner.data == 'let_binding':
+                node = build_let_binding(inner, DEBUG_MODE, DEBUG_INFO)
+                if node:
+                    # Flatten inline expressions in for-body let bindings
+                    synthetic_nodes = []
+                    node['expr'] = flatten_expr_args(node['expr'], synthetic_nodes, DEBUG_MODE)
+                    body_nodes.extend(synthetic_nodes)
+                    body_nodes.append(node)
+
+            elif inner.data == 'rebind_statement':
+                node = build_rebind_statement(inner, DEBUG_MODE, DEBUG_INFO)
+                if node:
+                    body_nodes.append(node)
+
+            elif inner.data == 'backward_statement':
+                node = build_backward_statement(inner, DEBUG_MODE, DEBUG_INFO)
+                if node:
+                    body_nodes.append(node)
+
+            elif inner.data == 'save_statement':
+                node = build_save_statement(inner, DEBUG_MODE, DEBUG_INFO)
+                if node:
+                    body_nodes.append(node)
+
+    if DEBUG_MODE:
+        tensorlang.print(
+            message=f"[AST] for {loop_var} in range({iterations}): {len(body_nodes)} body nodes"
+        )
+
+    return {
+        'type':       'for',
+        'loop_var':   loop_var,
+        'iterations': iterations,
+        'body':       body_nodes,
+    }
 
 
 def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
@@ -743,106 +988,3 @@ def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Opti
         'tensor': tensor_name,
         'file_path': file_path
     }
-
-
-# ----------------------------------------------------------------------------
-# NEW FUNCTION 1: build_rebind_statement
-# Add after build_save_statement (~line 736)
-# ----------------------------------------------------------------------------
-
-def build_rebind_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
-    """
-    Parse: NAME "=" expr
-    This is a mutation of an existing binding — no 'let', no type annotation.
-    Used inside for loops to advance weights: w = w_updated
-
-    Returns AST node:
-        {'type': 'rebind', 'name': 'w', 'expr': {'type': 'name', 'name': 'w_updated'}}
-    """
-    if tree.data != 'rebind_statement':
-        return None
-
-    name_token = tree.children[0]          # NAME token
-    expr_tree  = tree.children[1]          # expr subtree
-
-    name = name_token.value
-    expr = build_expression(expr_tree, DEBUG_MODE, DEBUG_INFO)
-
-    if DEBUG_MODE:
-        tensorlang.print(message=f"[AST] rebind: {name} = {expr}")
-
-    return {
-        'type': 'rebind',
-        'name': name,
-        'expr': expr,
-    }
-
-
-# ----------------------------------------------------------------------------
-# NEW FUNCTION 2: build_for_statement
-# Add after build_rebind_statement
-# ----------------------------------------------------------------------------
-
-def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Optional[Dict]:
-    """
-    Parse: for NAME in range(NUMBER) { (for_body_statement)* }
-
-    Returns AST node:
-        {
-            'type':       'for',
-            'loop_var':   'epoch',
-            'iterations': 10,
-            'body':       [list of AST nodes — same format as top-level ast]
-        }
-    """
-    if tree.data != 'for_statement':
-        return None
-
-    # Grammar: for_statement children are [NAME, NUMBER, *for_body_statement]
-    loop_var   = tree.children[0].value              # NAME token  e.g. "epoch"
-    iterations = int(float(tree.children[1].value))  # NUMBER token e.g. 10
-
-    body_nodes = []
-    for child in tree.children[2:]:
-        # Each child is a for_body_statement tree — unwrap it
-        if isinstance(child, Tree) and child.data == 'for_body_statement':
-            inner = child.children[0]
-        else:
-            inner = child
-
-        if inner.data == 'let_binding':
-            node = build_let_binding(inner, DEBUG_MODE, DEBUG_INFO)
-            if node:
-                body_nodes.append(node)
-
-        elif inner.data == 'rebind_statement':
-            node = build_rebind_statement(inner, DEBUG_MODE, DEBUG_INFO)
-            if node:
-                body_nodes.append(node)
-
-        elif inner.data == 'backward_statement':
-            node = build_backward_statement(inner, DEBUG_MODE, DEBUG_INFO)
-            if node:
-                body_nodes.append(node)
-
-        elif inner.data == 'save_statement':
-            node = build_save_statement(inner, DEBUG_MODE, DEBUG_INFO)
-            if node:
-                body_nodes.append(node)
-
-        # if_statement inside a loop is allowed by grammar — skip for now,
-        # can be wired in later when if_statement builds an AST node.
-
-    if DEBUG_MODE:
-        tensorlang.print(
-            message=f"[AST] for {loop_var} in range({iterations}): "
-                    f"{len(body_nodes)} body nodes"
-        )
-
-    return {
-        'type':       'for',
-        'loop_var':   loop_var,
-        'iterations': iterations,
-        'body':       body_nodes,
-    }
-

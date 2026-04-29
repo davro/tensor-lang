@@ -49,21 +49,9 @@ save_statement: "save" "(" NAME "," STRING ")"
 // For loop
 ////////////////////////////////////////////////////////////////////////////////
 // Simple counted loop: for <var> in range(<n>) { ... }
-//
-// <var>  — loop counter, available as a NAME inside the body (read-only integer)
-// <n>    — literal integer iteration count (must be a positive whole number)
-//
-// Rebind pattern inside the body:
-//   let w_new = minus(w, mult(lr, w_grad))
-//   w = w_new        <- rebind_statement: advances 'w' to its updated value
-//
-// The executor compiles the body once, then iterates N times in Python,
-// swapping GPU buffer pointers for rebound names between iterations.
 
 for_statement: "for" NAME "in" "range" "(" NUMBER ")" "{" (for_body_statement)* "}"
 
-// for_body_statement mirrors statement but excludes nested for loops and
-// function definitions (keep it simple for now — can relax later).
 for_body_statement: let_binding
                   | rebind_statement
                   | backward_statement
@@ -154,21 +142,41 @@ tensor_literal: "[" (NUMBER ("," NUMBER)* | inner_array ("," inner_array)*) "]"
 inner_array: "[" NUMBER ("," NUMBER)* "]"
 fill_call: "fill" "(" NUMBER "," shape ")"
 
-// Binary operations - keep NAME for backward compatibility
-matmul_call: "matmul" "(" NAME "," NAME ")"
-add_call: "add" "(" NAME "," NAME ")"
-minus_call: "minus" "(" NAME "," NAME ")"
-mult_call: "mult" "(" NAME "," NAME ")"
-div_call: "div" "(" NAME "," NAME ")"
+// ============================================================================
+// inline_expr — restricted expression allowed as a binary op argument.
+// Using full 'expr' here causes LALR conflicts because user_function_call
+// (NAME "(" args ")") is ambiguous with named ops like matmul, add etc.
+// inline_expr covers the safe nestable subset: binary ops and NAME only.
+//
+// Examples enabled:
+//   let w_updated = minus(w, mult(lr, w_grad))
+//   let out = add(matmul(x, w1), matmul(y, w2))
+// ============================================================================
+inline_expr: matmul_call
+           | add_call
+           | minus_call
+           | mult_call
+           | div_call
+           | relu_call
+           | sigmoid_call
+           | gelu_call
+           | swish_call
+           | tanh_call
+           | NAME
 
-// Unary operations
+matmul_call: "matmul" "(" inline_expr "," inline_expr ")"
+add_call:    "add"    "(" inline_expr "," inline_expr ")"
+minus_call:  "minus"  "(" inline_expr "," inline_expr ")"
+mult_call:   "mult"   "(" inline_expr "," inline_expr ")"
+div_call:    "div"    "(" inline_expr "," inline_expr ")"
+
+// Unary operations — still NAME only for now
 relu_call: "relu" "(" NAME ")"
 gelu_call: "gelu" "(" NAME ")"
 swish_call: "swish" "(" NAME ")"
 
 // File I/O
 load_call: "load" "(" STRING ")"
-//save_call: "save" "(" expr "," STRING ")"
 
 ////////////////////////////////////////////////////////////////////////////////
 // Reduction operations
