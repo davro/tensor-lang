@@ -18,11 +18,11 @@ def main():
                 cache_layers=args.cache_layers,
                 verify_tensors=args.verify_tensors
             )
-            
+
             if getattr(args, 'list_apps', False):
                 runner.list_apps(category=getattr(args, 'category', None))
                 sys.exit(0)
-            
+
             # Run the specified app
             runner.run_app(
                 app_path=args.app,
@@ -32,7 +32,7 @@ def main():
                 benchmark=getattr(args, 'benchmark', False),
                 app_args=getattr(args, 'app_args', None)
             )
-        
+
         elif args.test:
             # Test Mode: Run core test suite
             runner = TestRunner(
@@ -53,20 +53,20 @@ def main():
                 test_files = runner.discover_tests()
                 if args.filter:
                     test_files = [t for t in test_files if args.filter in t]
-            
+
             if not test_files:
                 print(f"No tests found matching: {args.file or args.filter}")
                 sys.exit(1)
-            
+
             runner.run_test_suite(test_files)
-        
+
         else:
             # Normal Mode: Compile and execute a single .tl file
             if not args.file:
                 print("Error: No file specified. Use --file <path> or --app <name>")
                 print("Run 'python tensorlang.py --help' for usage information")
                 sys.exit(1)
-                
+
             compiler = TensorCompiler(
                 debug_mode=args.debug,
                 debug_info=args.debug_info,
@@ -81,11 +81,11 @@ def main():
         if args.debug:
             print(f"Details: {e}")
         sys.exit(1)
-    
+
     except KeyboardInterrupt:
         print("\nInterrupted by user")
         sys.exit(0)
-    
+
     except Exception as e:
         print(f"Unexpected error: {e}")
         if args.debug:
