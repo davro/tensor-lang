@@ -29,11 +29,16 @@ YELLOW = "33"
 CYAN = "36"
 
 class TestRunner:
-    def __init__(self, parallel=True, jobs=None, verify_tensors=False, debug_mode=False):
+    def __init__(self, parallel=True, jobs=None, verify_tensors=False, debug_mode=False, tests_dir=None):
         self.parallel = parallel
         self.jobs = jobs
         self.verify_tensors = verify_tensors
         self.debug_mode = debug_mode
+        # Directory to discover/run .tl tests from. Defaults to the
+        # top-level "tests" dir; AppRunner passes an app-specific dir
+        # (e.g. "apps/examples/hello_mlp/tests") so app tests are found
+        # instead of the core language suite.
+        self.tests_dir = tests_dir or "tests"
     
     def color(self, text, code):
         """Apply ANSI color to text."""
@@ -41,7 +46,7 @@ class TestRunner:
 
     def discover_tests(self):
         """Discover all .tl test files in tests directory."""
-        test_dir = Path("tests")
+        test_dir = Path(self.tests_dir)
         tl_files = list(test_dir.glob("*.tl"))
         return sorted([f.name for f in tl_files])
 
@@ -57,7 +62,7 @@ class TestRunner:
             test_start_abs = time.time()
             
             # Extract expected results from .tl file
-            tl_path = Path("tests") / test_file
+            tl_path = Path(self.tests_dir) / test_file
             expected_results = self.extract_expected_from_tl(tl_path)
             
             if expected_results is None:
@@ -66,7 +71,7 @@ class TestRunner:
                 return (test_file, False, timing_str, "No @EXPECTED block found in .tl file", None)
             
             # Run tensorlang.py in normal mode (not test mode)
-            cmd = ["python3", "tensorlang.py", f"tests/{test_file}", "--cache-layers", "--verify-tensors"]
+            cmd = ["python3", "tensorlang.py", str(tl_path), "--cache-layers", "--verify-tensors"]
             if self.debug_mode:
                 cmd.append("--debug")
             
@@ -80,7 +85,7 @@ class TestRunner:
             
             test_end_abs = time.time()
 
-            cache_dir = Path(f"cache/tests/{test_file}")
+            cache_dir = Path("cache") / self.tests_dir / test_file
             cache_dir.mkdir(parents=True, exist_ok=True)
             
             # Save log for debugging
@@ -164,7 +169,7 @@ class TestRunner:
         if not self.parallel:
             print(self.color(f"Running {len(test_files)} tests sequentially{verify_note}...\n", CYAN))
             for test_file in test_files:
-                test_result = self.run_single_test(test_file, self.verify_tensors, suite_start_time=None, debug_mode=self.debug_mode)
+                test_result = self.run_single_test(test_file, suite_start_time=None)
                 results.append(test_result)
         else:
             worker_jobs = self.jobs or min(len(test_files), os.cpu_count() or 4)
@@ -233,7 +238,7 @@ class TestRunner:
                                     if check_result["passed"] is False:
                                         print(f"     • {tensor_name} ({check_name}): {check_result['message']}")
                 
-                log_path = f"cache/tests/{test_name}/{Path(test_name).stem}.log"
+                log_path = f"cache/{self.tests_dir}/{test_name}/{Path(test_name).stem}.log"
                 print(f"     📋 Check logs: {log_path}")
         
         if self.verify_tensors:
