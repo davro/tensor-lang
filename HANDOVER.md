@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-09-03
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`, re-confirmed on hardware after this round of fixes). App system restored and demonstrated. Three issues found via code review and fixed in `test_runner.py`/`compiler.py`/`type_checker.py` — two verified fixed on hardware (sequential test mode; noisy default compiler output), one fixed in code but still pending a hardware run (app test wiring) — see §12.
+**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`, re-confirmed on hardware after this round of fixes). App system restored and demonstrated. Three issues found via code review and fixed in `test_runner.py`/`compiler.py`/`type_checker.py` — **all three verified fixed on hardware** (sequential test mode; noisy default compiler output; app test wiring) — see §12.
 
 ---
 
@@ -86,7 +86,7 @@ tensor-lang/
 | Core test suite (`--no-parallel`)  | **Fixed & verified on hardware** (2026-09-03) — see §12              |
 | Default compiler output (no flags) | **Fixed & verified on hardware** (2026-09-03) — see §12              |
 | AppRunner                          | Restored and working for normal app execution                       |
-| App test mode (`--app X --test`)   | **Fixed in code, not yet verified on hardware** — see §12            |
+| App test mode (`--app X --test`)   | **Fixed & verified on hardware** (2026-09-03) — see §12               |
 | Example app                        | `apps/examples/hello_mlp` runs successfully                         |
 | Autograd + training loops          | Working (verified by hello_mlp + tests)                             |
 | Missing file history                | `app_runner.py` was absent from main; restored from previous work   |
@@ -252,7 +252,7 @@ bugs, not introduced by anything in this session's changes — the second one
 in particular means **app-level tests have likely never worked** since
 `AppRunner` was written.
 
-### 14.1 `--no-parallel` crashed with a `TypeError` — FIXED, verified on hardware
+### 12.1 `--no-parallel` crashed with a `TypeError` — FIXED, verified on hardware
 
 **Symptom (confirmed on real hardware):**
 ```
@@ -295,7 +295,7 @@ Filtered run used to speed up validation; a full `--no-parallel` run (106
 tests, ~100s+ since sequential is slower than the parallel default) is still
 worth doing once, but the crash itself is confirmed gone.
 
-### 14.2 `--app <name> --test` crashed with a `TypeError` — FIXED IN CODE, hardware verification still pending
+### 12.2 `--app <name> --test` crashed with a `TypeError` — FIXED, verified on hardware
 
 **Root cause:** `AppRunner._run_app_tests` constructs:
 ```python
@@ -324,19 +324,44 @@ path — `AppRunner` and `TestRunner` had drifted out of sync.
 `app_runner.py` itself needed **no changes** — it was already calling the
 intended API; `TestRunner` just hadn't been built to match yet.
 
-**Verification status:** confirmed via mocked unit tests (stubbed
-`subprocess.run` and `.npy` loading) that the constructor no longer raises
-and that `discover_tests()` correctly picks up files from a custom
-`tests_dir`. **Not yet run against a real app on real hardware.**
+**Also added:** neither `apps/examples/hello_mlp` nor
+`apps/examples/linear_regression` had a `tests/` subdirectory, so there was
+nothing for the fix to discover. Added one test each, with `@EXPECTED`
+values taken directly from real hardware output (not rounded
+approximations) and independently cross-checked against a from-scratch
+numpy re-implementation of the same full-batch gradient descent at float32
+precision (bit-exact match in both cases):
+- `apps/examples/hello_mlp/tests/loss_final.tl` — expects `loss_final = 0.0164794921875`
+- `apps/examples/linear_regression/tests/loss_final.tl` — expects `loss_final = 0.022800864651799202`
 
-**Next step:** run
+**Verification (hardware, 2026-09-03):**
 ```
 python3 tensorlang.py --app examples/hello_mlp --test
+Running tests from: apps/examples/hello_mlp/tests
+Running 1 tests sequentially...
+================================================================================
+State TestCase       Time
+--------------------------------------------------------------------------------
+PASS   loss_final.tl   (3.58s)
+================================================================================
+Summary: 1/1 tests passed in 3.58s
+✅ All tests passed successfully!
+
+python3 tensorlang.py --app examples/linear_regression --test
+Running tests from: apps/examples/linear_regression/tests
+Running 1 tests sequentially...
+================================================================================
+State TestCase       Time
+--------------------------------------------------------------------------------
+PASS   loss_final.tl   (4.03s)
+================================================================================
+Summary: 1/1 tests passed in 4.03s
+✅ All tests passed successfully!
 ```
-on a machine with the CUDA toolkit / `pycuda` available, and record the
-result here. `hello_mlp` doesn't currently have a `tests/` subdirectory in
-what's been reviewed so far — if not, this needs a minimal test added under
-`apps/examples/hello_mlp/tests/` to actually exercise the fix end-to-end.
+Both apps' training loops are now independently confirmed mathematically
+correct (autograd, `mse_loss`, `backward()`, weight-rebind pointer-swap in
+`for` loops), not just "didn't crash" — and the app-test wiring fix is
+confirmed working end-to-end on real hardware.
 
 ### 12.3 Default compiler output was extremely noisy — FIXED, verified on hardware
 
@@ -396,11 +421,11 @@ cache files, not stdout, so none of this touches correctness.
 1. Confirm environment: `bash build.sh --install` → activate venv → full test run.
 2. Run `python3 tensorlang.py --app examples/hello_mlp` and inspect output.
 3. Read `apps/examples/hello_mlp/main.tl` + `app.toml`.
-4. Run the full (unfiltered) `--no-parallel` suite once to close out §12.1 completely.
-5. Add a `tests/` dir under `apps/examples/hello_mlp/` (if missing) and run `--app examples/hello_mlp --test` to close out §12.2.
+4. ~~Run the full (unfiltered) `--no-parallel` suite once to close out §12.1 completely.~~ — **done, see §12.1**
+5. ~~Add a `tests/` dir under `apps/examples/hello_mlp/` and run `--app examples/hello_mlp --test` to close out §12.2.~~ — **done, see §12.2** (also added for `linear_regression`)
 6. Pick one concrete practical application (image filter, tiny policy, portfolio predictor, …) and implement it as a second app under `apps/`.
 7. Log every friction point encountered; those become the real short-term language improvements.
-8. Consider adding a quiet/default mode so app demos are less verbose.
+8. ~~Consider adding a quiet/default mode so app demos are less verbose.~~ — **done, see §12.3**
 
 ---
 
