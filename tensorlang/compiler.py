@@ -682,7 +682,8 @@ class TensorCompiler:
             if self.cache_layers:
                 cache_npy_path = cache_file_dir / f"{name}.npy"
                 np.save(cache_npy_path, output)
-            self.tensorlang.print(type=f"[COMPILER] Result {name} ({op_type}):\n{output}")
+            if self.debug_mode:
+                self.tensorlang.print(type=f"[COMPILER] Result {name} ({op_type}):\n{output}")
 
     def _execute_save_statement(self, save_node, tensors, gpu_allocs, env, cache_file_dir, cuda):
         tensor_name = save_node['tensor']
@@ -858,7 +859,8 @@ class TensorCompiler:
     def compile_and_execute(self, tensorlang_file):
         """Compile and execute a single .tl file."""
 
-        self.tensorlang.print_header(f"[COMPILER] TensorLang {self.version}")
+        if self.debug_mode:
+            self.tensorlang.print_header(f"[COMPILER] TensorLang {self.version}")
 
         if tensorlang_file:
             file_path = Path(tensorlang_file)
@@ -871,29 +873,36 @@ class TensorCompiler:
             sys.exit(1)
 
         if file_path.suffix == '.tl':
-            file_details = {
-                "// Path     " : str(file_path),
-                "// Name     " : file_path.name,
-                "// Suffix   " : file_path.suffix or "None",
-                "// Size     " : f"{file_path.stat().st_size} bytes",
-                "// Modified " : time.ctime(file_path.stat().st_mtime),
-            }
-            details_str = "\n".join(f"{key} {value}" for key, value in file_details.items())
-            self.tensorlang.print(type=details_str)
-            self.tensorlang.print(type="// ============================================================================")
-            self.tensorlang.print(type="// ============================================================================\n")
+            if self.debug_mode:
+                file_details = {
+                    "// Path     " : str(file_path),
+                    "// Name     " : file_path.name,
+                    "// Suffix   " : file_path.suffix or "None",
+                    "// Size     " : f"{file_path.stat().st_size} bytes",
+                    "// Modified " : time.ctime(file_path.stat().st_mtime),
+                }
+                details_str = "\n".join(f"{key} {value}" for key, value in file_details.items())
+                self.tensorlang.print(type=details_str)
+                self.tensorlang.print(type="// ============================================================================")
+                self.tensorlang.print(type="// ============================================================================\n")
+            else:
+                print(f"[COMPILER] TensorLang {self.version} — compiling {file_path.name}")
         else:
             self.tensorlang.print(message=f"[COMPILER] file not found, suffix is not .tl")
             self.tensorlang.separator()
             sys.exit(1)
 
+        compile_start_time = time.time()
+
         try:
-            self.tensorlang.separator()
+            if self.debug_mode:
+                self.tensorlang.separator()
             grammar_file = 'tensorlang.lark'
             with open(grammar_file, 'r') as f:
                 grammar = f.read()
             parser = Lark(grammar, start='program', parser='lalr')
-            self.tensorlang.print(type="[COMPILER]", message=f"Loaded Lark Grammer file: {grammar_file}")
+            if self.debug_mode:
+                self.tensorlang.print(type="[COMPILER]", message=f"Loaded Lark Grammer file: {grammar_file}")
         except FileNotFoundError:
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] Missing Lark Grammer file: {grammar_file}")
@@ -902,21 +911,23 @@ class TensorCompiler:
         try:
             with open(file_path, 'r') as f:
                 code = f.read()
-                self.tensorlang.print(type="[COMPILER]", message=f"Loaded TensorLang   file: {file_path}")
+                if self.debug_mode:
+                    self.tensorlang.print(type="[COMPILER]", message=f"Loaded TensorLang   file: {file_path}")
         except FileNotFoundError:
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] Missing TensorLang file: {file_path}")
             sys.exit(1)
 
         try:
-            self.tensorlang.separator()
-            self.tensorlang.print(type=f"")
-            self.tensorlang.print(type=f"{code}")
-            self.tensorlang.separator()
-            self.tensorlang.print(type=f"")
-            self.tensorlang.separator()
-            self.tensorlang.print(type=f"[COMPILER] TensorLang > Lark > Parser > Compiler > CUDA Kernel -> Results")
-            self.tensorlang.separator()
+            if self.debug_mode:
+                self.tensorlang.separator()
+                self.tensorlang.print(type=f"")
+                self.tensorlang.print(type=f"{code}")
+                self.tensorlang.separator()
+                self.tensorlang.print(type=f"")
+                self.tensorlang.separator()
+                self.tensorlang.print(type=f"[COMPILER] TensorLang > Lark > Parser > Compiler > CUDA Kernel -> Results")
+                self.tensorlang.separator()
 
             cache_base     = Path("cache")
             cache_file_dir = cache_base / file_path
@@ -1427,7 +1438,8 @@ class TensorCompiler:
                 # KERNEL COMPILATION
                 # ============================================================
                 if kernels:
-                    self.tensorlang.print(message=f"[COMPILER] KERNEL CUDA!")
+                    if self.debug_mode:
+                        self.tensorlang.print(message=f"[COMPILER] KERNEL CUDA!")
 
                     kernel_cu_path = cache_file_dir / "kernel.cu"
                     kernel_so_path = cache_file_dir / "kernel.so"
@@ -1672,6 +1684,21 @@ class TensorCompiler:
                                 if self.debug_mode:
                                     self.tensorlang.print(message=f"[COMPILER] Freed GPU memory for {name}")
 
+                        # =====================================================
+                        # Final result — always shown, regardless of --debug.
+                        # (output_tensor is the AST's designated result name;
+                        # previously computed but never actually printed here —
+                        # the "final answer" a user saw was really just
+                        # whichever intermediate _save_kernel_result print
+                        # happened to run last.)
+                        # =====================================================
+                        if output_tensor and output_tensor in tensors:
+                            print(f"{output_tensor} = {tensors[output_tensor]}")
+                        elif output_tensor and self.debug_mode:
+                            self.tensorlang.print(message=f"[COMPILER] Warning: output tensor '{output_tensor}' not found in computed tensors")
+
+                        print(f"Done in {time.time() - compile_start_time:.2f}s")
+
                     except ImportError as e:
                         self.tensorlang.print(message=f"[COMPILER] PyCUDA error: {e}. Run 'pip install pycuda' and ensure CUDA toolkit is installed.")
                         sys.exit(1)
@@ -1699,4 +1726,5 @@ class TensorCompiler:
             self.tensorlang.print(message=f"[COMPILER] Error during parsing or execution: {e}")
             sys.exit(errno.EINVAL)
 
-        self.tensorlang.separator()
+        if self.debug_mode:
+            self.tensorlang.separator()

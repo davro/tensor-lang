@@ -1,0 +1,10 @@
+[app]
+name = "linear_regression"
+description = "Fit a line y = wx + b to synthetic data using gradient descent"
+
+[requirements]
+gpus = 1
+memory_gb = 4
+
+[entry_points]
+main = "main.tl"

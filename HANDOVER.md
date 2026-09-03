@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-09-03
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`). App system restored and demonstrated. Two `TestRunner` bugs found via code review and fixed (one verified on hardware, one pending hardware verification — see §12).
+**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`, re-confirmed on hardware after this round of fixes). App system restored and demonstrated. Three issues found via code review and fixed in `test_runner.py`/`compiler.py`/`type_checker.py` — two verified fixed on hardware (sequential test mode; noisy default compiler output), one fixed in code but still pending a hardware run (app test wiring) — see §12.
 
 ---
 
@@ -82,8 +82,9 @@ tensor-lang/
 
 | Component                         | Status                                                             |
 |------------------------------------|---------------------------------------------------------------------|
-| Core test suite (default, parallel) | **106/106 passed** (~100 s)                                        |
+| Core test suite (default, parallel) | **106/106 passed** (~94 s, re-confirmed after all §12 fixes)      |
 | Core test suite (`--no-parallel`)  | **Fixed & verified on hardware** (2026-09-03) — see §12              |
+| Default compiler output (no flags) | **Fixed & verified on hardware** (2026-09-03) — see §12              |
 | AppRunner                          | Restored and working for normal app execution                       |
 | App test mode (`--app X --test`)   | **Fixed in code, not yet verified on hardware** — see §12            |
 | Example app                        | `apps/examples/hello_mlp` runs successfully                         |
@@ -93,7 +94,7 @@ tensor-lang/
 **Known temporary fix applied earlier:**
 The import of `AppRunner` had to be commented out until the file was restored. It is now present again.
 
-**Recent fixes (2026-09-03):** Two `TestRunner` bugs were found during a code review of `tensorlang.py`, `app_runner.py`, and `test_runner.py`, and both were patched in `test_runner.py`. Full detail, root cause, and verification status are in §12.
+**Recent fixes (2026-09-03):** Three issues were found during a code review of `tensorlang.py`, `app_runner.py`, `test_runner.py`, and `compiler.py`, and patched in `test_runner.py`, `compiler.py`, and `type_checker.py`. Full detail, root cause, and verification status are in §12.
 
 ---
 
@@ -219,7 +220,7 @@ From README + recent experience:
 - Scoped kernel names (remove post-loop renaming constraint)
 - Inline unary ops (`relu(linear(...))`)
 - Better shape-mismatch error messages
-- Cleaner / quieter compiler output for app runs
+- ~~Cleaner / quieter compiler output for app runs~~ — **done, see §12.3**
 
 **Medium term**
 - Built-in optimisers (SGD, Adam) as language primitives
@@ -336,6 +337,57 @@ on a machine with the CUDA toolkit / `pycuda` available, and record the
 result here. `hello_mlp` doesn't currently have a `tests/` subdirectory in
 what's been reviewed so far — if not, this needs a minimal test added under
 `apps/examples/hello_mlp/tests/` to actually exercise the fix end-to-end.
+
+### 12.3 Default compiler output was extremely noisy — FIXED, verified on hardware
+
+**Symptom:** a plain `python3 tensorlang.py file.tl` (no flags) printed 40+
+lines before showing anything useful — a full ASCII banner, a file-details
+block, "Loaded Lark Grammer file"/"Loaded TensorLang file", the entire raw
+`.tl` source dumped back to stdout, a pipeline banner, a `[COMPILER] Result`
+block for *every* intermediate tensor (not just the final one), and a
+content-free `[COMPILER] KERNEL CUDA!` line. This is the item listed under
+§10 "Cleaner / quieter compiler output for app runs" — now resolved.
+
+**Root cause:** none of this output was gated behind `self.debug_mode`; it
+all fired unconditionally on every run, regardless of flags.
+
+**Fix:** gated everything above behind `self.debug_mode` in `compiler.py`
+(`--debug` still shows exactly the original verbose output — confirmed
+byte-for-byte identical). Also fixed `type_checker.py`'s
+`[TYPE CHECKER] Arg Names`/`Args` trace, which printed unconditionally for
+every `let` binding — now gated behind `DEBUG_MODE` to match the identical
+pattern already used one line below it.
+
+Added an explicit final-result print using `output_tensor` — the AST's
+designated result name, returned by `build_ast` but previously never
+actually looked up or printed. Before this fix, the "final answer" a user
+saw was really just whichever intermediate `Result` print happened to run
+last (coincidentally correct for single-output programs, not by design).
+
+**New default output:**
+```
+[COMPILER] TensorLang 0.3.0 — compiling <file>
+<output_tensor> = <value>
+Done in <elapsed>s
+```
+
+**Verification (hardware, 2026-09-03):**
+```
+python3 tensorlang.py --test
+================================================================================
+Summary: 106/106 tests passed in 93.86s
+✅ All tests passed successfully!
+================================================================================
+
+python3 tensorlang.py tests/activation_pipeline.tl
+[COMPILER] TensorLang 0.3.0 — compiling activation_pipeline.tl
+output = [0.31830028 0.5        0.68169975 0.7239275 ]
+Done in 2.73s
+```
+`--debug` confirmed to reproduce the full original verbose trace unchanged.
+Full core suite re-run confirms this change (and the §12.1/§12.2 fixes) did
+not affect pass/fail behavior — `test_runner.py` verifies against `.npy`
+cache files, not stdout, so none of this touches correctness.
 
 ---
 

@@ -1,0 +1,10 @@
+[app]
+name = "hello_mlp"
+description = "Minimal 2-layer MLP training example (linear regression style)"
+
+[requirements]
+gpus = 1
+memory_gb = 4
+
+[entry_points]
+main = "main.tl"

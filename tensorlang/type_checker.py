@@ -59,8 +59,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             arg_names = expr.get('args', [])
             args = [env.get(a) for a in arg_names if a in env]
 
-            tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
-            tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
+            if DEBUG_MODE:
+                tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
+                tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
 
             if ty and isinstance(ty, dict) and 'dtype' in ty:
                 shape = ty['shape']
