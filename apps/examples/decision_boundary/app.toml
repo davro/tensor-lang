@@ -1,0 +1,10 @@
+[app]
+name = "decision_boundary"
+description = "2-8-1 tanh/sigmoid MLP trained on XOR; snapshots the decision boundary each chunk for pygame playback"
+
+[requirements]
+gpus = 1
+memory_gb = 4
+
+[entry_points]
+main = "main.tl"
