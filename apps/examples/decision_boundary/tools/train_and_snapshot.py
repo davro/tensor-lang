@@ -5,67 +5,51 @@ Run from the tensor-lang repo root (after init_state.py, and after
 
     python3 apps/examples/decision_boundary/tools/train_and_snapshot.py
 
-Repeatedly invokes:
-
-    python3 tensorlang.py --app examples/decision_boundary
-
-Each invocation runs one 25-epoch training chunk (main.tl), resuming from
-the weights the previous chunk saved. After each chunk this script reads
-back the grid snapshot main.tl just wrote and appends it to an in-memory
-list. At the end it stacks everything into one array and saves it as
+Runs main.tl 40 times (40 chunks x 25 epochs/chunk = 1000 total epochs
+— see the `for epoch in range(25)` loop in main.tl), resuming from the
+weights the previous chunk saved each time. After each chunk, reads
+back the grid snapshot main.tl just wrote and stacks all of them into
 apps/examples/decision_boundary/snapshots/frames.npy, shape
 (num_chunks, side, side) — exactly what viewer.py expects.
 """
 import json
-import subprocess
 import sys
 from pathlib import Path
+
 import numpy as np
 
-REPO_ROOT   = Path(__file__).resolve().parents[4]
-APP_DIR     = Path("apps/examples/decision_boundary")
-CACHE_DIR   = Path("cache/apps/examples/decision_boundary/main.tl")
-FRAME_FILE  = REPO_ROOT / CACHE_DIR / "frames" / "frame.npy"
-LOSS_FILE   = REPO_ROOT / CACHE_DIR / "frames" / "loss.npy"
+# from apps/examples/decision_boundary/tools/train_and_snapshot.py, parents[3] is apps/
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from tlkit import chunked_runner  # noqa: E402
 
-NUM_CHUNKS = 40  # 40 chunks x 25 epochs/chunk = 1000 total epochs
+APP = "examples/decision_boundary"
+APP_DIR = Path("apps/examples/decision_boundary")
+NUM_CHUNKS = 40
 
 
-def run_one_chunk():
-    result = subprocess.run(
-        [sys.executable, "tensorlang.py", "--app", "examples/decision_boundary"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(result.stdout)
-        print(result.stderr)
-        raise RuntimeError("tensorlang.py invocation failed — see output above")
+def collect_frame(repo_root: Path) -> np.ndarray:
+    side = json.loads((repo_root / APP_DIR / "data/meta.json").read_text())["side"]
+    frame_path = chunked_runner.cache_dir_for(APP, repo_root) / "frames" / "frame.npy"
+    return np.load(frame_path).reshape(side, side)  # (side*side, 1) -> (side, side)
+
+
+def report_progress(chunk: int, n_chunks: int) -> str:
+    repo_root = chunked_runner.find_repo_root()
+    loss_path = chunked_runner.cache_dir_for(APP, repo_root) / "frames" / "loss.npy"
+    loss = np.load(loss_path).item()  # mse_loss saves a (1,1) tensor, not a bare scalar
+    return f"chunk {chunk + 1:3d}/{n_chunks}   loss_final={loss:.6f}"
 
 
 def main():
-    meta_path = REPO_ROOT / APP_DIR / "data" / "meta.json"
+    repo_root = chunked_runner.find_repo_root()
+    meta_path = repo_root / APP_DIR / "data/meta.json"
     if not meta_path.exists():
         raise SystemExit("Run tools/init_state.py first (no data/meta.json found).")
-    meta = json.loads(meta_path.read_text())
-    side = meta["side"]
 
-    frames = []
-    for chunk in range(NUM_CHUNKS):
-        run_one_chunk()
-        frame = np.load(FRAME_FILE).reshape(side, side)  # (side*side, 1) -> (side, side)
-        loss = float(np.load(LOSS_FILE))
-        frames.append(frame)
-        print(f"chunk {chunk+1:3d}/{NUM_CHUNKS}   loss_final={loss:.6f}")
+    frames = chunked_runner.run_chunks(APP, NUM_CHUNKS, collect_frame, repo_root, report_progress)
 
-    stacked = np.stack(frames, axis=0).astype(np.float32)  # (NUM_CHUNKS, side, side)
-
-    out_dir = REPO_ROOT / APP_DIR / "snapshots"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "frames.npy"
-    np.save(out_path, stacked)
-    print(f"\nSaved {stacked.shape} to {out_path}")
+    out_path = chunked_runner.save_frames(frames, repo_root / APP_DIR / "snapshots/frames.npy")
+    print(f"\nSaved {frames.shape} to {out_path}")
     print("Now run: python3 apps/examples/decision_boundary/tools/viewer.py")
 
 

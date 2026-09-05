@@ -1,8 +1,8 @@
 # TensorLang Handover Document
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-04
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`, re-confirmed on hardware after this round of fixes). App system restored and demonstrated. Three issues found via code review and fixed in `test_runner.py`/`compiler.py`/`type_checker.py` — **all three verified fixed on hardware** (sequential test mode; noisy default compiler output; app test wiring) — see §12.
+**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Five additional compiler/runner limitations discovered while building `decision_boundary` — worked around in the app, **not yet fixed upstream** — see §13.
 
 ---
 
@@ -67,10 +67,22 @@ tensor-lang/
 ├── build.sh                   # Install / test / lint helper
 ├── tests/                     # 106 core language tests
 ├── apps/                      # User-facing applications
+│   ├── tlkit/                 # Shared toolkit for visual/interactive apps (new, 2026-09-04)
+│   │   ├── chunked_runner.py  # drives repeated `tensorlang.py --app` invocations
+│   │   ├── sequence_player.py # pygame play/pause/scrub/speed harness
+│   │   ├── colormap.py        # numpy colormaps + 2D grid generation
+│   │   └── README.md
 │   └── examples/
-│       └── hello_mlp/         # Minimal working app
+│       ├── hello_mlp/         # Minimal working app
+│       │   ├── app.toml
+│       │   └── main.tl
+│       └── decision_boundary/ # 2nd app: XOR MLP + pygame boundary animation (new, 2026-09-04)
 │           ├── app.toml
-│           └── main.tl
+│           ├── main.tl
+│           ├── run.sh         # install pygame, init/train/view in one command
+│           ├── data/          # static grid + metadata (checked in)
+│           ├── snapshots/     # generated animation frames (gitignored)
+│           └── tools/         # init_state.py, train_and_snapshot.py, viewer.py
 ├── examples/                  # Older / misc examples
 ├── cache/                     # Generated CUDA, .npy, etc. (gitignored)
 └── requirements.txt
@@ -87,8 +99,10 @@ tensor-lang/
 | Default compiler output (no flags) | **Fixed & verified on hardware** (2026-09-03) — see §12              |
 | AppRunner                          | Restored and working for normal app execution                       |
 | App test mode (`--app X --test`)   | **Fixed & verified on hardware** (2026-09-03) — see §12               |
-| Example app                        | `apps/examples/hello_mlp` runs successfully                         |
-| Autograd + training loops          | Working (verified by hello_mlp + tests)                             |
+| Example app (1st)                  | `apps/examples/hello_mlp` runs successfully                         |
+| Example app (2nd)                  | `apps/examples/decision_boundary` — verified on hardware (2026-09-04); loss 0.244 → 0.0016 over 1000 epochs, see §13.2 |
+| Shared app toolkit                 | `apps/tlkit/` — extracted from `decision_boundary`, unit-smoke-tested, see §13.1 |
+| Autograd + training loops          | Working (verified by hello_mlp + decision_boundary + tests)         |
 | Missing file history                | `app_runner.py` was absent from main; restored from previous work   |
 
 **Known temporary fix applied earlier:**
@@ -161,6 +175,16 @@ main = "main.tl"
 
 This is the canonical "hello world" for the app system.
 
+### Second app: a visual, interactive-feeling example
+
+`apps/examples/decision_boundary` (added 2026-09-04) trains a 2-8-1 tanh/sigmoid MLP on XOR and plays back the decision boundary morphing across training as a pygame animation. It's a genuinely different shape of app from `hello_mlp` — a single training run isn't enough here, the point is to *see* training happen — and it surfaced real constraints in the compiler that a single-file, single-run app never would. See §13 for the full writeup, including the five compiler/runner gotchas found along the way and the general-purpose `apps/tlkit/` toolkit extracted from it.
+
+Run it:
+```bash
+./apps/examples/decision_boundary/run.sh          # installs pygame if missing, trains, plays back
+./apps/examples/decision_boundary/run.sh --reset  # wipe weights and start fresh
+```
+
 ---
 
 ## 7. Language Features (Implemented)
@@ -221,6 +245,10 @@ From README + recent experience:
 - Inline unary ops (`relu(linear(...))`)
 - Better shape-mismatch error messages
 - ~~Cleaner / quieter compiler output for app runs~~ — **done, see §12.3**
+- **New (2026-09-04, see §13 for full detail):**
+  - `mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch only special-cases a size-1 vector correctly; a same-shape-but-larger 1D operand (e.g. an 8-wide bias gradient against a `(1,1)` scalar) hits a false "shape mismatch"
+  - `reshape()` does a standalone env lookup with no `_grad`-suffix inference, unlike `add`/`minus`/`mult`/`div` — it can never take a gradient tensor directly, independent of shape
+  - `app_runner.py` calls `compiler.compile_and_execute()` without checking its return value, so a failed compile/execute can still exit `0` — scripts driving `tensorlang.py` as a subprocess cannot trust the exit code alone
 
 **Medium term**
 - Built-in optimisers (SGD, Adam) as language primitives
@@ -416,20 +444,69 @@ cache files, not stdout, so none of this touches correctness.
 
 ---
 
-## 13. Suggested Next Actions for a Returning Developer
+## 13. Session 2026-09-04: `apps/tlkit/`, second app (`decision_boundary`), and five newly discovered compiler/runner limitations
+
+Builds directly on §14 action #6 ("pick one concrete practical application"). Delivered as a Claude-assisted session; every fix below was verified either by parsing the real `tensorlang.lark` grammar directly, by hand-simulating the exact `type_checker.py` branch logic against real shapes, or on real GPU hardware (the loss curve in §13.2) — not by inspection alone.
+
+### 13.1 `apps/tlkit/` — shared toolkit for visual/interactive apps
+
+`hello_mlp`-style apps are one-shot: compile, train, print a number. `decision_boundary` is a different shape of app — the point is to *watch* training happen — and that need is going to recur (a physics-playback app and an interactive click-to-retrain app are both queued up next — see §14). Rather than let each new example reinvent the same plumbing, the reusable pieces were extracted into `apps/tlkit/`:
+
+- **`chunked_runner.py`** — drives repeated `python3 tensorlang.py --app ...` invocations (see §13.2 for why chunking is necessary at all) and stacks one collected frame per chunk into a single array. Also computes `cache_dir_for(app_category_path)` so callers don't hand-write the `cache/apps/.../main.tl/...` path themselves.
+- **`sequence_player.py`** — a pygame play/pause/scrub/speed-control harness generic over any `(F, ...)` frame array.
+- **`colormap.py`** — diverging/sequential numpy colormaps, 2D grid generation, and pixel-coordinate mapping for overlays.
+
+`decision_boundary`'s three tool scripts shrank from ~90 lines each to ~40–50 after the extraction. The extraction itself caught two real bugs that existed in the original, pre-extraction code and had never been exercised by a realistic test case:
+- `apps/tlkit/__init__.py` eagerly importing `sequence_player` gave every tool script (including ones with nothing to do with pygame) a hard `pygame` dependency — fixed by deferring `import pygame` to inside `SequencePlayer`'s methods.
+- `train_and_snapshot.py`'s `float(np.load(loss_path))` throws on the `(1,1)`-shaped array `mse_loss` actually produces (only worked by luck against an earlier, loosely-shaped `(1,)` test fixture) — fixed with `.item()`.
+
+### 13.2 `apps/examples/decision_boundary` — XOR MLP with pygame boundary playback
+
+Trains a 2-8-1 tanh/sigmoid MLP on XOR (`matmul`, `tanh`, `sigmoid`, `mse_loss`, `add` for bias, autograd) and animates the decision boundary morphing across training.
+
+**Why this app is chunked into repeated process invocations instead of one long-running loop:** `save()` targets are fixed string literals in the grammar (`save_statement: "save" "(" NAME "," STRING ")"` — no `save(x, f"frame_{i}.npy")`), and rebind (`w = w_updated`) requires a fixed-shape GPU buffer every iteration, so a single `main.tl` cannot accumulate a growing snapshot history inside one `for` loop. The pattern used instead: `main.tl` `load()`s/`save()`s its own weights to a fixed cache path every run, and gets invoked repeatedly as separate processes via `tlkit.chunked_runner`, each one a "chunk" that resumes from the last.
+
+**Verified result on hardware:** starting from a fresh init, loss dropped from 0.243585 (chunk 1) to 0.001573 (chunk 40) over 1000 total epochs (40 chunks × 25 epochs), producing a fully-separated, sharp XOR decision boundary in the pygame viewer. Getting here took several rounds of real hardware failures, documented below because each one is a genuine, reusable finding about the compiler, not an app-specific mistake.
+
+### 13.3 Five gotchas found while building it (candidates for upstream fixes)
+
+**1. Activation functions only accept a bare `NAME` argument, never a nested call.**
+`sigmoid_call: "sigmoid" "(" NAME ")"` and `tanh_call: "tanh" "(" NAME ")"` in the grammar — unlike `matmul`/`add`/`minus`/`mult`/`div`, which accept `inline_expr` and so support nesting. `tanh(matmul(x, w1))` fails to parse; must be split into `let h_pre = matmul(x, w1)` / `let h = tanh(h_pre)`. Confirmed by parsing both forms against the real grammar directly with `lark`.
+
+**2. `app_runner.py` doesn't propagate `compile_and_execute`'s outcome into the process exit code.**
+Line ~186 calls `compiler.compile_and_execute(str(main_file))` without checking or using its return value. `compile_and_execute` has failure paths that return `False, env` without raising (e.g. a shape mismatch) — so `python3 tensorlang.py --app X` can exit `0` on a genuinely failed compile. Any script (`apps/tlkit/chunked_runner.py` included) that shells out to `tensorlang.py` and trusts the exit code alone will silently proceed past a real failure. Worked around in `chunked_runner.run_chunks` by showing the subprocess's captured stdout/stderr whenever the expected output artifact is missing, regardless of exit code.
+
+**3. `mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch is too narrow.**
+In `type_checker.py`, the shared branch for these four ops has a special case for `len(shape1) == 2 and len(shape2) == 1` that only succeeds if the 1D operand has size 1, or if one of `shape1`'s two dims happens to equal the 1D operand's size. A `(1,1)` scalar times an `(8,)` vector (scaling an 8-wide bias gradient by a scalar learning rate) hits neither condition and fails with `mult shape mismatch`, even though it's a completely ordinary scalar-broadcast. Confirmed by extracting and running the exact branch logic against real shapes in isolation. **Workaround used:** give each differently-shaped parameter its own same-shape learning-rate vector (`lr_b1: Tensor[f32,(8,)]`, `lr_b2: Tensor[f32,(1,)]`) so the `mult` is a trivial equal-shape operation instead of a scalar broadcast.
+
+**4. `reshape()` cannot take a gradient tensor (`*_grad`) as input, regardless of shape.**
+`add`/`minus`/`mult`/`div` share code that, when an argument name isn't found directly in the type-checker's env, checks for a `_grad` suffix and infers the shape from the base tensor. `reshape()`'s branch does a plain `if tensor_name not in env` check with no such fallback (same is true of `transpose`, `max`/`min`/`argmax`/`argmin`, `instance_norm`, `batch_norm` — all the single-`tensor`-field ops, as opposed to the `args`-list ops). `reshape(b1_grad, (1, 8))` fails with `Undefined tensor b1_grad for reshape` even though `b1_grad` is a perfectly valid, populated tensor by that point in the program. This was actually the first workaround attempt for gotcha #3 above, and it failed for this unrelated, second reason — worth knowing these two are independent limitations, not the same one.
+
+**5. `mse_loss` (and likely other losses) produce a `(1,1)` tensor, not a bare scalar.**
+Not a compiler bug exactly, but a real footgun for anyone driving TensorLang from Python: `float(np.load("loss.npy"))` throws in current numpy for a `(1,1)`-shaped array. Use `.item()` instead. Caught during the `tlkit` extraction (§13.1) precisely because a more realistically-shaped test fixture was used the second time around.
+
+All five are now noted in §10 "Known Pain Points" as candidates for an upstream fix. None were fixed in the compiler itself this session — all were worked around at the `.tl`/tooling level, since the priority was a working second app, not a compiler patch.
+
+---
+
+## 14. Suggested Next Actions for a Returning Developer
 
 1. Confirm environment: `bash build.sh --install` → activate venv → full test run.
 2. Run `python3 tensorlang.py --app examples/hello_mlp` and inspect output.
 3. Read `apps/examples/hello_mlp/main.tl` + `app.toml`.
 4. ~~Run the full (unfiltered) `--no-parallel` suite once to close out §12.1 completely.~~ — **done, see §12.1**
 5. ~~Add a `tests/` dir under `apps/examples/hello_mlp/` and run `--app examples/hello_mlp --test` to close out §12.2.~~ — **done, see §12.2** (also added for `linear_regression`)
-6. Pick one concrete practical application (image filter, tiny policy, portfolio predictor, …) and implement it as a second app under `apps/`.
-7. Log every friction point encountered; those become the real short-term language improvements.
+6. ~~Pick one concrete practical application (image filter, tiny policy, portfolio predictor, …) and implement it as a second app under `apps/`.~~ — **done, see §13** (`decision_boundary`)
+7. Log every friction point encountered; those become the real short-term language improvements. — **ongoing, see §13.3 for this round's five findings**
 8. ~~Consider adding a quiet/default mode so app demos are less verbose.~~ — **done, see §12.3**
+9. **New:** third app — GPU-batched physics playback (bouncing balls / double pendulum), built on `apps/tlkit/`. Pure `save()`-once-then-scrub, no chunking needed, and it's the first example to stress broadcasting across a batch dimension in a visual app — good odds of finding a sixth gotcha.
+10. **New:** fourth app — interactive "click points, retrain, watch the boundary update" version of `decision_boundary`, triggered by a keypress instead of a fixed chunk count. Reuses the same `load()`/`save()`/subprocess pattern; sequence it after #9 so the chunked-runner plumbing is proven twice over before adding live interaction on top.
+11. **New:** consider fixing the five §13.3 gotchas upstream in `type_checker.py`/`app_runner.py` rather than continuing to work around them app-side — especially #2 (silent exit-code-0 failures) and #3 (the 2D-vs-1D broadcast branch), which will keep costing debugging time on every future app that uses biases or any other 1D parameter.
+12. **New:** add a `tests/` dir to `apps/examples/decision_boundary` (per the §12.2 pattern) once the network's converged output is stable enough to pin an `@EXPECTED` value against.
 
 ---
 
-## 14. Contact / Context
+## 15. Contact / Context
 
 Original author: davro (David)
 Related projects of interest: `workspace` (PyQt6 IDE with Ollama), `we-not-me` (TradingView indicators).
@@ -437,4 +514,4 @@ Primary motivation for recent work: move from pure compiler infrastructure towar
 
 ---
 
-*This handover assumes the state after the 2026-08-29 recovery and successful `hello_mlp` run. Update the "Current Health" and "Recent Recovery" sections when major changes land.*
+*This handover assumes the state after the 2026-08-29 recovery, the 2026-09-03 test-runner/compiler-output fixes (§12), and the 2026-09-04 `tlkit`/`decision_boundary` session (§13). Update the "Current Health" and add a new dated session section when major changes land.*
