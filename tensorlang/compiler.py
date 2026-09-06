@@ -1443,22 +1443,44 @@ class TensorCompiler:
                     kernel_cu_path = cache_file_dir / "kernel.cu"
                     kernel_so_path = cache_file_dir / "kernel.so"
 
-                    with open(kernel_cu_path, 'w') as f:
-                        f.write(cuda_code)
-                        if self.debug_mode:
-                            self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_cu_path} written!")
+                    # Skip nvcc entirely when the freshly-generated CUDA source is
+                    # byte-identical to what's already cached here. Source shape
+                    # (and therefore generated code) only changes when the .tl
+                    # file's tensor shapes/ops change — the board *values* an app
+                    # like tic_tac_toe's infer.tl re-runs on each turn never touch
+                    # this generated text, only the .npy files loaded at runtime.
+                    # Without this check every invocation paid a full nvcc
+                    # compile (multiple seconds) even when nothing had changed,
+                    # which is prohibitive for anything invoked repeatedly in an
+                    # interactive loop (e.g. one subprocess call per game move).
+                    already_compiled = (
+                        kernel_so_path.exists()
+                        and kernel_cu_path.exists()
+                        and kernel_cu_path.read_text() == cuda_code
+                    )
 
-                    try:
-                        subprocess.run([
-                            'nvcc', '-o', str(kernel_so_path),
-                            '--shared', '-Xcompiler', '-fPIC', '-lcudart',
-                            str(kernel_cu_path)
-                        ], check=True)
+                    if already_compiled:
                         if self.debug_mode:
-                            self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_so_path} compiled!")
-                    except subprocess.CalledProcessError as e:
-                        self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
-                        sys.exit(1)
+                            self.tensorlang.print(
+                                message=f"[COMPILER] CUDA Compile: kernel unchanged, reusing cached {kernel_so_path}"
+                            )
+                    else:
+                        with open(kernel_cu_path, 'w') as f:
+                            f.write(cuda_code)
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_cu_path} written!")
+
+                        try:
+                            subprocess.run([
+                                'nvcc', '-o', str(kernel_so_path),
+                                '--shared', '-Xcompiler', '-fPIC', '-lcudart',
+                                str(kernel_cu_path)
+                            ], check=True)
+                            if self.debug_mode:
+                                self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_so_path} compiled!")
+                        except subprocess.CalledProcessError as e:
+                            self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
+                            sys.exit(1)
 
                     if self.transpile:
                         try:
