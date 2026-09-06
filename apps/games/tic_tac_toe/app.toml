@@ -1,0 +1,10 @@
+[app]
+name = "tic_tac_toe"
+description = "9-32-9 MLP trained to imitate a minimax-optimal policy; play against it interactively in pygame"
+
+[requirements]
+gpus = 1
+memory_gb = 2
+
+[entry_points]
+main = "train.tl"
