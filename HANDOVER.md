@@ -1,8 +1,8 @@
 # TensorLang Handover Document
 
-**Last updated:** 2026-09-04
+**Last updated:** 2026-09-06
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (106/106, both parallel and `--no-parallel`). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Five additional compiler/runner limitations discovered while building `decision_boundary` — worked around in the app, **not yet fixed upstream** — see §13.
+**Status:** Core language + test suite healthy (109/109). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Of the five compiler/runner limitations discovered while building `decision_boundary` (§13.3), four are now fixed upstream and hardware-verified (§15); the fifth uncovered a second, still-open issue in CUDA kernel dispatch for scalar broadcasting (§15.4).
 
 ---
 
@@ -65,7 +65,7 @@ tensor-lang/
 │   └── type_checker.py
 ├── tensorlang.lark            # Grammar
 ├── build.sh                   # Install / test / lint helper
-├── tests/                     # 106 core language tests
+├── tests/                     # 109 core language tests
 ├── apps/                      # User-facing applications
 │   ├── tlkit/                 # Shared toolkit for visual/interactive apps (new, 2026-09-04)
 │   │   ├── chunked_runner.py  # drives repeated `tensorlang.py --app` invocations
@@ -219,7 +219,7 @@ The suite covers:
 - Functions, pipelines, portfolio-style examples
 - Load/save
 
-Full list is available via `ls tests/`. All 106 currently pass.
+Full list is available via `ls tests/`. All 109 currently pass (106 + 3 added in §15.2).
 
 ---
 
@@ -242,13 +242,13 @@ From README + recent experience:
 
 **Short term**
 - Scoped kernel names (remove post-loop renaming constraint)
-- Inline unary ops (`relu(linear(...))`)
+- ~~Inline unary ops (`relu(linear(...))`)~~ — **done, see §15.1**
 - Better shape-mismatch error messages
 - ~~Cleaner / quieter compiler output for app runs~~ — **done, see §12.3**
 - **New (2026-09-04, see §13 for full detail):**
-  - `mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch only special-cases a size-1 vector correctly; a same-shape-but-larger 1D operand (e.g. an 8-wide bias gradient against a `(1,1)` scalar) hits a false "shape mismatch"
-  - `reshape()` does a standalone env lookup with no `_grad`-suffix inference, unlike `add`/`minus`/`mult`/`div` — it can never take a gradient tensor directly, independent of shape
-  - `app_runner.py` calls `compiler.compile_and_execute()` without checking its return value, so a failed compile/execute can still exit `0` — scripts driving `tensorlang.py` as a subprocess cannot trust the exit code alone
+  - ~~`mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch only special-cases a size-1 vector correctly; a same-shape-but-larger 1D operand (e.g. an 8-wide bias gradient against a `(1,1)` scalar) hits a false "shape mismatch"~~ — **type checker fixed 2026-09-06, see §15.1; CUDA kernel dispatch for this case still needs a fix, see §15.4**
+  - ~~`reshape()` does a standalone env lookup with no `_grad`-suffix inference, unlike `add`/`minus`/`mult`/`div` — it can never take a gradient tensor directly, independent of shape~~ — **done, see §15.1** (fixed for every single-tensor-field op, not just `reshape`)
+  - ~~`app_runner.py` calls `compiler.compile_and_execute()` without checking its return value, so a failed compile/execute can still exit `0` — scripts driving `tensorlang.py` as a subprocess cannot trust the exit code alone~~ — **done, see §15.1**
 
 **Medium term**
 - Built-in optimisers (SGD, Adam) as language primitives
@@ -470,22 +470,24 @@ Trains a 2-8-1 tanh/sigmoid MLP on XOR (`matmul`, `tanh`, `sigmoid`, `mse_loss`,
 
 ### 13.3 Five gotchas found while building it (candidates for upstream fixes)
 
-**1. Activation functions only accept a bare `NAME` argument, never a nested call.**
+> **Status update (2026-09-06): four of these five are now fixed — see §15 for the fix writeup, hardware verification, and new regression tests. Left the original diagnostic text below intact since it's still the accurate record of how each was found.**
+
+**1. Activation functions only accept a bare `NAME` argument, never a nested call. — FIXED, see §15.1**
 `sigmoid_call: "sigmoid" "(" NAME ")"` and `tanh_call: "tanh" "(" NAME ")"` in the grammar — unlike `matmul`/`add`/`minus`/`mult`/`div`, which accept `inline_expr` and so support nesting. `tanh(matmul(x, w1))` fails to parse; must be split into `let h_pre = matmul(x, w1)` / `let h = tanh(h_pre)`. Confirmed by parsing both forms against the real grammar directly with `lark`.
 
-**2. `app_runner.py` doesn't propagate `compile_and_execute`'s outcome into the process exit code.**
+**2. `app_runner.py` doesn't propagate `compile_and_execute`'s outcome into the process exit code. — FIXED, see §15.1**
 Line ~186 calls `compiler.compile_and_execute(str(main_file))` without checking or using its return value. `compile_and_execute` has failure paths that return `False, env` without raising (e.g. a shape mismatch) — so `python3 tensorlang.py --app X` can exit `0` on a genuinely failed compile. Any script (`apps/tlkit/chunked_runner.py` included) that shells out to `tensorlang.py` and trusts the exit code alone will silently proceed past a real failure. Worked around in `chunked_runner.run_chunks` by showing the subprocess's captured stdout/stderr whenever the expected output artifact is missing, regardless of exit code.
 
-**3. `mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch is too narrow.**
-In `type_checker.py`, the shared branch for these four ops has a special case for `len(shape1) == 2 and len(shape2) == 1` that only succeeds if the 1D operand has size 1, or if one of `shape1`'s two dims happens to equal the 1D operand's size. A `(1,1)` scalar times an `(8,)` vector (scaling an 8-wide bias gradient by a scalar learning rate) hits neither condition and fails with `mult shape mismatch`, even though it's a completely ordinary scalar-broadcast. Confirmed by extracting and running the exact branch logic against real shapes in isolation. **Workaround used:** give each differently-shaped parameter its own same-shape learning-rate vector (`lr_b1: Tensor[f32,(8,)]`, `lr_b2: Tensor[f32,(1,)]`) so the `mult` is a trivial equal-shape operation instead of a scalar broadcast.
+**3. `mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch is too narrow. — PARTIALLY FIXED, see §15.1 and §15.4**
+In `type_checker.py`, the shared branch for these four ops has a special case for `len(shape1) == 2 and len(shape2) == 1` that only succeeds if the 1D operand has size 1, or if one of `shape1`'s two dims happens to equal the 1D operand's size. A `(1,1)` scalar times an `(8,)` vector (scaling an 8-wide bias gradient by a scalar learning rate) hits neither condition and fails with `mult shape mismatch`, even though it's a completely ordinary scalar-broadcast. Confirmed by extracting and running the exact branch logic against real shapes in isolation. **Workaround used:** give each differently-shaped parameter its own same-shape learning-rate vector (`lr_b1: Tensor[f32,(8,)]`, `lr_b2: Tensor[f32,(1,)]`) so the `mult` is a trivial equal-shape operation instead of a scalar broadcast. **Update:** the type-checker half of this is fixed, but fixing it exposed a second, deeper bug in the CUDA kernel dispatch — see §15.4. The workaround above is still needed until that's resolved.
 
-**4. `reshape()` cannot take a gradient tensor (`*_grad`) as input, regardless of shape.**
+**4. `reshape()` cannot take a gradient tensor (`*_grad`) as input, regardless of shape. — FIXED, see §15.1**
 `add`/`minus`/`mult`/`div` share code that, when an argument name isn't found directly in the type-checker's env, checks for a `_grad` suffix and infers the shape from the base tensor. `reshape()`'s branch does a plain `if tensor_name not in env` check with no such fallback (same is true of `transpose`, `max`/`min`/`argmax`/`argmin`, `instance_norm`, `batch_norm` — all the single-`tensor`-field ops, as opposed to the `args`-list ops). `reshape(b1_grad, (1, 8))` fails with `Undefined tensor b1_grad for reshape` even though `b1_grad` is a perfectly valid, populated tensor by that point in the program. This was actually the first workaround attempt for gotcha #3 above, and it failed for this unrelated, second reason — worth knowing these two are independent limitations, not the same one.
 
-**5. `mse_loss` (and likely other losses) produce a `(1,1)` tensor, not a bare scalar.**
+**5. `mse_loss` (and likely other losses) produce a `(1,1)` tensor, not a bare scalar. — not fixed, not a compiler bug**
 Not a compiler bug exactly, but a real footgun for anyone driving TensorLang from Python: `float(np.load("loss.npy"))` throws in current numpy for a `(1,1)`-shaped array. Use `.item()` instead. Caught during the `tlkit` extraction (§13.1) precisely because a more realistically-shaped test fixture was used the second time around.
 
-All five are now noted in §10 "Known Pain Points" as candidates for an upstream fix. None were fixed in the compiler itself this session — all were worked around at the `.tl`/tooling level, since the priority was a working second app, not a compiler patch.
+All five were originally noted in §10 "Known Pain Points" as candidates for an upstream fix; none were fixed in the compiler itself in this section's session. Four of the five (all but #5, which isn't a compiler bug) were fixed in a follow-up session — see §15.
 
 ---
 
@@ -501,12 +503,129 @@ All five are now noted in §10 "Known Pain Points" as candidates for an upstream
 8. ~~Consider adding a quiet/default mode so app demos are less verbose.~~ — **done, see §12.3**
 9. **New:** third app — GPU-batched physics playback (bouncing balls / double pendulum), built on `apps/tlkit/`. Pure `save()`-once-then-scrub, no chunking needed, and it's the first example to stress broadcasting across a batch dimension in a visual app — good odds of finding a sixth gotcha.
 10. **New:** fourth app — interactive "click points, retrain, watch the boundary update" version of `decision_boundary`, triggered by a keypress instead of a fixed chunk count. Reuses the same `load()`/`save()`/subprocess pattern; sequence it after #9 so the chunked-runner plumbing is proven twice over before adding live interaction on top.
-11. **New:** consider fixing the five §13.3 gotchas upstream in `type_checker.py`/`app_runner.py` rather than continuing to work around them app-side — especially #2 (silent exit-code-0 failures) and #3 (the 2D-vs-1D broadcast branch), which will keep costing debugging time on every future app that uses biases or any other 1D parameter.
+11. ~~Consider fixing the five §13.3 gotchas upstream in `type_checker.py`/`app_runner.py` rather than continuing to work around them app-side — especially #2 (silent exit-code-0 failures) and #3 (the 2D-vs-1D broadcast branch), which will keep costing debugging time on every future app that uses biases or any other 1D parameter.~~ — **done for #1/#2/#4, partially done for #3 — see §15**
 12. **New:** add a `tests/` dir to `apps/examples/decision_boundary` (per the §12.2 pattern) once the network's converged output is stable enough to pin an `@EXPECTED` value against.
+13. **New:** fix the CUDA kernel dispatch gap for `(1,1)`-scalar broadcasting found while closing out gotcha #3 — see §15.4. This is the one piece of §13.3 still open, and until it's fixed, decision_boundary and any future app must keep using the same-shaped-vector workaround rather than a true scalar learning rate.
 
 ---
 
-## 15. Contact / Context
+## 15. Compiler Fixes (2026-09-06): Four of Five §13.3 Gotchas Resolved
+
+A follow-up session went back through §13.3's five gotchas with the specific
+goal of fixing them upstream instead of continuing to work around them
+app-side. Four were fixed and verified end-to-end on real hardware (a
+1080ti); the fifth turned out to be two bugs stacked on top of each other,
+one fixed and one newly discovered and still open.
+
+### 15.1 What was fixed
+
+**Gotcha #1 (nested activation calls):** `tensorlang.lark`'s `relu_call`,
+`gelu_call`, `swish_call`, `sigmoid_call`, and `tanh_call` now accept a full
+`inline_expr` instead of a bare `NAME`, matching the pattern `matmul`/`add`/
+`minus`/`mult`/`div` already had. `ast_builder.py`'s activation-call handler
+was updated to parse the resulting `inline_expr` subtrees, and
+`flatten_expr_args()` now also flattens these five ops, hoisting a nested
+call into a synthetic `__tmp_N` binding exactly the way it already did for
+binary ops. `tanh(matmul(x, w1))` now parses, flattens into
+`__tmp_0 = matmul(x, w1)` / `h = tanh(__tmp_0)`, and computes the correct
+numeric result — verified against a numpy reference on hardware (see
+`tests/nested_activation_calls.tl`).
+
+**Gotcha #2 (silent exit-0 on failed compile):** worse than originally
+scoped — it wasn't only the type-check-failure path that was silent.
+`compile_and_execute()` had five more early `return False, env` points
+scattered through kernel generation (undefined save target, `load()` shape
+mismatch, incompatible shapes during codegen) that were equally silent,
+because none of the three call sites (`app_runner.py`'s normal-run path and
+both benchmark loops, plus `tensorlang.py`'s CLI) ever checked the return
+value. Fixed by: adding the missing `else` branch after type-checking
+(prints a clear "Compilation aborted" message), normalizing every internal
+early-exit point to `return False`, adding an explicit `return True` at the
+actual point of successful completion, and updating all three callers to
+check the return value and `sys.exit(1)` on failure. Verified on hardware:
+a deliberately invalid program now exits `1` with a clear error, where it
+previously exited `0` silently (see `tests/type_error_exit_code.tl`).
+
+**Gotcha #4 (reshape can't take a `_grad` tensor):** turned out to affect
+more ops than originally scoped — every single-tensor-field op had the same
+gap, not just `reshape`/`transpose`/`max`/`min`/`argmax`/`argmin`/
+`instance_norm`/`batch_norm` as originally listed. Fixed with a shared
+`_resolve_tensor_type()` helper in `type_checker.py` carrying the same
+`_grad`-suffix fallback `add`/`matmul`/etc. already had, applied to
+`reshape`, `transpose`, `sum`/`mean`, `softmax`, `slice`, `layer_norm`,
+`batch_norm`, `instance_norm`, `max`/`min`/`argmax`/`argmin`, `concat`, and
+the activation ops. `reshape(w_grad, (8,))` now works directly — verified
+on hardware, exact match against the expected all-ones gradient of `sum()`
+(see `tests/reshape_gradient.tl`).
+
+**Gotcha #3 (2D-vs-1D broadcast), type-checker half:** `type_checker.py`
+now has an `_is_scalar_shape()` check (any shape where every dim is 1,
+including `(1,1)`) checked before the old narrow special case, plus the
+missing symmetric 1D-vs-2D case. A `(1,1)` scalar times an `(8,)` vector no
+longer gets a false "shape mismatch" at the type-checking stage.
+
+### 15.2 New tests
+
+Three new files in `tests/`, plus a `test_runner.py` extension:
+
+- `nested_activation_calls.tl` — gotcha #1, covers `tanh`/`sigmoid`/`relu`
+  nested inside `matmul`/`add`, including the compound
+  `relu(add(matmul(...), b))` case.
+- `reshape_gradient.tl` — gotcha #4, `reshape(w_grad, ...)`.
+- `type_error_exit_code.tl` — gotcha #2, a deliberately invalid program
+  (matmul shape mismatch) that must exit non-zero.
+- `test_runner.py` gained an `@EXPECT_FAILURE` marker
+  (`is_expect_failure_test()` / an inverted pass condition in
+  `run_single_test()`), since the harness previously had no way to assert
+  "this program should correctly fail to compile" — every existing test
+  only knew how to check a successful compile's output against an
+  `@EXPECTED` block.
+
+Test count: 106 → 109. All passing on hardware, confirmed via `bash
+test.sh`.
+
+### 15.3 Regression check
+
+Before and after the fixes, the full `tests/*.tl` corpus was run through
+parsing + AST building + type checking (no GPU needed) to check for
+regressions: 104/106 pass on both, identical 2 pre-existing failures on
+both (`load_dynamic.tl`, `load_inferred.tl` — missing cached `.npy` fixture
+files, unrelated to these changes). Zero regressions from the fixes
+themselves. The three new tests plus the full existing suite were then
+verified end-to-end on real hardware (109/109).
+
+### 15.4 New issue found, not fixed: CUDA kernel dispatch for scalar broadcast
+
+Fixing the type-checker half of gotcha #3 exposed a second, deeper bug one
+layer down. `compiler.py`'s codegen dispatch routes *any* `(2D, 1D)` shape
+pair — including a disguised scalar like `(1,1)` — through
+`kernel_generator.binary_broadcast()`, which unconditionally does
+`rows, cols = output_shape`. Since the type-checker now assigns the
+`(1,1) * (8,)` case an output shape of `(8,)` (1D), this line raises
+`ValueError: not enough values to unpack` during kernel generation — before
+ever touching the GPU. A purpose-built kernel for the true-scalar case
+already exists (`binary_1d_broadcast`, docstring: "Handle broadcasting with
+scalar (0-D tensor)"), but the dispatch only reaches it when *both*
+operands are already 1D — never when the scalar is shaped `(1,1)`, which is
+exactly the shape TensorLang's own losses/reductions (`mse_loss`, `sum`)
+naturally produce. In other words: the real-world case that originally
+motivated gotcha #3 — scaling a gradient by a loss or learning-rate scalar
+— most likely still fails today, just later and louder (a Python
+`ValueError`) instead of a clean type-check rejection.
+
+Not fixed in this session: doing so properly means a dispatch branch that
+detects a true scalar operand regardless of its declared rank, and a kernel
+variant that preserves operand order for non-commutative ops (`minus`/
+`div` — you can't just swap arguments into the existing scalar kernel,
+since `A op B ≠ B op A`). That's new kernel-generation code, not a
+one-line patch, and it needs a GPU to validate — left as an open item, see
+§14.13. The existing app-side workaround (a same-shaped vector instead of a
+true scalar, e.g. `lr_b1: Tensor[f32,(8,)]`) is still required until this
+is fixed.
+
+---
+
+## 16. Contact / Context
 
 Original author: davro (David)
 Related projects of interest: `workspace` (PyQt6 IDE with Ollama), `we-not-me` (TradingView indicators).

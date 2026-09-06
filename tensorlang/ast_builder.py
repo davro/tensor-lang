@@ -42,7 +42,8 @@ def flatten_expr_args(expr_node: Dict, synthetic_nodes: List, DEBUG_MODE=False) 
     if node_type == 'name':
         return expr_node
 
-    if node_type in ('matmul', 'add', 'minus', 'mult', 'div'):
+    if node_type in ('matmul', 'add', 'minus', 'mult', 'div',
+                     'relu', 'sigmoid', 'tanh', 'gelu', 'swish'):
         new_args = []
         for arg in expr_node.get('args', []):
             if isinstance(arg, str):
@@ -375,10 +376,28 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     elif tree.data == 'user_function_call':
         return build_user_function_call(tree, DEBUG_MODE, DEBUG_INFO)
     
-    # Unary activations
+    # Unary activations — argument is now an inline_expr subtree (not just a
+    # NAME token), so it can be a nested call like tanh(matmul(x, w1)).
+    # Mirrors the binary-op handling below.
     if tree.data in ['relu_call', 'sigmoid_call', 'tanh_call', 'gelu_call', 'swish_call']:
         expr_name = tree.data.replace("_call", "")
-        args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+        args = []
+        for child in tree.children:
+            if isinstance(child, Token) and child.type == 'NAME':
+                # Plain NAME token (top-level argument, no wrapping tree)
+                args.append({'type': 'name', 'name': child.value})
+            elif isinstance(child, Tree) and child.data == 'inline_expr':
+                # inline_expr wraps either a NAME token or a nested op tree
+                inner = child.children[0] if child.children else child
+                if isinstance(inner, Token) and inner.type == 'NAME':
+                    args.append({'type': 'name', 'name': inner.value})
+                elif isinstance(inner, Tree):
+                    args.append(build_expression(inner, DEBUG_MODE, DEBUG_INFO))
+                else:
+                    args.append({'type': 'name', 'name': str(inner)})
+            elif isinstance(child, Tree):
+                # Directly nested op tree (no wrapping inline_expr)
+                args.append(build_expression(child, DEBUG_MODE, DEBUG_INFO))
         return {'type': expr_name, 'args': args}
     
     # Binary operations — arguments are now inline_expr subtrees (not just NAME tokens)

@@ -51,6 +51,25 @@ class TestRunner:
         return sorted([f.name for f in tl_files])
 
     
+    def is_expect_failure_test(self, tl_file_path):
+        """
+        Check whether a .tl test file is marked with @EXPECT_FAILURE — a
+        negative test asserting that tensorlang correctly refuses to
+        compile/run the program (e.g. a type error) and exits non-zero.
+
+        This exists specifically to regression-test the "silent exit 0 on
+        failed compile" bug: without it, the test harness has no way to
+        express "this program is SUPPOSED to fail", since run_single_test
+        otherwise treats any non-zero exit code as an automatic test
+        failure (see the `process.returncode != 0` check below).
+        """
+        try:
+            with open(tl_file_path, "r") as f:
+                content = f.read()
+        except Exception:
+            return False
+        return bool(re.search(r"//\s*@EXPECT_FAILURE\b", content))
+
     def run_single_test(self, test_file, suite_start_time=None):
         """Run a single test and verify results using .npy files.
         
@@ -63,6 +82,43 @@ class TestRunner:
             
             # Extract expected results from .tl file
             tl_path = Path(self.tests_dir) / test_file
+
+            # ----------------------------------------------------------------
+            # Negative tests (@EXPECT_FAILURE): the test passes if tensorlang
+            # exits non-zero. Handled separately, before the @EXPECTED check
+            # below, since these files intentionally have no @EXPECTED block
+            # — there's no successful output to verify.
+            # ----------------------------------------------------------------
+            if self.is_expect_failure_test(tl_path):
+                cmd = ["python3", "tensorlang.py", str(tl_path)]
+                if self.debug_mode:
+                    cmd.append("--debug")
+
+                process = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    text=True
+                )
+                test_end_abs = time.time()
+                duration = test_end_abs - test_start_abs
+                timing_str = self._format_timing(duration, test_start_abs, suite_start_time)
+
+                cache_dir = Path("cache") / self.tests_dir / test_file
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                test_stem = Path(test_file).stem
+                log_file = cache_dir / f"{test_stem}.log"
+                with open(log_file, "w") as f:
+                    f.write(process.stdout)
+
+                if process.returncode != 0:
+                    return (test_file, True, timing_str, None, None)
+                else:
+                    return (test_file, False, timing_str,
+                             "Expected non-zero exit code (compile should have failed) "
+                             "but tensorlang exited 0", None)
+
             expected_results = self.extract_expected_from_tl(tl_path)
             
             if expected_results is None:

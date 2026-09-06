@@ -73,7 +73,9 @@ def main():
                 debug_ast=args.debug_ast,
                 cache_layers=args.cache_layers
             )
-            compiler.compile_and_execute(args.file)
+            ok = compiler.compile_and_execute(args.file)
+            if not ok:
+                sys.exit(1)
 
     except FileNotFoundError as e:
         file_ref = getattr(args, 'file', None) or getattr(args, 'app', 'unknown')

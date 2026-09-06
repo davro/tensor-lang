@@ -866,7 +866,7 @@ class TensorCompiler:
             file_path = Path(tensorlang_file)
         else:
             self.tensorlang.print(message=f"[COMPILER] Error missing file")
-            return
+            return False
 
         if not file_path.exists():
             self.tensorlang.print(message=f"[COMPILER] Error: {tensorlang_file} not found at {file_path}")
@@ -963,7 +963,6 @@ class TensorCompiler:
             if success:
                 tensors    = {}
                 gpu_allocs = {}
-
                 # ============================================================
                 # Pre-register gradient tensor shapes in env.
                 # w_grad doesn't exist at type-check time — it only appears
@@ -1010,7 +1009,7 @@ class TensorCompiler:
                         tensor_name = node['tensor']
                         if tensor_name not in env:
                             self.tensorlang.print(message=f"[COMPILER] Error: Cannot save undefined tensor '{tensor_name}'")
-                            return False, env
+                            return False
                         if self.debug_mode:
                             self.tensorlang.print(message=f"[COMPILER] Queued save operation: {tensor_name} -> {node['file_path']}")
                         continue
@@ -1090,7 +1089,7 @@ class TensorCompiler:
                                                     f"  File shape:     {loaded_data.shape}\n"
                                                     f"  Declared shape: {expected_shape}"
                                         )
-                                        return False, env
+                                        return False
                                 else:
                                     env[name] = {
                                         'dtype': 'f32',
@@ -1108,12 +1107,12 @@ class TensorCompiler:
                                     self.tensorlang.print(type="[INFO]", message=f"First values: {preview}")
                             except FileNotFoundError as e:
                                 self.tensorlang.print(message=f"[COMPILER] Error: {e}")
-                                return False, env
+                                return False
                             except Exception as e:
                                 self.tensorlang.print(message=f"[COMPILER] Error loading {file_path_load}: {e}")
                                 if self.debug_mode:
                                     traceback.print_exc()
-                                return False, env
+                                return False
 
                         # ====================================================
                         # ADD / MINUS / MULT / DIV
@@ -1152,7 +1151,7 @@ class TensorCompiler:
                                 self.tensorlang.print(
                                     message=f"[COMPILER] Error: Cannot {expr['type']} tensors with incompatible shapes {shape1} and {shape2}."
                                 )
-                                return False, env
+                                return False
 
                         # ====================================================
                         # FILL
@@ -1699,6 +1698,8 @@ class TensorCompiler:
 
                         print(f"Done in {time.time() - compile_start_time:.2f}s")
 
+                        return True
+
                     except ImportError as e:
                         self.tensorlang.print(message=f"[COMPILER] PyCUDA error: {e}. Run 'pip install pycuda' and ensure CUDA toolkit is installed.")
                         sys.exit(1)
@@ -1706,6 +1707,23 @@ class TensorCompiler:
                         self.tensorlang.print(message=f"[COMPILER] Error executing CUDA kernel: {e}")
                         traceback.print_exc()
                         sys.exit(1)
+
+            else:
+                # ------------------------------------------------------------
+                # Type checking failed. type_checker() already prints a
+                # specific "[TYPE CHECKER] error: ..." message describing
+                # what went wrong, but previously nothing happened after
+                # that: this whole `if success:` block was simply skipped,
+                # execution fell through the try/except below untouched,
+                # and the process exited 0 as if nothing had gone wrong.
+                # Make the failure visible and make sure callers can react
+                # to it via the return value.
+                # ------------------------------------------------------------
+                self.tensorlang.print(
+                    message="[COMPILER] Compilation aborted: type checking failed "
+                            "(see [TYPE CHECKER] error above)."
+                )
+                return False
 
         except ValueError as e:
             self.tensorlang.print(message=f"[COMPILER] Value Error: failed: {e}")

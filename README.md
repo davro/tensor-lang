@@ -59,7 +59,7 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **User-Defined Functions**: `fn` definitions with typed parameters and return values
 * **File I/O**: `load()` and `save()` for tensor persistence
 * **Comment Support**: Single-line (`//`) and multi-line (`/* */`) comments
-* **Comprehensive Testing**: 106 test cases with expected results validation
+* **Comprehensive Testing**: 109 test cases with expected results validation
 
 ## Operations
 
@@ -68,7 +68,7 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **Literals**: `[[1.0, 2.0], [3.0, 4.0]]` - Multi-dimensional tensor literals
 * **Fill**: `fill(0.0, (3, 3))` - Create tensors with constant values
 * **Slicing**: `tensor[1:3, :]` - Extract subtensors with NumPy-style syntax
-* **Reshape**: `reshape(tensor, (4, 1))` - Change tensor dimensions (does not accept a `*_grad` tensor directly — see the Automatic Differentiation section)
+* **Reshape**: `reshape(tensor, (4, 1))` - Change tensor dimensions (accepts a `*_grad` tensor directly, e.g. `reshape(w_grad, (8,))` — see the Automatic Differentiation section)
 * **Transpose**: `transpose(tensor)` - Axis permutation with optional `axes=` argument
 * **Concat**: `concat(a, b, axis=0)` - Concatenate along a dimension
 
@@ -78,7 +78,7 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **Element-wise Operations**: `add`, `minus`, `mult`, `div` with broadcasting support and inline nesting
 * **Linear Layers**: `linear(input, weight, bias)` - Complete neural network layers
 
-> **Note:** broadcasting a `(1,1)` scalar against a 1D vector of size > 1 (e.g. scaling a bias gradient by a scalar learning rate) currently isn't handled by `add`/`minus`/`mult`/`div`'s 2D-vs-1D broadcast rule and will error. Workaround: use a same-shaped vector instead of a scalar (e.g. `Tensor[f32,(8,)]` filled with the scalar value) so the operation is an equal-shape op rather than a scalar broadcast. Tracked as a known limitation — see Future Work.
+> **Note:** the type checker now correctly accepts broadcasting a `(1,1)` scalar against a 1D vector of any size (e.g. scaling a bias gradient by a scalar learning rate) — the earlier false "shape mismatch" rejection is fixed. However, CUDA kernel generation for `add`/`minus`/`mult`/`div` doesn't yet have a matching code path for this case: it will now fail later, with a Python `ValueError` during kernel generation, instead of a clean type error. Workaround unchanged for now: use a same-shaped vector instead of a scalar (e.g. `Tensor[f32,(8,)]` filled with the scalar value) so the operation is an equal-shape op rather than a scalar broadcast. Tracked as a known limitation — see Future Work.
 
 ### **Activation Functions**
 
@@ -89,7 +89,7 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **Tanh**: `tanh(x)` - Hyperbolic tangent activation
 * **Softmax**: `softmax(x, axis=1)` - Normalised exponential with numerical stability
 
-> **Note:** activation functions take a bare variable name, not a nested call — `tanh(matmul(x, w))` will not parse. Bind the intermediate result first: `let h_pre = matmul(x, w)` then `let h = tanh(h_pre)`. This differs from `matmul`/`add`/`minus`/`mult`/`div`, which do support nesting directly.
+> **Note:** activation functions now accept a nested call, not just a bare variable name — `tanh(matmul(x, w))` parses and compiles correctly, matching `matmul`/`add`/`minus`/`mult`/`div`. Nested calls are hoisted into synthetic intermediate bindings at compile time, so `let h = tanh(matmul(x, w))` behaves identically to writing `let h_pre = matmul(x, w)` / `let h = tanh(h_pre)` yourself — either form works.
 
 ### **Reductions**
 
@@ -230,7 +230,7 @@ backward(loss)
 // b.grad = [3.0, 3.0]  (summed over the 3-row broadcast dimension)
 ```
 
-**Limitation:** `add`/`minus`/`mult`/`div` can resolve a `*_grad` name's shape from its base tensor when it isn't found directly in scope, but `reshape()` (and `transpose`, `max`/`min`/`argmax`/`argmin`, and the norm ops) do a plain lookup with no such fallback — `reshape(w_grad, (1, 8))` fails with an "undefined tensor" error regardless of shape. If you need to reshape a gradient, materialise it into a normal (non-`_grad`-named) tensor first via one of the arithmetic ops, e.g. `let w_grad_flat = mult(w_grad, ones)`, then reshape that.
+`add`/`minus`/`mult`/`div` can resolve a `*_grad` name's shape from its base tensor when it isn't found directly in scope — and `reshape()`, `transpose()`, `sum`/`mean`, `softmax`, `slice`, `layer_norm`, `batch_norm`, `instance_norm`, `max`/`min`/`argmax`/`argmin`, and `concat` now share the same fallback, so `reshape(w_grad, (1, 8))` works directly without first materializing the gradient into a normal (non-`_grad`-named) tensor.
 
 ---
 
@@ -447,7 +447,7 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 ### Compilation Pipeline
 
-1. **Lexing & Parsing**: Lark-based grammar with `inline_expr` rule enabling nested binary op arguments
+1. **Lexing & Parsing**: Lark-based grammar with `inline_expr` rule enabling nested binary *and* unary op arguments (e.g. `tanh(matmul(x, w))`)
 2. **AST Construction**: Build abstract syntax tree; flatten inline expressions into synthetic `__tmp_N` let bindings; inline user-defined function calls
 3. **Type Checking**: Validate tensor shapes, broadcasting rules, and operation compatibility — including pre-registration of gradient tensor shapes for `with grad` tensors
 4. **CUDA Generation**: Emit optimised forward and backward GPU kernels; `for` loop bodies compiled once into the shared kernel file; broadcast helper emitted once per compilation unit
@@ -469,7 +469,7 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 * **Matrix Multiplication**: 4096×4096 matrices execute efficiently
 * **Batch Processing**: Linear layers handle large batch sizes
 * **Memory Efficiency**: Weight updates in training loops use pointer swaps — no GPU memory copy between iterations
-* **Test Suite**: 106 tests complete in ~90 seconds including compilation
+* **Test Suite**: 109 tests complete in ~95 seconds including compilation
 
 **Optimisation Features:**
 
@@ -587,11 +587,8 @@ See `apps/README.md` for how apps are structured and discovered.
 ### Short Term
 
 * **Scoped Kernel Names**: Prefix loop-body kernel symbols with the loop variable to eliminate the post-loop naming constraint (`loss` inside loop clashing with `loss_final` at top level)
-* **Inline Expressions for Unary Ops**: Extend `inline_expr` to cover `relu`, `sigmoid`, `tanh`, `softmax` — enabling `relu(linear(x, w, b))` without intermediate bindings
 * **Error Messages**: Descriptive shape mismatch errors from the type checker with operand names and actual vs expected shapes
-* **Broadcast rule for `(1,1)` × 1D vector**: `add`/`minus`/`mult`/`div`'s 2D-vs-1D branch only handles a size-1 1D operand correctly; a scalar `(1,1)` against a larger 1D vector (e.g. scaling a bias gradient by a scalar learning rate) errors where it should broadcast normally
-* **`reshape()` (and friends) should resolve `*_grad` names**: currently only `add`/`minus`/`mult`/`div` know how to infer a gradient tensor's shape when it isn't found directly in scope; `reshape`, `transpose`, `max`/`min`/`argmax`/`argmin`, and the norm ops don't, so they can't take a gradient tensor as input at all
-* **`AppRunner` should propagate compile/execute success or failure into the process exit code**: `compile_and_execute()` has failure paths that return `False` without raising, so `python3 tensorlang.py --app X` can currently exit `0` on a genuinely failed run — a problem for any tooling that shells out to it and checks the exit code
+* **CUDA kernel dispatch for `(1,1)` × 1D vector broadcasting**: the type checker correctly accepts this case now, but `compiler.py`'s codegen dispatch routes any `(2D, 1D)` shape pair through `binary_broadcast()`, which assumes the 2D operand is a genuine matrix and does `rows, cols = output_shape` — this fails for a disguised scalar like `(1,1)`. A purpose-built scalar kernel (`binary_1d_broadcast`) already exists but is currently only reachable when *both* operands are 1D. Needs a dispatch branch that detects a true scalar regardless of its declared rank and routes to a (possibly new) kernel that preserves operand order for non-commutative ops (`minus`/`div`).
 
 ### Medium Term
 

@@ -170,10 +170,11 @@ minus_call:  "minus"  "(" inline_expr "," inline_expr ")"
 mult_call:   "mult"   "(" inline_expr "," inline_expr ")"
 div_call:    "div"    "(" inline_expr "," inline_expr ")"
 
-// Unary operations — still NAME only for now
-relu_call: "relu" "(" NAME ")"
-gelu_call: "gelu" "(" NAME ")"
-swish_call: "swish" "(" NAME ")"
+// Unary operations — accept inline_expr so calls can nest, e.g.
+// relu(matmul(x, w1)) instead of requiring a pre-bound intermediate name.
+relu_call: "relu" "(" inline_expr ")"
+gelu_call: "gelu" "(" inline_expr ")"
+swish_call: "swish" "(" inline_expr ")"
 
 // File I/O
 load_call: "load" "(" STRING ")"
@@ -192,8 +193,10 @@ argmin_call: "argmin" "(" NAME ["," "axis" "=" NUMBER] ")"
 ////////////////////////////////////////////////////////////////////////////////
 // Activation functions
 ////////////////////////////////////////////////////////////////////////////////
-sigmoid_call: "sigmoid" "(" NAME ")"
-tanh_call: "tanh" "(" NAME ")"
+// Accept inline_expr (not just NAME) so calls can nest, e.g.
+// tanh(matmul(x, w1)) instead of requiring a pre-bound intermediate name.
+sigmoid_call: "sigmoid" "(" inline_expr ")"
+tanh_call: "tanh" "(" inline_expr ")"
 softmax_call: "softmax" "(" NAME ["," "axis" "=" NUMBER] ")"
 
 

@@ -183,8 +183,13 @@ class AppRunner:
         )
 
         start_time = time.time()
-        compiler.compile_and_execute(str(main_file))
+        ok = compiler.compile_and_execute(str(main_file))
         elapsed = time.time() - start_time
+
+        if not ok:
+            print(f"\n{'=' * 60}")
+            print(f"Execution FAILED after {elapsed:.2f}s (compile/type-check error above)")
+            sys.exit(1)
 
         print(f"\n{'=' * 60}")
         print(f"Execution completed in {elapsed:.2f}s")
@@ -247,15 +252,23 @@ class AppRunner:
         print(f"Warmup iterations: {warmup}")
         for i in range(warmup):
             print(f"  Warmup {i+1}/{warmup}...", end='', flush=True)
-            compiler.compile_and_execute(str(bench_file))
+            ok = compiler.compile_and_execute(str(bench_file))
+            if not ok:
+                print(" FAILED")
+                print("Benchmark aborted: warmup run failed to compile/execute (see error above).")
+                sys.exit(1)
             print(" done")
 
         print(f"\nBenchmark iterations: {iterations}")
         for i in range(iterations):
             print(f"Iteration {i+1}/{iterations}...\n", end='', flush=True)
             start = time.time()
-            compiler.compile_and_execute(str(bench_file))
+            ok = compiler.compile_and_execute(str(bench_file))
             elapsed = time.time() - start
+            if not ok:
+                print(f" FAILED after {elapsed:.4f}s")
+                print("Benchmark aborted: iteration failed to compile/execute (see error above).")
+                sys.exit(1)
             times.append(elapsed)
             print(f" {elapsed:.4f}s")
 
