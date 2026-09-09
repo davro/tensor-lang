@@ -1,8 +1,8 @@
 # TensorLang Handover Document
 
-**Last updated:** 2026-09-06
+**Last updated:** 2026-09-09
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (109/109). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Of the five compiler/runner limitations discovered while building `decision_boundary` (§13.3), four are now fixed upstream and hardware-verified (§15); the fifth uncovered a second, still-open issue in CUDA kernel dispatch for scalar broadcasting (§15.4).
+**Status:** Core language + test suite healthy (109/109). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Of the five compiler/runner limitations discovered while building `decision_boundary` (§13.3), four are now fixed upstream and hardware-verified (§15); the fifth uncovered a second, still-open issue in CUDA kernel dispatch for scalar broadcasting (§15.4). New app category `apps/games/` started (`tic_tac_toe` done; `2048` in progress). Building `2048`'s tensor-ops game engine (`step.tl`) surfaced and fixed four more real compiler bugs — two AST-inlining renaming gaps, one entirely missing CUDA kernel (`concat` axis=1), and one execution-ordering/priority bug in GPU-computed alias resolution — all hardware-verified; see §17.
 
 ---
 
@@ -83,8 +83,18 @@ tensor-lang/
 │           ├── data/          # static grid + metadata (checked in)
 │           ├── snapshots/     # generated animation frames (gitignored)
 │           └── tools/         # init_state.py, train_and_snapshot.py, viewer.py
+├── games/                     # NEW app category (2026-09-08/09), see §17
+│   ├── tic_tac_toe/           # 9-32-9 MLP imitating minimax, played via pygame
+│   └── 2048/                  # game mechanics implemented AS tensor ops, not just the NN
+│       ├── step.tl            # slide-and-merge-left engine (done, hardware-verified)
+│       ├── run.sh
+│       ├── NOTES.md           # full design + bug writeup
+│       └── tools/
+│           └── make_test_board.py
 ├── examples/                  # Older / misc examples
 ├── cache/                     # Generated CUDA, .npy, etc. (gitignored)
+├── check.py                   # NEW (2026-09-09): parse+typecheck any .tl file, no GPU needed
+├── verify.py                  # NEW (2026-09-09): NumPy-interpret a .tl AST, no GPU needed
 └── requirements.txt
 ```
 
@@ -104,6 +114,7 @@ tensor-lang/
 | Shared app toolkit                 | `apps/tlkit/` — extracted from `decision_boundary`, unit-smoke-tested, see §13.1 |
 | Autograd + training loops          | Working (verified by hello_mlp + decision_boundary + tests)         |
 | Missing file history                | `app_runner.py` was absent from main; restored from previous work   |
+| Games app category (new, §17)      | `apps/games/tic_tac_toe` done; `apps/games/2048` engine (`step.tl`) hardware-verified, other files (`agent.py`, `generate_data.py`, `train.tl`, `play.py`) not yet built — see §17.5 |
 
 **Known temporary fix applied earlier:**
 The import of `AppRunner` had to be commented out until the file was restored. It is now present again.
@@ -249,6 +260,10 @@ From README + recent experience:
   - ~~`mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch only special-cases a size-1 vector correctly; a same-shape-but-larger 1D operand (e.g. an 8-wide bias gradient against a `(1,1)` scalar) hits a false "shape mismatch"~~ — **type checker fixed 2026-09-06, see §15.1; CUDA kernel dispatch for this case still needs a fix, see §15.4**
   - ~~`reshape()` does a standalone env lookup with no `_grad`-suffix inference, unlike `add`/`minus`/`mult`/`div` — it can never take a gradient tensor directly, independent of shape~~ — **done, see §15.1** (fixed for every single-tensor-field op, not just `reshape`)
   - ~~`app_runner.py` calls `compiler.compile_and_execute()` without checking its return value, so a failed compile/execute can still exit `0` — scripts driving `tensorlang.py` as a subprocess cannot trust the exit code alone~~ — **done, see §15.1**
+- **New (2026-09-09, found+fixed same session while building `apps/games/2048`, see §17.1 for full detail):**
+  - ~~`concat()`'s operand names, stored under `tensors` (not `args`), were never renamed during function inlining — broke calling the same function more than once~~ — **done, see §17.1 Bug 1/2**
+  - ~~`concat(axis=1)` had no CUDA kernel implementation at all, silently returning `None`~~ — **done, see §17.1 Bug 3**
+  - ~~a GPU-computed function-return value bound to a name at its call site (an AST alias node) was never actually pointed at the right device buffer, only ever at a host-side copy — silently produced all-zero results with no error~~ — **done, see §17.1 Bug 4**
 
 **Medium term**
 - Built-in optimisers (SGD, Adam) as language primitives
@@ -506,6 +521,8 @@ All five were originally noted in §10 "Known Pain Points" as candidates for an 
 11. ~~Consider fixing the five §13.3 gotchas upstream in `type_checker.py`/`app_runner.py` rather than continuing to work around them app-side — especially #2 (silent exit-code-0 failures) and #3 (the 2D-vs-1D broadcast branch), which will keep costing debugging time on every future app that uses biases or any other 1D parameter.~~ — **done for #1/#2/#4, partially done for #3 — see §15**
 12. **New:** add a `tests/` dir to `apps/examples/decision_boundary` (per the §12.2 pattern) once the network's converged output is stable enough to pin an `@EXPECTED` value against.
 13. **New:** fix the CUDA kernel dispatch gap for `(1,1)`-scalar broadcasting found while closing out gotcha #3 — see §15.4. This is the one piece of §13.3 still open, and until it's fixed, decision_boundary and any future app must keep using the same-shaped-vector workaround rather than a true scalar learning rate.
+14. **New (2026-09-09):** finish `apps/games/2048` — right/up/down moves, `tools/agent.py`, `tools/generate_data.py`, and the train/infer/play pipeline mirroring `tic_tac_toe`. See §17.5 for the full breakdown.
+15. **New (2026-09-09):** consider generalizing `build_ast()`'s function-call inlining to handle arbitrary nesting depth (currently one level, top-level-call-only) — see §17.5 item 6 for why this was deliberately worked around rather than fixed in this session.
 
 ---
 
@@ -633,4 +650,150 @@ Primary motivation for recent work: move from pure compiler infrastructure towar
 
 ---
 
-*This handover assumes the state after the 2026-08-29 recovery, the 2026-09-03 test-runner/compiler-output fixes (§12), and the 2026-09-04 `tlkit`/`decision_boundary` session (§13). Update the "Current Health" and add a new dated session section when major changes land.*
+## 17. 2048 App: Tensor-Ops Game Engine + Four Compiler Fixes (2026-09-08/09)
+
+A new app category, `apps/games/`, was started with `apps/games/tic_tac_toe`
+(9-32-9 MLP trained to imitate minimax, played via pygame — same shape as
+the existing `apps/examples/` apps: tensor-lang runs the neural net, plain
+Python runs the game rules) and `apps/games/2048` (still in progress —
+this session's focus).
+
+`2048` is a deliberately different kind of test case: instead of using
+tensor-lang only to run a neural net around game logic written in Python,
+the actual game mechanics — sliding, compacting, merging tiles — are
+implemented *as* tensor arithmetic, in `apps/games/2048/step.tl`. The goal
+was to stress-test whether the language's current primitive set (no
+gather/scatter/sort) is expressive enough for a real, non-trivial algorithm,
+not just neural net forward/backward passes. Full design writeup, including
+why a fixed-pair merge check is provably wrong and the branchless recursive-
+select algorithm used instead, is in `apps/games/2048/NOTES.md`.
+
+**Status: core engine done and verified on real hardware (a 1080ti).**
+`step.tl` implements one full move (slide-and-merge left) for a 4x4 board.
+Right/up/down, random tile spawning, and the move-picking network are not
+yet built — see §17.5.
+
+### 17.1 Four real compiler bugs found and fixed
+
+Building and debugging `step.tl` surfaced four genuine bugs in the compiler
+itself, none specific to 2048. Full technical detail, root-cause analysis,
+and the debugging process for each is in `apps/games/2048/NOTES.md`; summary
+here:
+
+**Bug 1 — `substitute_names()` (ast_builder.py) doesn't rename `concat`'s
+operands.** Several AST-inlining code paths assume an operand's name lives
+under the `args` field, but `concat` stores its two operand names under
+`tensors` (a list) instead. Calling a function more than once (e.g. a
+9-times-repeated helper) left later calls referencing the *original*,
+unrenamed pre-inlining names in any `concat()` — "Undefined tensor" errors.
+
+**Bug 2 — the nested-function-call renaming fix-up (ast_builder.py) has the
+same gap, for both `tensors` and `tensor`.** Same root cause as Bug 1, in
+the separate code path used when function A calls function B and A itself
+is being inlined. Also affects `slice`/`softmax`/`sum`-style ops (`tensor`
+field, singular), not just `concat`.
+
+**Bug 3 — `concat(axis=1)` has no CUDA kernel at all
+(kernel_generator.py + compiler.py).** `KernelGenerator.concat()` only ever
+implemented `axis=0` (stacking rows); `axis=1` (side-by-side) fell through
+with no `else`/`return` and silently returned `None`, surfacing as an opaque
+`TypeError: cannot unpack non-iterable NoneType object` at the call site.
+Fixed by adding a real `axis=1` kernel (mirror of the `axis=0` one, rows/
+cols swapped) plus its execution dispatch case.
+
+**Bug 4 — GPU-computed function-return aliases resolved in the wrong place,
+with a priority bug (compiler.py).** The deepest one, and the actual root
+cause of `step.tl` compiling and running with zero errors but returning an
+all-zero board. When a function's return value is bound to a name at its
+call site, that's just an AST alias node (`{'type': 'name', ...}`). The
+compiler already resolved aliases, but only for host-side (`tensors` dict)
+sources — never for a value computed on the GPU by a kernel, so the alias
+kept its own fresh, never-written buffer. Two things had to be fixed
+together: (a) alias resolution needed to happen *inline*, at the alias's
+exact position in execution order — not in a single pass after every kernel
+finishes, since an alias is often consumed by a *later* kernel within the
+same pass — and (b) the host-tensor check and the GPU-buffer check needed to
+be independent `if` statements, not `if/elif`, since every kernel's output
+automatically gets mirrored into the host `tensors` dict, which meant the
+host branch always won first and the GPU-aliasing branch (the one that
+actually mattered) never fired at the right time.
+
+Bug 4 was invisible to both static code reading and to a NumPy-based AST
+interpreter written specifically to validate `step.tl`'s logic (see §17.3)
+— neither models GPU kernel scheduling or buffer identity. It was only
+found by building a `--debug --debug-info` trace of every intermediate
+kernel result on real hardware and reading it in actual execution order.
+
+All four fixes are consolidated in a single patch,
+`apps/games/2048/tensorlang_fixes.patch` (diffed against pre-fix
+`ast_builder.py`/`compiler.py`/`kernel_generator.py`), verified to apply
+cleanly against a fresh checkout and pass all of §17.3's checks.
+
+### 17.2 New CUDA kernel: `concat_axis1`
+
+Not just a bugfix — a genuinely new, previously-missing kernel. Any future
+`.tl` program that builds a tensor from smaller pieces column-wise (not
+just 2048) needed this and would have hit the same silent `None` failure.
+
+### 17.3 New general-purpose dev tooling (not 2048-specific)
+
+Two scripts, kept at the repo root, useful for validating *any* `.tl` file
+without spending GPU cycles or waiting on `nvcc`:
+
+- **`check.py`** — parses + builds the AST + type-checks a given `.tl` file
+  by directly driving `Lark`/`ast_builder`/`type_checker`, none of which
+  need `pycuda`. Catches grammar and shape errors in under a second.
+- **`verify.py`** — a minimal NumPy interpreter for the AST (handles
+  `load`/`fill`/`slice`/`concat`/`equal`/`greater`/`mult`/`add`/`minus`/
+  `name`), used to check *actual arithmetic correctness* against a
+  plain-Python reference implementation, still without touching a GPU. This
+  is what caught that `step.tl`'s algorithm itself was correct before Bug 4
+  (a pure execution-ordering issue) was ever found — a useful diagnostic
+  split ("is the AST logic right?" vs. "did the GPU execute it right?").
+
+Recommend moving both under a shared `tools/` or `scripts/` directory in a
+future cleanup pass, alongside `apps/tlkit/`.
+
+### 17.4 Verification
+
+- `check.py apps/games/2048/step.tl` → `TYPE CHECK OK`.
+- `verify.py` → 6/6 NumPy-simulated test cases pass, including a hand-
+  verified counter-example (`[4,2,2,0]` must merge cells 1&2, not a
+  fixed-pair check) and two full 4x4-board cases.
+- Real hardware (1080ti), single-row board `[4,2,2,0,...]` → correctly
+  returns `[4,4,0,0]` in row 0.
+- Real hardware, full mixed board (`[4,2,2,0 / 2,2,2,2 / 0,2,0,2 / 8,4,2,2]`)
+  → all four rows correct, including a no-merge row, a double-merge row, a
+  compact-then-single-merge row, and a merge-at-the-back row. Confirms the
+  fix generalizes across multiple sequential invocations of the same
+  functions, not just a single call.
+
+### 17.5 Suggested Next Actions (2048-specific)
+
+1. Right/up/down moves — reuse `compact_row`/`merge_row` unchanged: right =
+   reverse each row, slide left, reverse back; up/down = transpose the
+   board, slide left/right, transpose back.
+2. `apps/games/2048/tools/agent.py` — random tile spawn (stochastic, stays
+   in Python, same split as `tic_tac_toe`'s illegal-move masking) + legality
+   check by diffing pre/post-move boards.
+3. `apps/games/2048/tools/generate_data.py` — expectimax + heuristic oracle
+   (empty-cell count, monotonicity, smoothness) to label `(board -> best
+   direction)` pairs from self-play, since 2048 can't be exactly solved
+   like tic-tac-toe's minimax labeler.
+4. `train.tl`/`infer.tl`/`tools/init_weights.py`/`tools/play.py` — same
+   supervised-imitation-learning pattern as `tic_tac_toe`, once the above
+   three are in place.
+5. Score tracking (points gained per merge) — not yet implemented in
+   `step.tl`.
+6. Consider fixing the general recursive-inlining gap noted in `step.tl`'s
+   `merge_row` comment: `build_ast()`'s auto-inlining only expands one
+   level of function-calling-function, and only from the top level. 2048's
+   engine was written to stay within this limit deliberately (see the
+   comment for detail); fixing it properly would need
+   `inline_function_call()` to become recursive itself, rather than the
+   current single hard-coded expansion pass — bigger and riskier than the
+   four fixes above, deliberately not attempted this session.
+
+---
+
+*This handover assumes the state after the 2026-08-29 recovery, the 2026-09-03 test-runner/compiler-output fixes (§12), the 2026-09-04 `tlkit`/`decision_boundary` session (§13), the 2026-09-06 compiler fixes (§15), and the 2026-09-08/09 `2048` app + compiler-fix session (§17). Update the "Current Health" and add a new dated session section when major changes land.*

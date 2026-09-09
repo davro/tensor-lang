@@ -72,6 +72,8 @@ TensorLang eliminates Python bottlenecks by providing a unified stack for parsin
 * **Transpose**: `transpose(tensor)` - Axis permutation with optional `axes=` argument
 * **Concat**: `concat(a, b, axis=0)` - Concatenate along a dimension
 
+> **Note:** `concat(a, b, axis=1)` (side-by-side, same row count) is now implemented — it previously had no CUDA kernel at all and silently returned `None`, surfacing as an opaque `TypeError` at the call site rather than a clear error. Both `axis=0` (stacking rows) and `axis=1` now work.
+
 ### **Linear Algebra**
 
 * **Matrix Multiplication**: `matmul(A, B)` - Optimised GPU matrix multiplication
@@ -579,6 +581,8 @@ The snippets above are language demonstrations; `apps/` has full, runnable progr
 * **`apps/examples/linear_regression`** — a slightly larger single-run training example.
 * **`apps/examples/decision_boundary`** — trains a 2-8-1 tanh/sigmoid MLP on XOR and plays back the decision boundary morphing across training as a pygame animation. Demonstrates the chunked-invocation pattern (`load()`/`save()` state across repeated `tensorlang.py` runs) needed for any app that wants to visualize *how* training progresses, not just its final result. Run with `./apps/examples/decision_boundary/run.sh`.
 * **`apps/tlkit/`** — shared toolkit extracted from `decision_boundary` for building further visual/interactive apps: a chunked-invocation runner, a pygame play/pause/scrub harness, and colormap/grid helpers. See `apps/tlkit/README.md`.
+* **`apps/games/tic_tac_toe`** — a 9-32-9 MLP trained to imitate a minimax-optimal policy, playable interactively (human-vs-AI or AI-vs-AI self-play) via pygame. First app in a new `apps/games/` category: tensor-lang runs the neural net, plain Python runs the game rules — same architectural split as the `apps/examples/` apps.
+* **`apps/games/2048`** — a deliberately different kind of test case: instead of tensor-lang only running a neural net, the actual game mechanics (sliding, compacting, merging tiles) are implemented *as* tensor arithmetic in `step.tl`, stress-testing whether the language's primitive set (no gather/scatter/sort) is expressive enough for a real non-trivial algorithm. Verified end-to-end on real GPU hardware. Building it surfaced and fixed four compiler bugs — see `apps/games/2048/NOTES.md` for the full writeup and `HANDOVER.md` §17 for the handover-level summary. Run with `./apps/games/2048/run.sh --board <16 numbers>`.
 
 See `apps/README.md` for how apps are structured and discovered.
 

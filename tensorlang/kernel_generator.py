@@ -2131,6 +2131,52 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
 """
                 return kernel, (f"{op_type}_axis0", name, tensor1, tensor2, rows1, rows2, cols)
 
+        if len(tensor_names) == 2 and axis == 1:
+            # Simple 2-tensor concatenation along axis 1 (side-by-side, same
+            # row count). Mirror of the axis=0 kernel above with rows/cols
+            # swapped. This case was previously unimplemented — concat()
+            # fell through and returned None for any axis=1 call, which
+            # only surfaces as a hard-to-read `cannot unpack non-iterable
+            # NoneType object` at the call site in compiler.py, since
+            # nothing here raised or logged an "unsupported" error.
+            tensor1, tensor2 = tensor_names
+            shape1 = env[tensor1]['shape']
+            shape2 = env[tensor2]['shape']
+
+            if len(shape1) == 2:
+                rows, cols1 = int(shape1[0]), int(shape1[1])
+                cols2 = int(shape2[1])
+
+                kernel = f"""
+__global__ void concat_axis1_kernel_{name}(float* input1, float* input2, float* output,
+                                        int rows, int cols1, int cols2) {{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_cols = cols1 + cols2;
+
+    if (row < rows && col < total_cols) {{
+        if (col < cols1) {{
+            // Copy from first tensor
+            output[row * total_cols + col] = input1[row * cols1 + col];
+        }} else {{
+            // Copy from second tensor
+            int src_col = col - cols1;
+            output[row * total_cols + col] = input2[row * cols2 + src_col];
+        }}
+    }}
+}}
+extern "C" void launch_concat_{name}(float* input1, float* input2, float* output,
+                                    int rows, int cols1, int cols2) {{
+    dim3 block(16, 16);
+    int total_cols = cols1 + cols2;
+    dim3 grid((total_cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
+    concat_axis1_kernel_{name}<<<grid, block>>>(input1, input2, output, rows, cols1, cols2);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+                return kernel, (f"{op_type}_axis1", name, tensor1, tensor2, rows, cols1, cols2)
+
 
     # ================================================================
     # TEMPLATE

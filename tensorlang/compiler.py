@@ -642,6 +642,13 @@ class TensorCompiler:
                 c_int(rows1), c_int(rows2), c_int(cols)
             )
 
+        elif op_type == 'concat_axis1':
+            rows, cols1, cols2 = dims
+            getattr(lib, f'launch_concat_{name}')(
+                c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[arg2])), c_void_p(int(gpu_allocs[name])),
+                c_int(rows), c_int(cols1), c_int(cols2)
+            )
+
         elif op_type == 'batch_norm_2d':
             running_mean_name, batch_size, num_features, eps, running_var_name = arg2, dims[0], dims[1], dims[2], dims[3]
             getattr(lib, f'launch_batch_norm_{name}')(
@@ -684,6 +691,39 @@ class TensorCompiler:
                 np.save(cache_npy_path, output)
             if self.debug_mode:
                 self.tensorlang.print(type=f"[COMPILER] Result {name} ({op_type}):\n{output}")
+
+    def _resolve_alias_inline(self, node, gpu_allocs, tensors):
+        """Resolve a `let X = <name>` alias node (e.g. a function's return
+        value bound to the caller's name) AT THE POINT it's reached during
+        top-level execution, not in a separate pass after all kernels have
+        already run. This matters because an alias is frequently consumed
+        as an INPUT to a later kernel within the same execution pass (e.g.
+        a function's return value immediately fed into a concat/mult/etc.
+        at the call site) — resolving it only after every kernel has
+        already executed is too late for anything but a truly terminal
+        alias that nothing but a final save() ever reads.
+        """
+        alias_name  = node['name']
+        source_name = node['expr']['name']
+        if source_name in tensors and alias_name not in tensors:
+            tensors[alias_name] = tensors[source_name].copy()
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: created alias: {alias_name} -> {source_name}")
+        # NOT an elif: _save_kernel_result already mirrors every GPU
+        # kernel's output into the host-side `tensors` dict, so the branch
+        # above almost always fires for any alias whose source is a
+        # regular kernel result — which meant this GPU-buffer aliasing
+        # (the actual fix that matters for execution correctness) never
+        # got a chance to run at the right time under the old `elif`, and
+        # only fired much later in a leftover safety-net pass, by which
+        # point anything that consumed alias_name mid-stream had already
+        # read the wrong buffer. These are two independent bookkeeping
+        # operations (host mirror vs. GPU buffer identity) and must both
+        # run whenever applicable, not be mutually exclusive.
+        if source_name in gpu_allocs and alias_name in gpu_allocs:
+            gpu_allocs[alias_name] = gpu_allocs[source_name]
+            if self.debug_mode:
+                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: created GPU alias: {alias_name} -> {source_name}")
 
     def _execute_save_statement(self, save_node, tensors, gpu_allocs, env, cache_file_dir, cuda):
         tensor_name = save_node['tensor']
@@ -1575,6 +1615,10 @@ class TensorCompiler:
                                         ast[ast_idx], kernels, ast_to_kernel_map,
                                         lib, gpu_allocs, env, tensors, cache_file_dir, cuda
                                     )
+                                elif (ast[ast_idx]['type'] == 'let'
+                                      and isinstance(ast[ast_idx].get('expr'), dict)
+                                      and ast[ast_idx]['expr']['type'] == 'name'):
+                                    self._resolve_alias_inline(ast[ast_idx], gpu_allocs, tensors)
                         else:
                             # No top-level backward — execute all top-level kernels
                             # and run any for loops
@@ -1591,18 +1635,24 @@ class TensorCompiler:
                                             kernels[k_idx], lib, gpu_allocs, env,
                                             tensors, cache_file_dir, cuda
                                         )
+                                elif (node['type'] == 'let'
+                                      and isinstance(node.get('expr'), dict)
+                                      and node['expr']['type'] == 'name'):
+                                    self._resolve_alias_inline(node, gpu_allocs, tensors)
 
                         # =====================================================
                         # Handle alias assignments
                         # =====================================================
+                        # This safety-net pass catches any alias not already
+                        # resolved inline during PHASE 2/3/4 above (e.g. one
+                        # inside a for-loop body, which isn't covered by the
+                        # inline handling added there). Aliases consumed by a
+                        # later top-level kernel are already correctly
+                        # resolved by then; this just re-confirms/covers any
+                        # remaining ones before PHASE 5 (save) runs.
                         for node in ast:
                             if node['type'] == 'let' and isinstance(node.get('expr'), dict) and node['expr']['type'] == 'name':
-                                alias_name  = node['name']
-                                source_name = node['expr']['name']
-                                if source_name in tensors and alias_name not in tensors:
-                                    tensors[alias_name] = tensors[source_name].copy()
-                                    if self.debug_mode:
-                                        self.tensorlang.print(message=f"[COMPILER] CUDA Execute: created alias: {alias_name} -> {source_name}")
+                                self._resolve_alias_inline(node, gpu_allocs, tensors)
 
                         # =====================================================
                         # Cache tensor literals
@@ -1679,6 +1729,10 @@ class TensorCompiler:
                                             kernels[k_idx], lib, gpu_allocs, env,
                                             tensors, cache_file_dir, cuda
                                         )
+                                elif (ast[ast_idx]['type'] == 'let'
+                                      and isinstance(ast[ast_idx].get('expr'), dict)
+                                      and ast[ast_idx]['expr']['type'] == 'name'):
+                                    self._resolve_alias_inline(ast[ast_idx], gpu_allocs, tensors)
 
                         # =====================================================
                         # PHASE 5: Save statements

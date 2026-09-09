@@ -195,6 +195,17 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Tuple[List, Opt
                                                 else:
                                                     new_args.append(arg)
                                             stmt['expr']['args'] = new_args
+                                        # concat_call stores its two operand names under 'tensors'
+                                        # (a list), not 'args' — remap those too.
+                                        if stmt['type'] == 'let' and isinstance(stmt.get('expr', {}).get('tensors'), list):
+                                            stmt['expr']['tensors'] = [
+                                                local_mappings.get(t, t) for t in stmt['expr']['tensors']
+                                            ]
+                                        # slice/softmax/sum/etc. store a single operand name
+                                        # under 'tensor' (singular) — remap that too.
+                                        if stmt['type'] == 'let' and 'tensor' in stmt.get('expr', {}):
+                                            t = stmt['expr']['tensor']
+                                            stmt['expr']['tensor'] = local_mappings.get(t, t)
                                         expanded_stmts.append(stmt)
                                 
                                 ast.extend(expanded_stmts)
@@ -878,6 +889,22 @@ def substitute_names(expr: Dict, param_map: Dict, name_mapping: Dict) -> Dict:
             else:
                 new_args.append(arg)
         new_expr['args'] = new_args
+        return new_expr
+
+    if 'tensors' in expr and isinstance(expr['tensors'], list):
+        new_tensors = []
+        for name in expr['tensors']:
+            if name in param_map:
+                param_expr = param_map[name]
+                if isinstance(param_expr, dict) and param_expr.get('type') == 'name':
+                    new_tensors.append(param_expr['name'])
+                else:
+                    new_tensors.append(name)
+            elif name in name_mapping:
+                new_tensors.append(name_mapping[name])
+            else:
+                new_tensors.append(name)
+        new_expr['tensors'] = new_tensors
         return new_expr
 
     if 'tensor' in expr:
