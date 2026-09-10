@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # apps/games/2048/run.sh
 #
-# Status: only the tensor-ops game engine (step.tl) exists so far — no
-# neural net, no pygame UI. So unlike tic_tac_toe's run.sh (which trains a
-# policy net then launches an interactive match), this script's default
-# action is a smoke test: run step.tl on a real board through the actual
-# compiler and show you the before/after. --play and --train are wired in
-# ahead of time so the *interface* matches tic_tac_toe's script, but they
-# fail with a clear message until their underlying files exist — see
-# apps/games/2048/NOTES.md for what's built vs. still to come.
+# Status: the tensor-ops engine (step.tl + step_right.tl/step_up.tl/
+# step_down.tl) and a pygame UI (tools/agent.py + tools/play.py) both exist
+# now — see apps/games/2048/NOTES.md. There's still no trained move-picking
+# network (that's what --train will be), so unlike tic_tac_toe's run.sh
+# (which trains a policy net before launching a match), --play here launches
+# straight into the game: a heuristic bot stands in for autoplay until a
+# real network exists.
 #
 #   ./apps/games/2048/run.sh                 # smoke test: run step.tl on the
 #                                             #   built-in tricky test board
@@ -16,9 +15,9 @@
 #   ./apps/games/2048/run.sh --board N N ... # smoke test on a custom board:
 #                                             #   16 numbers, row-major, e.g.
 #                                             #   --board 4 2 2 0 0 0 0 0 0 0 0 0 0 0 0 0
-#   ./apps/games/2048/run.sh --play          # launch the interactive game
-#                                             #   (not implemented yet — needs
-#                                             #   tools/agent.py + tools/play.py)
+#   ./apps/games/2048/run.sh --play          # launch the interactive pygame UI
+#                                             #   (arrow keys/WASD to play, A to
+#                                             #   watch the heuristic bot play)
 #   ./apps/games/2048/run.sh --train         # train the move-picking network
 #                                             #   (not implemented yet — needs
 #                                             #   train.tl + tools/generate_data.py)

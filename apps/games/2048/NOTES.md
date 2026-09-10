@@ -1,10 +1,14 @@
 # apps/games/2048/step.tl — status and how to run it
 
-**Status (2026-09-09): core engine done, all four compiler bugs found along
-the way are fixed, and everything is verified end-to-end on real GPU
-hardware (a 1080ti).** See `HANDOVER.md` §17 in the repo root for the
-handover-level summary of this session. What's still to build is listed at
-the bottom of this file.
+**Status (2026-09-10): done and playable end-to-end.** All four engine files
+(`step.tl`, `step_right.tl`, `step_up.tl`, `step_down.tl`) are verified on
+real GPU hardware (a 1080ti), and the pygame frontend (`tools/play.py` +
+`tools/agent.py`) is wired up on top of them and has been played through a
+full session to game-over — see "The pygame frontend" below. All four
+compiler bugs found along the way are fixed. See `HANDOVER.md` §17 in the
+repo root for the handover-level summary of the original engine session.
+What's still to build (a trained move-picking network) is listed at the
+bottom of this file.
 
 ## What this is
 
@@ -15,6 +19,65 @@ are expressed as tensor arithmetic. See the header comment in `step.tl` for
 the full design writeup, including why a naive "check fixed pairs (0,1) and
 (2,3)" merge rule is wrong and how the branchless recursive-select version
 handles it correctly.
+
+`step_right.tl`, `step_up.tl`, and `step_down.tl` are siblings covering the
+other three directions, built exactly the way `step.tl`'s own header comment
+predicted: RIGHT reverses each row, runs the same LEFT-slide pipeline, then
+reverses back; UP/DOWN call the built-in `transpose()` op (see
+`tests/transpose.tl`) so each column becomes a row, then reuse the LEFT or
+RIGHT pipeline per row before transposing back. tensor-lang has no
+import/include mechanism, so `compact_pair`/`compact_row`/`merge_pair`/
+`merge_row` are duplicated verbatim into all four files rather than shared —
+keep them in sync if you ever touch the algorithm itself. All four are now
+confirmed correct on real GPU hardware against `verify_all.py`'s
+plain-Python reference (see "How to apply the fixes and run this yourself"
+below for example boards/expected output per direction).
+
+## The pygame frontend
+
+`tools/agent.py` wraps all four `step_*.tl` files behind
+`apply_move(board, direction)`, plus a plain-Python `simulate_move()` used
+for legality checks, game-over detection, and score bookkeeping (a move's
+score can't be read off the board's total — merging preserves the sum, e.g.
+`[2,2,0,0] -> [4,0,0,0]` — so it has to come from watching which cells
+merged, same as any 2048 implementation). `tools/play.py` is the pygame UI on
+top of that: arrow keys/WASD to play, `B` to watch a heuristic autoplay bot.
+
+Every `step_*.tl` subprocess call is driven through `agent.py`'s
+`spawn_move_engine`/`collect_move_engine` split rather than a single
+blocking call, and `play.py` polls it (pumping pygame's event queue and
+redrawing a "Sliding {direction}..." overlay each tick) instead of blocking
+outright. This matters because a first-time CUDA kernel compile for a
+direction can take 30-40s, and a genuinely blocking call for that long makes
+the OS conclude the window has hung ("app not responding") — polling instead
+keeps it alive the whole time. `play.py` also runs a one-time warm-up pass
+for all four directions at startup, with its own progress screen, so that
+30-40s compile happens there instead of ambushing the first real move or
+autoplay's first pick.
+
+That autoplay bot (`agent.choose_ai_move`, a corner-weighted-board +
+empty-cell-count heuristic) is **not** a TensorLang-trained policy network —
+there's nothing trained for 2048 yet, unlike `tic_tac_toe`'s `infer.tl`. Only
+the *decision* of which direction to play comes from the heuristic; the
+resulting board after every real move (human or autoplay) is always computed
+by the actual `step_*.tl` engine, with a plain-Python fallback (printing a
+warning) if a `.tl` subprocess call fails for any reason — same
+degrade-rather-than-crash philosophy as `tic_tac_toe`'s `choose_move`.
+
+Played through a full autoplay session end-to-end on real GPU hardware:
+reached a 64 tile, score 1052 (best 2172 across a couple of runs), clean
+game-over screen, no crashes, no freezes.
+
+`verify_all.py` (repo root) generalizes `verify.py` to check any of the four
+`step_*.tl` files against a plain-Python reference for that direction — used
+to validate `step_right.tl`/`step_up.tl`/`step_down.tl` numerically without a
+GPU before wiring them into `agent.py`:
+
+```bash
+python3 verify_all.py apps/games/2048/step_right.tl right
+python3 verify_all.py apps/games/2048/step_up.tl up
+python3 verify_all.py apps/games/2048/step_down.tl down
+```
 
 ## Four real compiler bugs found and fixed along the way
 
@@ -118,21 +181,18 @@ blind.
 
 ## run.sh
 
-`run.sh` mirrors `tic_tac_toe/run.sh`'s interface, but is honest about what
-actually exists right now:
+`run.sh` mirrors `tic_tac_toe/run.sh`'s interface:
 
 ```
 ./apps/games/2048/run.sh                 # smoke-test step.tl on a built-in tricky board
 ./apps/games/2048/run.sh --board N N ... # smoke-test on a custom board (16 numbers, row-major)
-./apps/games/2048/run.sh --play          # will launch the interactive game — not built yet
+./apps/games/2048/run.sh --play          # launch the interactive pygame UI
 ./apps/games/2048/run.sh --train         # will train the move-picking net — not built yet
 ```
 
-`--play` and `--train` check for the files they need (`tools/agent.py` +
-`tools/play.py`, or `train.tl` + `tools/generate_data.py` +
-`tools/init_weights.py`) and exit with a clear list of what's missing
-rather than crashing partway through, so the script's interface is already
-in its final shape and each mode just "turns on" as its files land.
+`--train` still checks for the files it needs (`train.tl` +
+`tools/generate_data.py` + `tools/init_weights.py`) and exits with a clear
+list of what's missing rather than crashing partway through.
 
 ## How to apply the fixes and run this yourself
 
@@ -187,19 +247,21 @@ useful for validating any `.tl` file's parsing/typing/arithmetic without
 spending GPU cycles, so it's worth keeping them in the repo (e.g. under a
 `tools/` or `scripts/` directory) rather than treating them as throwaway.
 
-## What's deliberately NOT in this file yet
+## What's deliberately NOT in this repo yet
 
-- Only **left** is implemented. Right/up/down reuse `compact_row`/`merge_row`
-  unchanged: right = reverse each row, slide left, reverse back; up/down =
-  transpose the board, slide left/right, transpose back.
-- Random tile spawning after a move is not here — same split as
-  `tic_tac_toe`'s illegal-move masking: that's stochastic bookkeeping that
-  belongs in Python (`tools/agent.py`), not in this deterministic `.tl` file.
-- No score tracking (points gained from merges) yet.
+- Random tile spawning and score tracking live in Python
+  (`tools/agent.py`'s `spawn_tile`/`simulate_move`), not in any `.tl` file —
+  same split as `tic_tac_toe`'s illegal-move masking: that's stochastic
+  bookkeeping, deliberately kept out of the deterministic tensor-ops engine.
+- No trained move-picking network (`train.tl` + `tools/generate_data.py` +
+  `tools/init_weights.py`, mirroring `tic_tac_toe`'s setup) — `--train` isn't
+  wired up yet. The pygame autoplay mode uses a hand-written heuristic
+  instead (see "The pygame frontend" above); swapping it for a real trained
+  network later shouldn't require changing `play.py`, just `agent.py`'s
+  autoplay function.
 
-Once you've confirmed this runs correctly on your GPU, the next step is
-wiring up the other 3 directions, then `tools/agent.py` (random spawn +
-legality check by diffing pre/post-move boards) and `tools/generate_data.py`
-(an expectimax + heuristic oracle for training a move-picking network, same
-role as tic_tac_toe's minimax labeler) — happy to keep going once this is
-validated for real.
+Next step, if you want to keep going: `tools/generate_data.py` (an
+expectimax + heuristic oracle for training a move-picking network, same role
+as `tic_tac_toe`'s minimax labeler), then `train.tl`, then swap
+`choose_ai_move` in `agent.py` for the trained network the way
+`tic_tac_toe`'s `choose_move` uses `infer.tl`.
