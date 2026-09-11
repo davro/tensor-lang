@@ -1,0 +1,9 @@
+{
+  "num_states": 24000,
+  "base_states": 3000,
+  "symmetries_per_state": 8,
+  "depth": 3,
+  "max_chance_samples": 4,
+  "move_prune_top": 2,
+  "seed": 0
+}

@@ -8,27 +8,33 @@ Board representation used by the REST of this app (play.py, etc.):
     a list of 16 ints, index 0..15 = top-left..bottom-right, row-major.
     0 = empty, otherwise the tile's value (2, 4, 8, ...).
 
-Unlike tic_tac_toe, there's no trained move-picking network for 2048 yet
-(see NOTES.md/run.sh's --train mode — train.tl doesn't exist yet). So two
-different kinds of "which way do I move" logic live in this file:
+There are now THREE different kinds of "which way do I move" logic in
+this file, plus the reference simulator they all build on:
 
   - simulate_move(): a plain-Python reference implementation of ONE move,
     used for legality checks, game-over detection, and score bookkeeping.
     Fast (no subprocess), and doubles as a correctness cross-check against
     the engine's output the same way verify.py cross-checks step.tl.
-  - choose_ai_move(): a hand-written heuristic (corner-weighted board +
-    empty-cell count), used for the pygame UI's autoplay mode. This is a
-    placeholder "AI" — NOT a TensorLang-trained policy like tic_tac_toe's
-    infer.tl — since nothing has been trained for 2048 yet.
+  - heuristic_choose_move(): the original hand-written heuristic
+    (corner-weighted board + empty-cell count). No longer the pygame UI's
+    default autoplay policy (see choose_ai_move below), but still used
+    as: (a) tools/generate_data.py's self-play driver for sampling
+    representative board states, and (b) choose_ai_move's fallback if the
+    trained network can't be reached.
+  - choose_ai_move(): tries the trained TensorLang policy network first
+    (tools/generate_data.py's expectimax-labeled data, via infer.tl),
+    falling back to heuristic_choose_move on any failure. This is what
+    the pygame UI's autoplay mode actually calls.
 
 But the actual board mutation applied after every real move — whether the
-human or the autoplay heuristic picked the direction — always goes
-through run_move_engine(), i.e. the real GPU tensor-ops step_*.tl files.
+human or the autoplay policy picked the direction — always goes through
+run_move_engine(), i.e. the real GPU tensor-ops step_*.tl files.
 simulate_move's board is only ever used as a fallback if the engine call
 itself fails (see apply_move's docstring), mirroring tic_tac_toe's
 choose_move degrade-to-random-move fallback.
 """
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +56,32 @@ STEP_FILE = {
 }
 BEST_SCORE_FILENAME = "best_score.json"
 WIN_TILE = 2048
+
+# ---------------------------------------------------------------------------
+# Network input encoding: log2-one-hot per cell (16 cells x 16 value
+# categories = 256 inputs). Category 0 = empty; category k (1..15) = tile
+# value 2**k, with values >= 2**15 sharing the top category (2**16 = 65536
+# tiles are already an extreme edge case on a 4x4 board). This is the
+# single source of truth for the encoding — tools/generate_data.py labels
+# boards.npy with it, and run_inference() below encodes the live board
+# with it at inference time, so the two can never drift apart.
+# ---------------------------------------------------------------------------
+NUM_VALUE_CATEGORIES = 16
+
+
+def cell_category(value):
+    if value <= 0:
+        return 0
+    return min(int(math.log2(value)), NUM_VALUE_CATEGORIES - 1)
+
+
+def encode_board_onehot(board):
+    """board: list[16] of tile values (0 = empty, row-major). Returns
+    (1, 256) float32."""
+    onehot = np.zeros((BOARD_N * BOARD_N, NUM_VALUE_CATEGORIES), dtype=np.float32)
+    for i, v in enumerate(board):
+        onehot[i, cell_category(v)] = 1.0
+    return onehot.reshape(1, BOARD_N * BOARD_N * NUM_VALUE_CATEGORIES)
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +309,10 @@ def apply_move(board, direction, repo_root=None, use_engine=True):
 
 
 # ---------------------------------------------------------------------------
-# Heuristic autoplay ("AI-solver" mode). NOT a trained network — see this
-# file's module docstring for why.
+# Heuristic move choice (corner-weighted board + empty-cell count). Used
+# by tools/generate_data.py to sample self-play states, and by
+# choose_ai_move below as its fallback when the trained network isn't
+# reachable.
 # ---------------------------------------------------------------------------
 
 # Classic "snake" weighting: biases high-value tiles toward one corner and
@@ -300,11 +334,13 @@ def _heuristic_score(board):
     return weighted + empties * EMPTY_CELL_BONUS
 
 
-def choose_ai_move(board):
+def heuristic_choose_move(board):
     """Returns the best legal direction by a 1-ply heuristic search (see
     module docstring), or None if the game is already over. Uses
     simulate_move (not the engine) to stay fast enough to search every
-    direction every frame."""
+    direction every frame — this is also why tools/generate_data.py uses
+    it (rather than the much slower expectimax oracle) to drive self-play
+    when sampling which board states end up in the training set."""
     best_dir, best_score = None, float("-inf")
     for d in DIRECTIONS:
         sim_board, moved, gained = simulate_move(board, d)
@@ -315,6 +351,63 @@ def choose_ai_move(board):
             best_score = score
             best_dir = d
     return best_dir
+
+
+# ---------------------------------------------------------------------------
+# The trained network: infer.tl. Mirrors tic_tac_toe's
+# run_inference/choose_move split exactly — see that file for the
+# original pattern this was copied from.
+# ---------------------------------------------------------------------------
+
+def run_inference(board, repo_root=None):
+    """Writes the log2-one-hot encoded board, runs infer.tl as a
+    subprocess, returns the raw (4,) move-logit-softmax array in
+    DIRECTIONS order. Raises RuntimeError on failure (weights not
+    trained yet, a GPU hiccup, a compile error, etc.) — callers decide
+    how to degrade (see choose_ai_move's fallback)."""
+    repo_root = repo_root or chunked_runner.find_repo_root()
+    infer_dir = repo_root / "cache" / "apps" / "games" / "2048" / "infer.tl"
+    infer_dir.mkdir(parents=True, exist_ok=True)
+    np.save(infer_dir / "board.npy", encode_board_onehot(board))
+
+    result = subprocess.run(
+        [sys.executable, "tensorlang.py", f"{APP}/infer.tl"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    move_path = infer_dir / "move.npy"
+    if result.returncode != 0 or not move_path.exists():
+        raise RuntimeError(
+            "infer.tl failed to produce move.npy\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        )
+    return np.load(move_path).reshape(len(DIRECTIONS))
+
+
+def choose_ai_move(board, repo_root=None):
+    """Returns the pygame UI's autoplay direction for `board`, or None if
+    the game is already over.
+
+    Tries the trained TensorLang network first (tools/generate_data.py's
+    expectimax-labeled policy, via infer.tl); if that fails for any
+    reason (weights not trained yet, a GPU hiccup, a compile error) falls
+    back to heuristic_choose_move instead of crashing the autoplay loop,
+    printing a warning either way — same fallback philosophy as
+    apply_move and tic_tac_toe's choose_move.
+    """
+    moves = legal_moves(board)
+    if not moves:
+        return None
+
+    try:
+        probs = run_inference(board, repo_root)
+    except Exception as e:  # noqa: BLE001 - deliberately broad, see docstring
+        print(f"[agent] TensorLang inference failed, falling back to the heuristic move: {e}")
+        return heuristic_choose_move(board)
+
+    masked = {d: probs[i] for i, d in enumerate(DIRECTIONS) if d in moves}
+    return max(masked, key=masked.get)
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,22 @@
 # apps/games/2048/step.tl — status and how to run it
 
-**Status (2026-09-10): done and playable end-to-end.** All four engine files
-(`step.tl`, `step_right.tl`, `step_up.tl`, `step_down.tl`) are verified on
-real GPU hardware (a 1080ti), and the pygame frontend (`tools/play.py` +
+**Status (2026-09-11): done, playable, and now with a trained AI that beats
+the heuristic it replaced.** All four engine files (`step.tl`,
+`step_right.tl`, `step_up.tl`, `step_down.tl`) are verified on real GPU
+hardware (a 1080ti), and the pygame frontend (`tools/play.py` +
 `tools/agent.py`) is wired up on top of them and has been played through a
 full session to game-over — see "The pygame frontend" below. All four
 compiler bugs found along the way are fixed. See `HANDOVER.md` §17 in the
 repo root for the handover-level summary of the original engine session.
-What's still to build (a trained move-picking network) is listed at the
-bottom of this file.
+
+On top of that, there's now a trained move-picking network
+(`train.tl` + `tools/generate_data.py` + `tools/init_weights.py`,
+mirroring `tic_tac_toe`'s setup) standing in for the old hand-written
+heuristic in `agent.py`'s `choose_ai_move` — see "The trained move-picking
+network" below for the full story, including a real overfitting bug found
+and fixed along the way. Confirmed on real GPU hardware across two
+autoplay games: scores of 1352 and **2300**, the latter beating the
+heuristic's previous best of 2172.
 
 ## What this is
 
@@ -187,12 +195,128 @@ blind.
 ./apps/games/2048/run.sh                 # smoke-test step.tl on a built-in tricky board
 ./apps/games/2048/run.sh --board N N ... # smoke-test on a custom board (16 numbers, row-major)
 ./apps/games/2048/run.sh --play          # launch the interactive pygame UI
-./apps/games/2048/run.sh --train         # will train the move-picking net — not built yet
+./apps/games/2048/run.sh --train         # generate training data (if missing) and train the network
 ```
 
-`--train` still checks for the files it needs (`train.tl` +
-`tools/generate_data.py` + `tools/init_weights.py`) and exits with a clear
-list of what's missing rather than crashing partway through.
+## The trained move-picking network
+
+`agent.py`'s `choose_ai_move` — the direction the pygame UI's autoplay
+mode picks — used to be a hand-written heuristic (corner-weighted board +
+empty-cell count). It's now a real TensorLang-trained policy network,
+mirroring `tic_tac_toe`'s `train.tl`/`infer.tl` split:
+
+- **`tools/generate_data.py`** — unlike `tic_tac_toe` (whose 4520-board
+  state space is small enough to solve exactly with minimax), 2048's
+  state space is far too large to enumerate. So states to label come
+  from *self-play* (the old heuristic plays games, with a little random
+  exploration mixed in, and every board it passes through is a
+  candidate), and each one is labeled by an **expectimax search** (depth
+  3, alternating max nodes over the 4 moves and chance nodes over tile
+  spawns) over `agent.py`'s existing `simulate_move`, bottoming out in
+  the same corner-weight heuristic as the leaf evaluation. Two
+  approximations keep a depth-3 search with full chance-node expansion
+  tractable in plain Python: chance nodes cap how many empty cells they
+  expand (`MAX_CHANCE_SAMPLES`), and nodes below the root only fully
+  search their top-ranked candidate moves (`MOVE_PRUNE_TOP`) rather than
+  all four.
+- **`tools/init_weights.py`** — He/Kaiming init for a 256-128-64-4
+  ReLU/ReLU/softmax MLP. 256 inputs = 16 board cells x 16 log2-one-hot
+  value categories (`agent.encode_board_onehot` — category 0 = empty,
+  category *k* = tile value 2^*k*); 4 outputs = one logit per direction.
+- **`train.tl`** — same full-batch structure as `tic_tac_toe/train.tl`
+  (whole dataset fits in memory), same `mse_loss`-on-softmax-probs loss
+  and same same-shaped-learning-rate-vector workaround for the
+  (1,1)-scalar-times-1D-bias-gradient CUDA bug (HANDOVER.md §15.4, still
+  open). Hyperparameters were picked by replicating the exact
+  forward/backward math offline in plain NumPy and sweeping there against
+  the real generated dataset, the same way `tic_tac_toe`'s were.
+
+### A real overfitting bug found and fixed along the way
+
+The first trained version (4000 self-play states, no augmentation) played
+badly — score ~950, well below the old heuristic's ~2172 best, with a
+visibly disorganized end board (duplicate small tiles scattered around,
+no coherent gradient toward a corner). The cause: the self-play heuristic
+that generated every training board always favors the *same* corner in
+the *same* orientation, so every training example was some variation of
+"tiles building toward the top-left." The network had no reason to learn
+a general "keep your big tiles collected in a corner" strategy — it could
+get away with memorizing "top-left" as a fixed feature of the board.
+Loss converged to ~0.0013, consistent with something close to
+memorization rather than generalization; and the moment live play's own
+moves nudged the board even slightly outside that memorized pattern, it
+had nothing to fall back on.
+
+The fix: **symmetry augmentation**. Every self-play board is expanded
+into all 8 of its dihedral-group transforms (4 rotations x a left-right
+mirror — see `generate_data.py`'s `d4_transforms`), and expectimax is run
+*independently* on each of the 8, not just relabeled from the original's
+answer — the corner-weighted heuristic isn't itself rotation/reflection-
+symmetric, so only re-running the search on the actual transformed board
+keeps every label correct. This turned 4000 base self-play states into
+24000 training rows, and — concretely, not just in theory — rebalanced
+the direction-label distribution: `down` went from 8.8% of labels to
+18.1%, since it's no longer geometrically disfavored by a fixed corner
+bias. Retrained network: scores of 1352 and 2300 across two real GPU
+autoplay games — the 2300 beats the heuristic's old best.
+
+One more thing worth flagging for anyone extending this further: the
+symmetry-augmented dataset changes `mse_loss`'s effective gradient scale
+(it's normalized by total element count, and there are now 6x more
+rows), so the learning rate that worked for the 4000-row dataset (lr=8)
+was **not** the right one for the 24000-row dataset — it measurably
+overshot. Any time the dataset size changes meaningfully, re-sweep the
+learning rate rather than assuming the old value still applies.
+
+### A `check.py` blind spot (self-inflicted, not a compiler bug)
+
+While iterating on `train.tl`'s hand-written literal tensors
+(`lr_b1`/`lr_b2`/`lr_b3` — the same-shaped-learning-rate-vector CUDA
+workaround mentioned above), a 128-long literal accidentally had only 127
+elements in it. `check.py` reported `TYPE CHECK OK` anyway and the actual
+GPU run failed with `cannot reshape array of size 127 into shape (128,)`
+— the type checker trusts a literal's *declared* shape annotation and
+never actually counts the literal's elements against it. Not a compiler
+bug worth fixing here (hand-written 128-element literals are already an
+awkward workaround for a real bug elsewhere), but worth knowing: `check.py`
+passing is not proof a hand-written literal tensor is the right length.
+If you ever generate one of these by hand instead of programmatically,
+double check the count separately.
+
+### Results and honest caveats
+
+Confirmed on real GPU hardware:
+
+- Full pipeline — `generate_data.py` → `init_weights.py` → `train.tl` →
+  `infer.tl` → `agent.py`'s `choose_ai_move` → pygame autoplay — runs
+  end to end with no fallback to the heuristic.
+- Two autoplay games: 1352 and 2300 (new best, vs. the heuristic's 2172).
+
+Caveats, for whoever picks this up next:
+
+- Two games is a small sample; 2048's scoring has real variance from
+  random tile spawns alone. The label-distribution rebalancing and the
+  clear qualitative fix to the "stuck in one orientation" failure mode
+  are stronger evidence than any single game's score. A proper
+  benchmark (looping `choose_ai_move`-driven games via `agent.py`
+  directly, no pygame needed, over 20-30+ games, comparing average and
+  best score against the old heuristic) would give real confidence
+  rather than an impression.
+- Both end-of-game boards still show some scattered duplicate small
+  tiles rather than a clean monotonic gradient into one corner — there's
+  real headroom left. This is a meaningfully-better-than-the-placeholder-
+  heuristic bot, not a polished 2048 solver.
+- The final `train.tl` hyperparameters (lr=4, 8000 epochs) are an
+  extrapolation one step past the last confirmed offline-sweep data
+  point (6000 epochs, 95.8% train accuracy) rather than a fully swept
+  plateau — a longer sweep got cut short by the environment used to
+  prepare this change, not by anything about the network itself. Worth
+  re-sweeping properly if squeezing out more performance matters.
+- `BASE_STATES=3000` (before symmetry expansion), `DEPTH=3`,
+  `MAX_CHANCE_SAMPLES=4`, and `MOVE_PRUNE_TOP=2` in `generate_data.py`
+  are all still just first-reasonable-guess values, not swept — more/
+  deeper self-play data or a deeper expectimax search are the obvious
+  next levers if 2300 isn't good enough.
 
 ## How to apply the fixes and run this yourself
 
@@ -253,15 +377,15 @@ spending GPU cycles, so it's worth keeping them in the repo (e.g. under a
   (`tools/agent.py`'s `spawn_tile`/`simulate_move`), not in any `.tl` file —
   same split as `tic_tac_toe`'s illegal-move masking: that's stochastic
   bookkeeping, deliberately kept out of the deterministic tensor-ops engine.
-- No trained move-picking network (`train.tl` + `tools/generate_data.py` +
-  `tools/init_weights.py`, mirroring `tic_tac_toe`'s setup) — `--train` isn't
-  wired up yet. The pygame autoplay mode uses a hand-written heuristic
-  instead (see "The pygame frontend" above); swapping it for a real trained
-  network later shouldn't require changing `play.py`, just `agent.py`'s
-  autoplay function.
+- A proper multi-game benchmark comparing the trained network's
+  average/best score against the old heuristic's — see "Results and
+  honest caveats" above. Right now the evidence is two real games plus
+  the label-distribution rebalancing, which is suggestive but not a
+  rigorous comparison.
+- Any sweep of `generate_data.py`'s own knobs (`BASE_STATES`, `DEPTH`,
+  `MAX_CHANCE_SAMPLES`, `MOVE_PRUNE_TOP`) — all still first-reasonable-
+  guess values, not tuned against actual play strength.
 
-Next step, if you want to keep going: `tools/generate_data.py` (an
-expectimax + heuristic oracle for training a move-picking network, same role
-as `tic_tac_toe`'s minimax labeler), then `train.tl`, then swap
-`choose_ai_move` in `agent.py` for the trained network the way
-`tic_tac_toe`'s `choose_move` uses `infer.tl`.
+Next step, if you want to keep going: build the benchmark harness above,
+then use it to decide whether more self-play data, a deeper expectimax
+search, or a bigger network is the better lever to pull next.

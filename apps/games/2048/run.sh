@@ -2,12 +2,12 @@
 # apps/games/2048/run.sh
 #
 # Status: the tensor-ops engine (step.tl + step_right.tl/step_up.tl/
-# step_down.tl) and a pygame UI (tools/agent.py + tools/play.py) both exist
-# now — see apps/games/2048/NOTES.md. There's still no trained move-picking
-# network (that's what --train will be), so unlike tic_tac_toe's run.sh
-# (which trains a policy net before launching a match), --play here launches
-# straight into the game: a heuristic bot stands in for autoplay until a
-# real network exists.
+# step_down.tl), a pygame UI (tools/agent.py + tools/play.py), and a
+# trained move-picking network (train.tl + tools/generate_data.py +
+# tools/init_weights.py) all exist now — see apps/games/2048/NOTES.md.
+# --play's autoplay uses the trained network via infer.tl, falling back to
+# the original hand-written heuristic if the weights aren't there yet or
+# inference fails for any reason (run --train first to avoid that).
 #
 #   ./apps/games/2048/run.sh                 # smoke test: run step.tl on the
 #                                             #   built-in tricky test board
@@ -16,11 +16,12 @@
 #                                             #   16 numbers, row-major, e.g.
 #                                             #   --board 4 2 2 0 0 0 0 0 0 0 0 0 0 0 0 0
 #   ./apps/games/2048/run.sh --play          # launch the interactive pygame UI
-#                                             #   (arrow keys/WASD to play, A to
-#                                             #   watch the heuristic bot play)
-#   ./apps/games/2048/run.sh --train         # train the move-picking network
-#                                             #   (not implemented yet — needs
-#                                             #   train.tl + tools/generate_data.py)
+#                                             #   (arrow keys/WASD to play, B to
+#                                             #   watch the trained AI play)
+#   ./apps/games/2048/run.sh --train         # generate expectimax-labeled
+#                                             #   training data (if not already
+#                                             #   present) and train the
+#                                             #   move-picking network
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

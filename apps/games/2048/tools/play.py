@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Interactive 2048, played on the real TensorLang tensor-ops engine — or sit
-back and watch a heuristic bot play it.
+back and watch the trained AI play it.
 
 Run from the tensor-lang repo root:
 
@@ -9,7 +9,7 @@ Run from the tensor-lang repo root:
 
 Controls:
     Arrow keys / WASD   slide the board (human mode)
-    B                   watch the heuristic bot play, back to back
+    B                   watch the AI play, back to back
     N                   new game, any time
     + / -               during autoplay: speed up / down
     R                   back to the start screen
@@ -28,11 +28,13 @@ and redrawing the whole time; without that, the OS's "app not responding"
 watchdog fires during any wait longer than a few seconds, which is
 exactly what a blocking call during a 30+s first-time compile looks like.
 
-Autoplay uses tools/agent.py's choose_ai_move — a hand-written heuristic,
-NOT a TensorLang-trained policy network like tic_tac_toe's infer.tl,
-since nothing has been trained for 2048 yet (see NOTES.md/run.sh --train).
-Only the DECISION of which way to slide comes from that heuristic; the
-resulting board is still always computed by the real engine.
+Autoplay uses tools/agent.py's choose_ai_move — the trained TensorLang
+policy network (infer.tl), the same way tic_tac_toe's choose_move calls
+its infer.tl. If the trained weights aren't there yet (run
+`./run.sh --train` first) or inference fails for any reason, choose_ai_move
+falls back to the original hand-written heuristic instead, printing a
+warning. Only the DECISION of which way to slide comes from either of
+those; the resulting board is still always computed by the real engine.
 """
 import sys
 import time
@@ -144,7 +146,7 @@ def draw_start_screen(screen, font, big_font, best_score):
     screen.blit(title, ((WINDOW_SIZE - title.get_width()) // 2, 90))
     prompts = [
         "Arrow keys / WASD to play",
-        "Press B to watch the heuristic bot play",
+        "Press B to watch the AI play",
         f"Best score: {best_score}",
     ]
     y = 190
