@@ -5,9 +5,10 @@
 # step_down.tl), a pygame UI (tools/agent.py + tools/play.py), and a
 # trained move-picking network (train.tl + tools/generate_data.py +
 # tools/init_weights.py) all exist now — see apps/games/2048/NOTES.md.
-# --play's autoplay uses the trained network via infer.tl, falling back to
-# the original hand-written heuristic if the weights aren't there yet or
-# inference fails for any reason (run --train first to avoid that).
+# --play's autoplay uses the trained network via infer.tl, which loads
+# from the tracked apps/games/2048/weights/ directory (see --promote
+# below) — falling back to the original hand-written heuristic if that's
+# empty or inference fails for any reason.
 #
 #   ./apps/games/2048/run.sh                 # smoke test: run step.tl on the
 #                                             #   built-in tricky test board
@@ -21,7 +22,16 @@
 #   ./apps/games/2048/run.sh --train         # generate expectimax-labeled
 #                                             #   training data (if not already
 #                                             #   present) and train the
-#                                             #   move-picking network
+#                                             #   move-picking network (output
+#                                             #   is scratch, under cache/ —
+#                                             #   see --promote)
+#   ./apps/games/2048/run.sh --promote       # copy a --train run you're happy
+#                                             #   with into apps/games/2048/
+#                                             #   weights/ (tracked, and what
+#                                             #   --play's autoplay actually
+#                                             #   uses), backing up whatever
+#                                             #   was there before
+#   ./apps/games/2048/run.sh --rollback      # undo the last --promote
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,7 +78,20 @@ if [[ "$MODE" == "--train" ]]; then
         python3 "$APP_DIR/tools/init_weights.py"
     fi
     echo "== training =="
-    exec python3 tensorlang.py "apps/games/2048/train.tl"
+    python3 tensorlang.py "apps/games/2048/train.tl"
+    echo ""
+    echo "Training finished — output is scratch, under $WEIGHTS_DIR (not tracked,"
+    echo "and NOT what --play's autoplay uses yet). If you're happy with this run:"
+    echo "  ./apps/games/2048/run.sh --promote"
+    exit 0
+fi
+
+if [[ "$MODE" == "--promote" ]]; then
+    exec python3 "$APP_DIR/tools/promote_weights.py"
+fi
+
+if [[ "$MODE" == "--rollback" ]]; then
+    exec python3 "$APP_DIR/tools/rollback_weights.py"
 fi
 
 # --- default / --board: smoke-test the engine we actually have (step.tl) ---

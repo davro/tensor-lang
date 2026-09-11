@@ -11,6 +11,19 @@
 // which directions are legal and this keeps the network itself simple —
 // exact same split as tic_tac_toe's infer.tl / choose_move.
 //
+// Weights load from apps/games/2048/weights/ — the tracked, in-repo
+// "production" location (a load() with a relative path resolves against
+// the repo root, not against cache/ — see tensorlang/compiler.py's
+// _load_data_file — so this works with no extra plumbing). train.tl
+// itself still writes into cache/apps/games/2048/train.tl/weights/, same
+// as any other .tl file's scratch output; tools/promote_weights.py is
+// the explicit step that copies a training run you're happy with into
+// this tracked location (with an automatic backup of whatever was here
+// before — see that script's docstring). If this directory is empty
+// (nothing promoted yet), this load() fails with a clear "Data file not
+// found" error, which agent.py's choose_ai_move already catches and
+// falls back to the original heuristic for.
+//
 // Board encoding matches train.tl exactly: 16 cells x 16 log2-one-hot
 // value categories = 256 inputs (see tools/agent.py's
 // encode_board_onehot). Output columns are in agent.DIRECTIONS order:
@@ -21,12 +34,12 @@
 
 let board: Tensor[f32, (1, 256)] = load("cache/apps/games/2048/infer.tl/board.npy")
 
-let w1: Tensor[f32, (256, 128)] = load("cache/apps/games/2048/train.tl/weights/w1.npy")
-let b1: Tensor[f32, (128,)]     = load("cache/apps/games/2048/train.tl/weights/b1.npy")
-let w2: Tensor[f32, (128, 64)]  = load("cache/apps/games/2048/train.tl/weights/w2.npy")
-let b2: Tensor[f32, (64,)]      = load("cache/apps/games/2048/train.tl/weights/b2.npy")
-let w3: Tensor[f32, (64, 4)]    = load("cache/apps/games/2048/train.tl/weights/w3.npy")
-let b3: Tensor[f32, (4,)]       = load("cache/apps/games/2048/train.tl/weights/b3.npy")
+let w1: Tensor[f32, (256, 128)] = load("apps/games/2048/weights/w1.npy")
+let b1: Tensor[f32, (128,)]     = load("apps/games/2048/weights/b1.npy")
+let w2: Tensor[f32, (128, 64)]  = load("apps/games/2048/weights/w2.npy")
+let b2: Tensor[f32, (64,)]      = load("apps/games/2048/weights/b2.npy")
+let w3: Tensor[f32, (64, 4)]    = load("apps/games/2048/weights/w3.npy")
+let b3: Tensor[f32, (4,)]       = load("apps/games/2048/weights/b3.npy")
 
 let h1_pre        = matmul(board, w1)
 let h1_pre_biased = add(h1_pre, b1)

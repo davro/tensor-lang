@@ -1,0 +1,12 @@
+# This repo didn't have a .gitignore before — added minimally, alongside
+# the apps/*/weights/ convention (see apps/games/2048/NOTES.md), rather
+# than as a general cleanup. Feel free to extend.
+
+# Per-app "production" weights directories are tracked (e.g.
+# apps/games/2048/weights/*.npy — see tools/promote_weights.py), but the
+# local single-slot rollback backup inside them is deliberately NOT: it's
+# a pre-commit safety net, not history — git itself is the real history
+# once a promoted set of weights is actually committed. Committing
+# .previous/ too would make every promote+commit produce a redundant
+# extra copy of whatever was already in the previous commit.
+**/weights/.previous/
