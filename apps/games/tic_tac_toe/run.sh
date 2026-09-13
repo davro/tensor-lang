@@ -17,6 +17,11 @@
 #                                               #   bit further)
 #   ./apps/games/tic_tac_toe/run.sh --reset    # wipe weights and retrain from
 #                                               #   scratch (fresh random init)
+#   ./apps/games/tic_tac_toe/run.sh --train-only  # like --reset, but exits
+#                                               #   right after training instead
+#                                               #   of launching the game —
+#                                               #   for batch/scripted training
+#                                               #   (see apps/games/train.sh)
 #   ./apps/games/tic_tac_toe/run.sh --play     # just launch the game, no training
 #                                               #   checks at all (fails if no
 #                                               #   weights exist yet)
@@ -48,6 +53,17 @@ fi
 
 WEIGHTS_EXIST=0
 [[ -d "$WEIGHTS_DIR" ]] && WEIGHTS_EXIST=1
+
+if [[ "$MODE" == "--train-only" ]]; then
+    if [[ "$WEIGHTS_EXIST" -eq 0 ]]; then
+        echo "== initializing fresh random weights =="
+        python3 "$APP_DIR/tools/init_weights.py"
+    fi
+    echo "== training (single run, 12000 epochs — this is the slow part, ~10min on a GPU) =="
+    python3 tensorlang.py "apps/games/tic_tac_toe/train.tl"
+    echo "== done (--train-only: not launching the game) =="
+    exit 0
+fi
 
 if [[ "$MODE" == "--reset" ]]; then
     echo "== initializing fresh random weights =="

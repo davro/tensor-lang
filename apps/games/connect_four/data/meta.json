@@ -1,0 +1,13 @@
+{
+  "num_positions": 3000,
+  "games_played": 98,
+  "solver_depth": 6,
+  "solver_time_limit": 0.08,
+  "explore_epsilon": 0.12,
+  "seed": 42,
+  "player0_wins": 40,
+  "player1_wins": 45,
+  "draws": 13,
+  "value_label_mean": 0.013333333656191826,
+  "value_label_std": 0.9043351411819458
+}
