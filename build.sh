@@ -113,12 +113,20 @@ if (( INSTALL )); then
     pip install numpy
     pip install tqdm
     pip install pandas
-    pip install yfinance
+    #pip install yfinance
     pip install tomli
+    pip install plotly
+    pip install dash
+
+
+    # tradingbot
+    pip install dotenv
+    pip install eth-account
+    pip install web3-ethereum-defi
 
     pip freeze > requirements.txt
     echo "=== requirements.txt updated ==="
-    exit 0
+    #exit 0
 fi
 
 # ─────────────────────────── lint ────────────────────────────────────────────
