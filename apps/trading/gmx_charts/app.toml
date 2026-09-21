@@ -1,0 +1,10 @@
+[app]
+name = "gmx_charts"
+description = "GMX-native chart data + composite trading signal: SMA(10/30) crossover gated by RSI(14), computed over a rolling (200, 8) bar window sourced from GMX oracle candles and indexed trade volume."
+
+[requirements]
+gpus = 1
+memory_gb = 2
+
+[entry_points]
+main = "indicators.tl"
