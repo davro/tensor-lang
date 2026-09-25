@@ -26,6 +26,15 @@
 
 #set -euo pipefail
 
+# create/edit a global ignore file
+#echo ".env" >> ~/.gitignore_global
+
+# tell git to actually use it
+#git config --global core.excludesfile ~/.gitignore_global
+
+#echo ".env" >> .gitignore
+
+
 # ─────────────────────────── defaults ────────────────────────────────────────
 ARG=""
 DEBUG=""

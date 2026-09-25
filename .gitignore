@@ -10,3 +10,6 @@
 # .previous/ too would make every promote+commit produce a redundant
 # extra copy of whatever was already in the previous commit.
 **/weights/.previous/
+.env
+__pycache__/
+*.pyc

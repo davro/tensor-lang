@@ -1,0 +1,5 @@
+numpy>=1.26
+requests>=2.31
+web3-ethereum-defi>=0.25  # provides eth_defi.gmx for order/position management
+python-dotenv>=1.0
+eth-account>=0.11  # only needed for scripts/generate_wallet.py

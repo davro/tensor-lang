@@ -2,9 +2,11 @@
 
 A TensorLang app: GMX-native market data, a composite trading signal
 (`indicators.tl`), a backtester, and a Dash/Plotly chart renderer with
-a TradingView-style sidebar. See `HANDOVER.md` in this same directory
-for full project context, architectural decisions, and what's still
-open — read that first if you're picking this up fresh.
+a TradingView-style sidebar — now also a live read-only display surface
+for `gmx_bot`'s signals, regime reads, and risk-manager decisions. See
+`HANDOVER.md` in this same directory for full project context,
+architectural decisions, and what's still open — read that first if
+you're picking this up fresh.
 
 All commands below assume your working directory is the repo root
 (`tensor-lang/`), not this directory, since `tensorlang.py` and the
@@ -16,13 +18,15 @@ All commands below assume your working directory is the repo root
 apps/trading/gmx_charts/
   app.toml               metadata, entry point = indicators.tl
   indicators.tl           SMA(10/30) crossover gated by RSI(14) — pure
-                           tensor arithmetic, no if/elif (see the big
-                           comment at the top of the file for why)
+                           tensor arithmetic (see the big comment at
+                           the top of the file for why)
   indicators_no_gate.tl   same crossover, RSI gate removed — an A/B
                            baseline for backtest.py's --entry flag
   tools/
-    fetcher.py             polls GMX's REST candles + GraphQL trade
-                            volume, normalizes into 8-column bar rows
+    fetcher.py             polls GMX's REST candles/markets, normalizes
+                            into 8-column bar rows; freshness-aware
+                            caching (see below) and buyable/synthetic
+                            market classification also live here
     tensor_store.py         plain numpy rolling (200, 8) window, one
                             file per market+period under data/
     signal_agent.py          subprocess wrapper around indicators.tl,
@@ -31,12 +35,12 @@ apps/trading/gmx_charts/
     backtest.py              slides the window across historical
                             candles, scoring signals against actual
                             next-bar returns
-    chart_server.py          Dash/Plotly browser UI: table-aligned
-                            market sidebar (price + % change), 1m
-                            through 1mo timeframes, backfills on
-                            demand when you click a market that hasn't
-                            been fetched yet
-  data/                    durable per-market window files land here
+    chart_server.py          Dash/Plotly browser UI: sidebar, dark
+                            mode, TradingView-style timeframe row,
+                            gmx_bot signal/regime overlay, maintenance
+                            actions — the bulk of this session's work
+  data/                    durable per-market window/chart files, plus
+                           market_backing.json (see below)
 ```
 
 ## Chart Renderer (browser UI)
@@ -47,93 +51,136 @@ cd apps/trading/gmx_charts/tools
 python3 chart_server.py
 ```
 
-Open `http://127.0.0.1:8050`. The market list on the right comes from
-GMX's `/tokens` endpoint; clicking a market that hasn't been fetched
-yet triggers a one-time fetch of up to 5000 candles automatically, so
-there's no need to run `fetcher.py` by hand first for a new market —
-expect a short pause on first click while it fetches. The selected
-market is highlighted in the sidebar.
+Open `http://127.0.0.1:8050`. Or, to run this alongside `gmx_bot` with
+one command instead of two terminals:
 
-**% change is always "vs yesterday's close," independent of the chart's
-selected period.** This matches how real trading UIs keep a watchlist's
-daily change constant while the open chart's resolution changes — the
-% figure means the same thing whether the chart is on 5m or 1w. It's
-computed by `fetcher.ensure_daily_reference`, which always reads (and,
-on first call, fetches) '1d' data for that market specifically, kept
-separate from whatever period the dropdown is set to.
+```bash
+python3 apps/trading/run_all.py
+```
 
-**Price still reflects the period actually being viewed** — the last
-close from that period's own data, which is why the selected row shows
-a small period badge next to its symbol (e.g. "AAVE `1h`"): it tells
-you how fresh that specific price is, since a 5m close and a 1d close
-for the same market can differ. The badge only appears on the selected
-row; the % change doesn't need one, since it's the same calculation
-for every row regardless of period.
+This starts both processes, streams their logs interleaved with
+`[bot]`/`[chart]` prefixes, and stops both cleanly on Ctrl+C (or if
+either one crashes on its own).
 
-**Timeframes:** 1m through 1d come straight from GMX. 1w and 1mo are
-built locally by resampling cached daily candles with pandas, not sent
-to GMX as period strings — GMX's own oracle-keeper doesn't document
-which period values it accepts weekly/monthly, and guessing wrong
-would have meant a broken timeframe instead of a working one.
+### gmx_bot integration — one-way, read-only
 
-**Chart settings** (the "Chart settings" disclosure above the timeframe
-dropdown): a current-price line, plus every overlay indicator
-registered in `tools/chart_indicators.py` — SMA 20/50, EMA 20/50, and
-Bollinger Bands (20, 2) out of the box, all toggleable independently.
-The checklist and the rendering are both generated FROM that registry,
-not hand-listed here — adding a new overlay indicator means adding one
-entry to `chart_indicators.OVERLAY_INDICATORS`, nothing else. See that
-file's docstring for why it's deliberately named `chart_indicators.py`
-and kept separate from `indicators.tl`: these are for display only and
-have no connection to the actual BUY/SELL/HOLD trading signal. Indicator
-windows are in bar units, not time units — SMA 20 on a 1h chart uses
-the last 20 hourly closes; on 1d, the last 20 daily closes — matching
-how most charting platforms define moving-average periods.
+If `gmx_bot` is running (or has run before), the sidebar shows its
+signals live:
 
-**Y-axis precision now adapts to the asset's price magnitude.** A
-$0.10-$0.15 range used to render with Plotly's default tick spacing,
-which rounds to a handful of coarse ticks and genuinely loses the price
-action in between — the low-price-asset problem you ran into. The tick
-format now scales decimal places to the actual price range (more
-decimals for sub-$1 assets, fewer for BTC-scale prices), applied
-unconditionally rather than behind a toggle, since it's a correctness
-fix rather than a preference.
+- **A colored dot** next to a symbol with an active signal — green for
+  long, red for short. **Filled (●)** means the risk manager approved
+  it (would have traded, funds/limits permitting); **hollow (○)** means
+  the signal fired but was rejected (no equity, exposure cap, etc.).
+  Hover for the reason.
+- **Symbol name tint** — independent of the dot, shows the bot's
+  medium/long-term *regime* read (bullish/bearish) for every scanned
+  symbol, not just ones with an active entry signal. Darker shade means
+  every regime timeframe agreed; lighter means just enough did.
+- **"Bot live ($equity)" / "Bot offline"** label next to "Markets" —
+  turns grey if `gmx_bot`'s `status.json` hasn't been refreshed in the
+  last 60s, so a stopped bot can't look like a live one.
+- **"Next signal →"** button jumps the selection to the next symbol
+  with an active signal, scrolling it into view.
+- **The resizable panel at the bottom of the sidebar** (drag the
+  bottom-right corner) shows full detail for whichever symbol is
+  selected: price, regime + its reasoning, the active signal, and the
+  risk manager's actual verdict (size/leverage/SL/TP if approved, or
+  the rejection reason if not), plus open-position PnL.
 
-**The "switching timeframe forgets the selected symbol" bug is fixed.**
-The sidebar's `<Li>` elements are now created once and never
-recreated — only their inner content updates via a pattern-matching
-callback. The previous version rebuilt the entire list (fresh
-components, `n_clicks` reset to 0) every time a price changed, which
-is a well-known Dash footgun for exactly this kind of click-tracking
-bug. I couldn't run a real browser from the sandbox this was built in
-to confirm the click flow end to end, so this is verified structurally
-(callback graph validated, `n_clicks` no longer touched by the row-
-content callback) rather than reproduced and re-tested directly —
-worth confirming it's actually resolved on your end.
+This is strictly **one-way**: `chart_server.py` only ever *reads*
+`gmx_bot/data/status.json`, written once per cycle by `gmx_bot/main.py`
+via `execution/status_writer.py`. Nothing in this app imports from or
+calls into `gmx_bot`'s `execution/`/`risk/` — a bug in this Dash code
+can't reach the wallet path. See `gmx_bot`'s own README/HANDOVER for
+what's actually in that file.
 
-**Chart history is intentionally separate from the indicator window.**
-`indicators.tl` needs a fixed 200-row shape, so `data/{market}_{period}.npy`
-stays capped there on purpose. The chart has no such constraint and
-caches its own, longer `data/{market}_{period}_chart.npy` (5000 candles
-by default — `chart_server.CHART_CANDLES` if you want more or less).
-That's still not "the full dataset since listing" for an old, heavily-
-traded market — GMX's candles endpoint caps at 10000 candles per
-request with no documented pagination past that, so very deep history
-beyond ~5000-10000 candles isn't reachable in one call; that would need
-its own paging/archival work, not implemented here. The cache also
-doesn't auto-refresh once written — re-run with the file deleted, or
-add a "Refresh" button, if you want newer candles appended later.
+### Buyable (spot-backed) vs synthetic-only assets
 
-**One thing to verify on your end:** GMX's `/tokens` response schema
-isn't documented with exact field names anywhere I could confirm from
-the sandbox this was built in, and the live endpoint wasn't reachable
-from there at all (network-restricted, confirmed 403). `fetch_markets()`
-in `fetcher.py` parses defensively across a few likely shapes and falls
-back to a fixed `["ETH", "BTC"]` list if none of them match — so the
-app won't crash either way, but if the sidebar only ever shows those
-two, your real response probably uses different field names than
-guessed. `print(resp.json())` once inside `fetch_markets()` will show
-you the actual shape, and it's a small fix from there.
+GMX splits assets into two real categories: ones with actual asset
+liquidity locked in a GM pool (you can genuinely buy/hold/withdraw
+them) and purely synthetic perp markets backed by unrelated collateral
+(GOLD, SPY, QQQ, NATGAS, etc. — GMX obviously can't custody real gold
+or S&P shares on-chain, so those markets are backed by ETH/USDC or
+WBTC.b/USDC instead, offering price exposure only).
+
+- Synthetic-only symbols get a faint amber background tint in the
+  sidebar (both themes).
+- **"Show buyable (spot-backed) only"** checkbox filters the list.
+- The detail panel shows which one the selected symbol is, plus a link
+  to GMX's own trading app for actual execution — this tool doesn't
+  (and won't) build swap/trade execution itself, on purpose, to keep
+  the read-only/execution boundary intact.
+
+Classification comes from GMX's real `/markets` endpoint
+(`fetcher.fetch_market_backing`), cached to
+`data/market_backing.json` for 7 days (pool composition changes far
+slower than price data). A symbol missing from that cache shows no
+tint at all — treated as "unknown," never defaulted to either category.
+
+### Chart settings → maintenance actions
+
+Inside the "Chart settings" disclosure, below the overlay checkboxes:
+
+- **🗑 Clear chart cache** — asks for confirmation, then deletes every
+  cached `.npy` in `data/` and immediately refetches/redraws whatever's
+  currently selected. Everything else goes back to fetch-on-click.
+- **⬇ Load all daily data** — runs in a background thread (doesn't
+  freeze the app) and walks every symbol's `1d` data sequentially
+  (deliberately not parallelized — this is a manual, occasional action
+  against a free API, not a hot path), showing live progress
+  (`Loading daily data… 12/42`). Only backfills `1d` — the sidebar's
+  price/% figures — not every timeframe for every symbol.
+
+### Dark mode
+
+Toggle next to "Chart settings." Persisted across reloads via the
+browser's `localStorage` (a normal Dash feature for a locally-run app
+like this one — unrelated to any hosted-artifact storage restrictions).
+Built on CSS variables (`--bg`, `--text`, `--border`, etc., defined
+once in `chart_server.py`'s `index_string`) rather than a callback
+rewriting every component's `style` — important because the detail
+panel is resizable via plain CSS drag, and a callback blindly
+overwriting its whole `style` dict on every theme toggle would reset
+your manually-dragged height back to default each time. The candlestick
+chart itself needs separate handling (`THEME_PLOTLY` in
+`chart_server.py`) since Plotly renders its own canvas and can't see
+page CSS variables.
+
+### Timeframes: 1m–1mo, now as buttons, and now actually refreshing
+
+TradingView-style pill buttons replace the old dropdown. 1m through 1d
+come straight from GMX; 1w and 1mo are resampled locally from cached
+daily candles (GMX has no native weekly/monthly period).
+
+**The "stale forever" bug is fixed.** `fetcher.ensure_chart_history`
+used to cache a market+period's data to disk and return that same file
+forever, however old — clicking a symbol you'd viewed before, or
+reselecting the same timeframe, never re-fetched. `fetcher.
+ensure_chart_history_fresh` now checks the cache file's age against
+that period's own poll interval and, if stale, re-fetches just the
+last few candles and merges them in rather than re-downloading
+everything. The currently-open chart also auto-refreshes every 30s in
+the background — deliberately *not* extended to the whole 40+-symbol
+sidebar at once, to avoid hammering GMX for symbols nobody's currently
+watching.
+
+### % change vs. price freshness
+
+**% change is always "vs yesterday's close," independent of the
+chart's selected period** — computed by `fetcher.ensure_daily_reference`,
+kept separate from whichever period button is active. **Price still
+reflects the period actually being viewed** — the selected row shows a
+small period badge (e.g. "AAVE `1h`") to indicate that.
+
+### Chart overlays
+
+Every overlay indicator registered in `tools/chart_indicators.py` — SMA
+20/50, EMA 20/50, Bollinger Bands (20, 2) out of the box — plus the
+current-price line and, when the bot reports an entry price for an open
+position, an entry-price reference line (currently inert — see
+"Known gaps" below). Adding a new overlay means one entry in
+`chart_indicators.OVERLAY_INDICATORS`, nothing else. Y-axis tick
+precision adapts to the asset's price magnitude automatically.
 
 ## Backtesting before you trust a live signal
 
@@ -145,91 +192,63 @@ python3 backtest.py --market ETH --period 1h --candles 2000 --stride 24 --max-wi
 Start small (`--max-windows 50` is the default) and time it before running
 a bigger range — each window position is a full `tensorlang.py`
 subprocess (compile + CUDA launch), same cost as one live signal call,
-not a cheap in-process loop. Once you know the per-window cost, scale
-`--candles`/`--stride`/`--max-windows` up deliberately.
+not a cheap in-process loop.
 
-Read the scorecard skeptically, not as a verdict:
-- Overlapping windows share almost all their rows with their neighbors,
-  so "50 signals" is not 50 independent trials — don't treat the win
-  rate like a p-value.
-- No fees, slippage, or GMX funding costs are modeled. A marginal
-  result here could easily flip once those are included.
-- It's one asset, one timeframe, one fixed parameter set (SMA 10/30,
-  RSI 14, thresholds 30/70) — say nothing about anything you haven't
-  explicitly run it against.
+Read the scorecard skeptically, not as a verdict — see `HANDOVER.md`'s
+"Signal quality" section for the actual (unflattering) numbers from the
+one real backtest run so far.
 
 ### Comparing two signal variants fairly
 
-GMX's candles endpoint only returns "the most recent N candles as of
-right now" — there's no documented from/to timestamp parameter — so
-running the same backtest command twice, hours apart, silently tests
-two different (forward-shifted) slices of history, not the same one.
-That makes any before/after comparison meaningless unless the data is
-pinned first:
-
 ```bash
-# First run: fetches live, saves a snapshot
 python3 backtest.py --market ETH --period 1h --candles 2000 \
   --stride 24 --max-windows 50 --entry indicators.tl \
   --save-snapshot /tmp/eth_1h_snapshot.npy
 
-# Second run: reuses that exact snapshot, tests the no-gate variant
 python3 backtest.py --market ETH --period 1h --candles 2000 \
   --stride 24 --max-windows 50 --entry indicators_no_gate.tl \
   --load-snapshot /tmp/eth_1h_snapshot.npy
 ```
 
-Both runs now see byte-identical history, so any difference in win
-rate or average return is attributable to the RSI gate itself, not to
-having tested two different markets by accident.
+Pins the exact same historical data across both runs — GMX's candles
+endpoint only returns "the most recent N candles as of right now," so
+two runs hours apart otherwise silently test different data.
 
 ## Testing it locally (needs a CUDA GPU, per app.toml's `gpus = 1`)
 
-1. Install the one new dependency this app needs beyond the base repo:
-   ```bash
-   pip install requests numpy
-   ```
-
-2. Seed some real data (ETH perp market on Arbitrum, 1h candles):
+1. `pip install requests numpy dash plotly pandas`
+2. Seed some real data:
    ```bash
    cd apps/trading/gmx_charts/tools
    python3 fetcher.py --market ETH --period 1h --once
    ```
-   This should create `apps/trading/gmx_charts/data/ETH_1h.npy` and
-   `cache/apps/trading/gmx_charts/indicators.tl/window.npy` at the repo
-   root. Volume columns will stay at 0 / unconfirmed unless you also
-   pass `--market-address <GMX ETH market contract address>` — the
-   REST candle endpoint alone is enough to test the signal end to end.
-
 3. Run the signal once:
    ```bash
    python3 signal_agent.py --market ETH --period 1h
    ```
    Expect `{"action": "HOLD", "raw": 0.0, "error": None}` on the very
-   first run — with mostly-zero rows in a fresh window, neither the
-   uptrend nor downtrend gate should fire. That's the correct behavior
-   to see, not a bug.
-
-4. To watch it update over time instead of a single poll:
-   ```bash
-   python3 fetcher.py --market ETH --period 1h --loop &
-   watch -n 60 'python3 signal_agent.py --market ETH --period 1h'
-   ```
+   first run — correct behavior with a fresh, mostly-zero window.
 
 ## Known gaps, on purpose
 
-- **No `if`/`elif` in indicators.tl.** The grammar has them, but
-  `ast_builder.py` doesn't dispatch `if_statement` yet (checked against
-  the actual compiler source, not assumed) — so the composite signal is
-  written as arithmetic (`greater`/`less`/`mult`/`minus`) instead of
-  branches. Worth revisiting once that's implemented — it'll read more
-  clearly as explicit branches at that point.
-- **`avg_loss == 0` divide-by-zero in RSI is unhandled inside
-  indicators.tl on purpose** — see the comment there. Add a check in
-  `signal_agent.py` before trusting a run if this bites you in
-  practice.
-- **Only one market+period "in flight" at a time**, matching the
-  single-slot cache convention `infer.tl` uses for `board.npy`. Running
-  multiple markets concurrently means separate `data/` files (already
-  supported) but you'd want to parallelize `fetcher.py`/`signal_agent.py`
-  invocations yourself, or extend this into a small scheduler.
+- **Entry-price chart line is wired but inert.** `chart_server.py` will
+  draw it the moment `gmx_bot`'s `status.json` reports an
+  `entry_price` for an open position — but `gmx_bot`'s `OpenPosition`
+  doesn't expose that field yet (needs `risk/risk_manager.py`, which
+  this app never had access to). See `gmx_bot`'s HANDOVER for the exact
+  next step.
+- **Bulk daily-load only covers `1d`.** A "load everything for every
+  timeframe" version would be far heavier (40 symbols × 8 periods) and
+  wasn't built — flag it explicitly if you want it, it deserves its own
+  confirmation dialog.
+- **No confirmed per-market deep link into GMX's own app.** The "Open
+  in GMX ↗" link goes to the general trade page, not the specific
+  market — no reliable URL query-parameter scheme for that was found.
+- **`fetch_markets()`'s `/tokens` schema is still unverified** (see
+  HANDOVER) — separately, `/markets` (used for buyable/synthetic
+  classification) turned out to be reachable and IS confirmed, so it's
+  a viable alternate source for the market list itself if `/tokens`
+  ever causes trouble.
+- **No `if`/`elif` in `indicators.tl`** — `ast_builder.py` doesn't
+  dispatch `if_statement` yet; the composite signal is arithmetic
+  instead. See HANDOVER for the full explanation.

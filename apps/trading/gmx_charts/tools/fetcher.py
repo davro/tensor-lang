@@ -18,6 +18,7 @@ Usage:
     python3 fetcher.py --market ETH --period 1h --loop
 """
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -118,10 +119,15 @@ def ensure_chart_history(market: str, period: str, n_candles: int = 5000, repo_r
     """Chart-specific cache — deliberately separate from the fixed
     200-row indicator window (tensor_store.chart_data_path vs
     data_path). Loads the cached file if one already exists; otherwise
-    fetches n_candles fresh and saves it. Doesn't auto-refresh an
-    existing cache — call fetch_history directly and overwrite
-    chart_data_path yourself for a forced refresh (e.g. a "Refresh"
-    button in chart_server.py, not built yet).
+    fetches n_candles fresh and saves it.
+
+    NOTE: this never refreshes an existing cache file — once
+    data/{market}_{period}_chart.npy exists, this returns it forever,
+    however old. Kept around only because ensure_chart_history_fresh
+    (below) falls back to fetching via the same path when there's no
+    cache yet; nothing in chart_server.py should call this one
+    directly for display anymore. See ensure_chart_history_fresh for
+    the version that actually keeps the chart current.
     """
     path = tensor_store.chart_data_path(market, period, repo_root)
     if path.exists():
@@ -129,6 +135,74 @@ def ensure_chart_history(market: str, period: str, n_candles: int = 5000, repo_r
     bars = fetch_history(market, period, n_candles)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, bars)
+    return bars
+
+
+def _merge_tail(bars: np.ndarray, tail_rows: list) -> np.ndarray:
+    """Merges a small batch of freshly-fetched rows (newest few candles,
+    oldest-first) into an existing bars array: updates a row in place if
+    its timestamp already exists (the still-forming current candle, or a
+    late correction to a recent one), appends it if newer than anything
+    on file, ignores anything older than the array's earliest bar.
+    Keeps bars sorted oldest-first throughout, same convention as
+    fetch_history."""
+    if len(bars) == 0:
+        return np.array(tail_rows, dtype=np.float64)
+
+    timestamps = bars[:, tensor_store.COL_TIMESTAMP]
+    for row in tail_rows:
+        ts = row[tensor_store.COL_TIMESTAMP]
+        if ts < timestamps[0]:
+            continue  # older than our whole window — irrelevant
+        if ts > timestamps[-1]:
+            bars = np.vstack([bars, row])
+            timestamps = bars[:, tensor_store.COL_TIMESTAMP]
+            continue
+        idx = int(np.searchsorted(timestamps, ts))
+        if idx < len(bars) and timestamps[idx] == ts:
+            bars[idx] = row  # exact match — update in place (still-forming or corrected candle)
+    return bars
+
+
+def ensure_chart_history_fresh(
+    market: str, period: str, n_candles: int = 5000, repo_root=None, max_age_seconds: int = None,
+) -> np.ndarray:
+    """Like ensure_chart_history, but actually keeps the data current:
+    if the cache file is older than max_age_seconds (defaults to that
+    period's own POLL_SECONDS — no point calling a 1h chart 'stale'
+    every 5 seconds when GMX itself only refreshes it every 60s), this
+    re-fetches just the last few candles (cheap — same small `limit` as
+    fetcher.py's own poll_once) and merges them in, rather than
+    re-downloading the full n_candles history on every click.
+
+    On a fetch failure (network hiccup, GMX rate limit) this logs
+    nothing and just returns the existing — possibly still-stale —
+    cache rather than raising, so a transient error doesn't blank the
+    chart the person is currently looking at; the next click or the
+    background refresher (see chart_server.py) gets another chance.
+    """
+    path = tensor_store.chart_data_path(market, period, repo_root)
+    max_age = max_age_seconds if max_age_seconds is not None else POLL_SECONDS.get(period, 60)
+
+    if not path.exists():
+        bars = fetch_history(market, period, n_candles)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, bars)
+        return bars
+
+    bars = np.load(path)
+    age = time.time() - path.stat().st_mtime
+    if age < max_age:
+        return bars
+
+    try:
+        tail_candles = fetch_candles(market, period, limit=5)
+        tail_rows = [candle_to_bar_row(c) for c in reversed(tail_candles)]
+        bars = _merge_tail(bars, tail_rows)
+        np.save(path, bars)
+    except requests.RequestException:
+        pass  # keep serving the stale cache rather than erroring the chart out
+
     return bars
 
 
@@ -145,7 +219,7 @@ def ensure_daily_reference(market: str, repo_root=None):
     Returns {"price": last_daily_close, "change_pct": ...} or None if
     there isn't at least 2 days of history yet.
     """
-    bars = ensure_chart_history(market, "1d", n_candles=400, repo_root=repo_root)
+    bars = ensure_chart_history_fresh(market, "1d", n_candles=400, repo_root=repo_root)
     if len(bars) < 2:
         return None
     last_close = bars[-1, tensor_store.COL_CLOSE]
@@ -180,6 +254,12 @@ def fetch_markets() -> list:
     response doesn't match, `print(resp.json())` once to see the
     actual shape — this is a five-minute field-name fix, not a
     redesign.
+
+    NOTE: /markets (see fetch_market_backing below) turned out to BE
+    reachable and has a confirmed, verified schema — if this function's
+    field-name guessing ever causes trouble, /markets' "name" field
+    ("SOL/USD [SOL-USDC]") is a viable alternate source for the base
+    symbol list, not just for backing classification.
     """
     resp = requests.get(f"{ORACLE_BASE}/tokens", timeout=10)
     resp.raise_for_status()
@@ -203,6 +283,117 @@ def fetch_markets() -> list:
                 "decimals": info.get("decimals") if isinstance(info, dict) else None,
             })
     return [m for m in markets if m["symbol"]]
+
+
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+def fetch_market_backing() -> dict:
+    """Classifies each base symbol as spot-backed ("buyable" — GMX
+    actually holds a real asset genuinely pegged to it in the market's
+    pool) vs synthetic-only (perp price exposure only — the pool
+    backing it has no real relationship to the traded asset at all,
+    e.g. GOLD/USD is backed by ETH+USDC, not gold).
+
+    CONFIRMED against the live endpoint: GET /markets returns a list of
+    {"name": "SOL/USD [SOL-USDC]", "indexToken": "0x2bcC...",
+    "longToken": "0x2bcC...", "shortToken": "0xaf88...", "isListed":
+    true, ...} per market.
+
+    Classification is based on the "name" field's own [pool] bracket,
+    NOT on comparing indexToken's address to longToken/shortToken's
+    address directly — that seemed like the obvious approach but is
+    WRONG for at least BTC: every BTC/USD market's indexToken is one
+    fixed oracle price-identifier address that doesn't literally equal
+    the ERC20 address of ANY of the real wrapped-BTC tokens that back
+    it (WBTC.b, tBTC) — GMX evidently tracks "the BTC price" as one
+    abstract identifier separate from whichever specific BTC-pegged
+    token happens to be pool collateral, so raw address equality
+    misclassifies genuinely spot-backed BTC pools as synthetic. GMX's
+    own display name doesn't have that problem: a symbol is treated as
+    buyable if the base symbol appears (case-insensitively, as a
+    substring — covers wrapped/staked variants like "WBTC.b" or
+    "wstETH") in either side of that market's own [long-short] pool
+    label. "BTC" appearing inside "WBTC.b" is exactly the signal we
+    want; two BTC markets backed by unrelated collateral (tBTC vs
+    USDG) get classified independently and correctly either way.
+
+    A single symbol can have SEVERAL markets/pools on GMX (SOL/USD
+    alone has SOL-USDC, WBTC.b-USDC, and USDG-USDG pools) — this treats
+    a symbol as buyable if ANY of its listed markets is spot-backed,
+    since that's enough for the real asset to be genuinely held
+    somewhere in GMX's liquidity.
+
+    Skips: unlisted markets (isListed: false — deprecated tickers) and
+    SWAP-ONLY entries (pure swap pools, no price feed, not a tradable
+    symbol at all — identifiable by the "SWAP-ONLY" name prefix or an
+    all-zero indexToken).
+
+    Returns {symbol: True/False}. Symbols that only ever appear as
+    SWAP-ONLY/unlisted never appear in the result at all — callers
+    should treat a missing key as "unknown", not "synthetic".
+    """
+    resp = requests.get(f"{ORACLE_BASE}/markets", timeout=10)
+    resp.raise_for_status()
+    markets = resp.json().get("markets", [])
+
+    buyable_symbols = set()
+    all_symbols = set()
+
+    for m in markets:
+        if not m.get("isListed", True):
+            continue
+        index_token = (m.get("indexToken") or "").lower()
+        name = m.get("name", "")
+        if index_token == ZERO_ADDRESS or name.startswith("SWAP-ONLY"):
+            continue  # pure swap pool — no price feed, not a symbol
+
+        if "/" not in name or "[" not in name or "]" not in name:
+            continue
+        base_symbol = name.split("/", 1)[0].strip()
+        if not base_symbol:
+            continue
+        all_symbols.add(base_symbol)
+
+        pool_label = name[name.find("[") + 1: name.find("]")]
+        pool_tokens = [t.strip().lower() for t in pool_label.split("-")]
+        if any(base_symbol.lower() in tok for tok in pool_tokens):
+            buyable_symbols.add(base_symbol)
+
+    return {symbol: (symbol in buyable_symbols) for symbol in all_symbols}
+
+
+def market_backing_cache_path(repo_root=None) -> Path:
+    return tensor_store.chart_data_path("_PLACEHOLDER_", "1d", repo_root).parent / "market_backing.json"
+
+
+def ensure_market_backing(max_age_days: int = 7, repo_root=None) -> dict:
+    """Loads the cached buyable/synthetic classification, refetching if
+    it's missing or older than max_age_days. Market backing composition
+    (which pools exist, what backs them) changes far slower than price
+    data — new markets get listed occasionally, existing ones almost
+    never change what backs them — so a multi-day cache is appropriate
+    here in a way it wouldn't be for candle data. Returns {} (meaning
+    "unknown for everything") on a fetch failure rather than raising,
+    so a GMX hiccup degrades to "no backing badges shown" instead of
+    crashing the chart server."""
+    path = market_backing_cache_path(repo_root)
+    if path.exists():
+        age_days = (time.time() - path.stat().st_mtime) / 86400
+        if age_days < max_age_days:
+            try:
+                return json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass  # fall through and refetch
+
+    try:
+        backing = fetch_market_backing()
+    except requests.RequestException:
+        return {}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(backing))
+    return backing
 
 
 def backfill(market: str, period: str, market_address: str = None) -> None:
