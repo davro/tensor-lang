@@ -1,8 +1,8 @@
 # TensorLang Handover Document
 
-**Last updated:** 2026-09-09
+**Last updated:** 2026-09-26
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (109/109). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Of the five compiler/runner limitations discovered while building `decision_boundary` (§13.3), four are now fixed upstream and hardware-verified (§15); the fifth uncovered a second, still-open issue in CUDA kernel dispatch for scalar broadcasting (§15.4). New app category `apps/games/` started (`tic_tac_toe` done; `2048` in progress). Building `2048`'s tensor-ops game engine (`step.tl`) surfaced and fixed four more real compiler bugs — two AST-inlining renaming gaps, one entirely missing CUDA kernel (`concat` axis=1), and one execution-ordering/priority bug in GPU-computed alias resolution — all hardware-verified; see §17.
+**Status:** Core language + test suite healthy (109/109). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Of the five compiler/runner limitations discovered while building `decision_boundary` (§13.3), four are now fixed upstream and hardware-verified (§15); the fifth uncovered a second, still-open issue in CUDA kernel dispatch for scalar broadcasting (§15.4). New app category `apps/games/` started (`tic_tac_toe` done; `2048` in progress). Building `2048`'s tensor-ops game engine (`step.tl`) surfaced and fixed four more real compiler bugs — two AST-inlining renaming gaps, one entirely missing CUDA kernel (`concat` axis=1), and one execution-ordering/priority bug in GPU-computed alias resolution — all hardware-verified; see §17. New (2026-09-26): a second physical GPU was added to the dev machine (2x GTX 1080 Ti); process-level ("Tier-A") multi-GPU pinning is now implemented for the test runner and single/app runs — see §18.
 
 ---
 
@@ -58,6 +58,7 @@ tensor-lang/
 │   ├── ast_builder.py
 │   ├── autograd.py
 │   ├── compiler.py
+│   ├── gpu.py                 # NEW (2026-09-26): GPU detection + CUDA_VISIBLE_DEVICES pinning, see §18
 │   ├── kernel_generator.py
 │   ├── tensor_lang.py         # Argument parsing etc.
 │   ├── tensor_verifier.py
@@ -66,6 +67,7 @@ tensor-lang/
 ├── tensorlang.lark            # Grammar
 ├── build.sh                   # Install / test / lint helper
 ├── tests/                     # 109 core language tests
+│   └── python/                # NEW (2026-09-26): plain-Python unittest suite (not .tl fixtures), see §18
 ├── apps/                      # User-facing applications
 │   ├── tlkit/                 # Shared toolkit for visual/interactive apps (new, 2026-09-04)
 │   │   ├── chunked_runner.py  # drives repeated `tensorlang.py --app` invocations
@@ -267,7 +269,7 @@ From README + recent experience:
 
 **Medium term**
 - Built-in optimisers (SGD, Adam) as language primitives
-- Real implementation of AppRunner requirement validation
+- Real implementation of AppRunner requirement validation — `tensorlang/gpu.py`'s `choose_device()` (added 2026-09-26, see §18) is ready to back this for the `requirements.gpus` field, but `AppRunner._validate_requirements()` still doesn't call it
 - Hot-reload in dev mode
 - Kernel fusion
 
@@ -796,4 +798,144 @@ future cleanup pass, alongside `apps/tlkit/`.
 
 ---
 
-*This handover assumes the state after the 2026-08-29 recovery, the 2026-09-03 test-runner/compiler-output fixes (§12), the 2026-09-04 `tlkit`/`decision_boundary` session (§13), the 2026-09-06 compiler fixes (§15), and the 2026-09-08/09 `2048` app + compiler-fix session (§17). Update the "Current Health" and add a new dated session section when major changes land.*
+## 18. Multi-GPU Tier-A Support: GPU Detection + Test-Runner Pinning (2026-09-26)
+
+A second GPU (GTX 1080 Ti) was added to the dev machine. Before touching
+anything, worth naming the two very different problems "multi-GPU" can
+mean here, because it decides everything else:
+
+- **Tier-A — process-level pinning.** Different independent processes
+  each get bound to a different physical device via `CUDA_VISIBLE_DEVICES`,
+  set *before* that process's first CUDA context is created. Cheap, no
+  changes to `compiler.py`'s execution engine, no cross-device data
+  movement.
+- **Tier-B — one program spanning both GPUs at once** (e.g. splitting a
+  single tensor/computation graph across devices). This needs
+  `compiler.py`'s `import pycuda.autoinit` (a process-wide singleton
+  context, bound once, un-switchable for that process's lifetime) replaced
+  with explicit multi-context device management, every `gpu_allocs[name]`
+  tagged with which device it lives on, and — since these 1080 Tis have no
+  NVLink — any cross-device tensor movement goes through host RAM via
+  staged copies, which is real overhead only worth paying for genuinely
+  data-parallel work, not for splitting one dependency graph.
+
+**This session implemented Tier-A only.** Tier-B is unstarted and is a
+materially bigger change to the execution engine — see the README's
+Future Work (Long Term) entry.
+
+### 18.1 New: `tensorlang/gpu.py`
+
+Deliberately kept separate from anything CUDA — it shells out to
+`nvidia-smi` and never imports `pycuda.driver`/`pycuda.autoinit`, so it's
+safe to call before any CUDA context exists in the process.
+
+- `detect_gpus()` — parses `nvidia-smi --query-gpu=... --format=csv`,
+  returns `[]` (never raises) if `nvidia-smi` is missing/times out/finds
+  nothing. `@lru_cache`d — device list doesn't change mid-run.
+- `pin_env(device_index, base_env=None)` — returns an env dict with
+  `CUDA_VISIBLE_DEVICES` set, for `subprocess.run(..., env=...)`.
+- `pin_current_process(device_index)` — sets `os.environ` directly, for
+  pinning the *current* process before it imports `pycuda.autoinit`
+  itself (used by single-file and `--app` runs, see 18.3).
+- `choose_device(requested_gpus=1, gpus=None)` — picks the
+  least-utilized detected device (falls back to most-free-memory on a
+  tie), so a GPU also driving the desktop (Xorg/gnome-shell) isn't
+  preferred over an idle compute-only card. Returns `(chosen_indices,
+  warning)`; `requested_gpus > 1` degrades to a single device with an
+  explanatory warning, since Tier-A can only ever hand one physical GPU
+  to one process. **Written to back `AppRunner._validate_requirements()`
+  for the `app.toml` `requirements.gpus` field — that wiring is not done
+  yet** (see §10 Medium Term / README Future Work).
+
+Unit-tested (mocked `detect_gpus`/`subprocess.run`, no GPU needed) in
+`tests/python/test_gpu.py` — a new, separate plain-`unittest` convention
+from the `.tl` fixture tests under `tests/`, since there's no compile/
+execute step for pure Python logic like `choose_device()`. Run with
+`python3 -m unittest discover -s tests/python -v`; not yet wired into
+`build.sh`.
+
+### 18.2 `test_runner.py`: round-robin pinning across subprocess tests
+
+Each `.tl` test already ran as its own `python3 tensorlang.py` subprocess
+(`run_single_test`), which turned out to be exactly what Tier-A needs —
+no restructuring required, just assign each subprocess a device:
+
+- `TestRunner.__init__` gained `gpu_pinning=True` and `fixed_gpu=None`.
+  `self.gpus = detect_gpus()` unless pinning is disabled.
+- `run_test_suite`'s parallel branch assigns `gpu_index` per submitted
+  test as `self.gpus[i % len(self.gpus)]["index"]` (round-robin by
+  submission order — static load-balancing, not tied to which worker
+  thread actually executes it) — or `self.fixed_gpu` for every test if
+  set, overriding round-robin.
+- `run_single_test` builds `subprocess_env = pin_env(gpu_index)` and
+  passes it to both `subprocess.run` call sites.
+- New CLI flags on `tensorlang.py`/`tensor_lang.py`: `--list-gpus` (print
+  detected devices, exit), `--gpu N` (pin everything — single-file, app,
+  or every test in `--test` mode — to physical device N), `--no-gpu-pinning`
+  (opt out of round-robin, unpinned as before this change).
+- `--gpu N` for single-file/app runs calls `gpu.pin_current_process(N)`
+  early in `tensorlang.py main()`, before `AppRunner`/`TensorCompiler` are
+  even constructed — this is early enough, since `compiler.py`'s
+  `pycuda.autoinit` import is lazy (only hit inside the actual execution
+  branch). App *tests* (`AppRunner`'s own internal `TestRunner(parallel=
+  False, ...)` call) inherit the pinning automatically: they spawn
+  subprocesses with `env=None`, which inherits the parent's already-
+  mutated `os.environ`.
+
+### 18.3 Measured results (2x GTX 1080 Ti, one also driving the desktop)
+
+First round of timing comparisons was confounded by background load (an
+IDE + a many-tabbed browser open on the same machine, competing with the
+8 parallel test-runner worker threads for CPU) — a naive `--gpu 1` vs
+default round-robin comparison briefly looked like round-robin was **2x
+slower**, which was alarming until traced: the round-robin code path was
+verified byte-identical to an earlier run that had shown a slight
+improvement, so the regression was environmental, not code. Re-run on a
+quiet system:
+
+| Config | Real time (109 tests) |
+|---|---|
+| `--gpu 1` (everything on one card) | ~48.8s |
+| default (round-robin both cards) | ~46.1s |
+
+**Round-robin is real but modest — roughly 5-6% faster, not close to
+linear with GPU count.** Root cause: this test suite's tensors are small
+enough that per-test wall time is dominated by fixed process overhead
+(Python interpreter startup, imports, `pycuda.autoinit`'s CUDA context
+creation) rather than actual kernel execution — none of which shrinks by
+adding a second physical GPU. Across every run this session, `user` time
+sat around 3m50s-3m55s against `real` times of 45-51s — roughly 4.6-5x
+observed parallelism out of a possible 8x (`jobs=8`), indicating the
+suite was already close to CPU-core-bound, independent of GPU count.
+
+**Where Tier-A should actually pay off** is heavier, longer-running,
+genuinely concurrent GPU work — e.g. two independent app benchmarks or
+backtests running side by side, one process pinned per card — not this
+fast correctness suite. Not yet measured this session; suggested next
+step below.
+
+### 18.4 Suggested Next Actions
+
+1. Wire `gpu.choose_device()` into `AppRunner._validate_requirements()`
+   so `app.toml`'s `requirements.gpus` actually does something (currently
+   purely cosmetic — see `apps/trading/gmx_charts/app.toml`'s `gpus = 1`).
+   Likely also needs a small `app.toml` schema addition (e.g. an explicit
+   `device =`/`strategy =` under a new `[gpu]` table) for cases where an
+   app wants a specific card rather than "least utilized."
+2. Measure Tier-A's real payoff on a heavier, sustained-compute workload
+   — e.g. two concurrent `python3 tensorlang.py --app trading/gmx_charts
+   --benchmark --gpu 0` / `--gpu 1` runs — rather than the small/fast core
+   test suite, which this session's numbers show is overhead-bound, not
+   GPU-bound.
+3. If/when a workload genuinely needs Tier-B (one program, both GPUs at
+   once — e.g. splitting a large backtest tensor), that's a materially
+   bigger change: replacing `pycuda.autoinit` with explicit multi-context
+   management in `compiler.py`, tagging `gpu_allocs[name]` by device, and
+   accepting host-RAM-staged cross-device copies (no NVLink on these
+   cards). Not started; not recommended until a concrete workload
+   actually needs it, since Tier-A already covers "run N independent
+   things across N GPUs," which is most of what was asked for.
+
+---
+
+*This handover assumes the state after the 2026-08-29 recovery, the 2026-09-03 test-runner/compiler-output fixes (§12), the 2026-09-04 `tlkit`/`decision_boundary` session (§13), the 2026-09-06 compiler fixes (§15), the 2026-09-08/09 `2048` app + compiler-fix session (§17), and the 2026-09-26 Tier-A multi-GPU session (§18). Update the "Current Health" and add a new dated session section when major changes land.*

@@ -20,6 +20,8 @@ except ImportError:
     print ("TensorVerifier failed to find class")
     TensorVerifier = None
 
+from tensorlang.gpu import detect_gpus, pin_env
+
 # ================================================================
 #                    ANSI Color Codes
 # ================================================================
@@ -29,7 +31,8 @@ YELLOW = "33"
 CYAN = "36"
 
 class TestRunner:
-    def __init__(self, parallel=True, jobs=None, verify_tensors=False, debug_mode=False, tests_dir=None):
+    def __init__(self, parallel=True, jobs=None, verify_tensors=False, debug_mode=False,
+                 tests_dir=None, gpu_pinning=True, fixed_gpu=None):
         self.parallel = parallel
         self.jobs = jobs
         self.verify_tensors = verify_tensors
@@ -39,6 +42,21 @@ class TestRunner:
         # (e.g. "apps/examples/hello_mlp/tests") so app tests are found
         # instead of the core language suite.
         self.tests_dir = tests_dir or "tests"
+
+        # fixed_gpu (from --gpu N) pins every test subprocess to one
+        # physical device, overriding round-robin. Useful for isolated
+        # A/B comparisons — e.g. "everything on GPU1" vs "split across
+        # GPU0/GPU1" — without one run's GPU0 desktop-display contention
+        # confounding the comparison.
+        self.fixed_gpu = fixed_gpu
+
+        # Tier-A multi-GPU: each test already runs as its own subprocess
+        # (see run_single_test), so with 2+ GPUs detected we round-robin
+        # CUDA_VISIBLE_DEVICES across them — every worker still only ever
+        # sees a single (masked) device, so pycuda.autoinit in the child
+        # needs no changes at all. gpu_pinning=False (or no GPUs detected)
+        # runs everything unpinned, exactly as before.
+        self.gpus = detect_gpus() if (gpu_pinning or fixed_gpu is not None) else []
     
     def color(self, text, code):
         """Apply ANSI color to text."""
@@ -70,13 +88,20 @@ class TestRunner:
             return False
         return bool(re.search(r"//\s*@EXPECT_FAILURE\b", content))
 
-    def run_single_test(self, test_file, suite_start_time=None):
+    def run_single_test(self, test_file, suite_start_time=None, gpu_index=None):
         """Run a single test and verify results using .npy files.
-        
+
+        gpu_index: if set, the subprocess is launched with
+        CUDA_VISIBLE_DEVICES pinned to this physical device index
+        (Tier-A pinning — see tensorlang/gpu.py). None means unpinned,
+        i.e. the subprocess sees whatever the parent's environment
+        already exposes.
+
         Returns tuple: (test_file, success, timing_str, failure_reason, report_data)
         """
         original_dir = os.getcwd()
-        
+        subprocess_env = pin_env(gpu_index) if gpu_index is not None else None
+
         try:
             test_start_abs = time.time()
             
@@ -99,7 +124,8 @@ class TestRunner:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     check=False,
-                    text=True
+                    text=True,
+                    env=subprocess_env
                 )
                 test_end_abs = time.time()
                 duration = test_end_abs - test_start_abs
@@ -132,11 +158,12 @@ class TestRunner:
                 cmd.append("--debug")
             
             process = subprocess.run(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                check=False, 
-                text=True
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                text=True,
+                env=subprocess_env
             )
             
             test_end_abs = time.time()
@@ -223,25 +250,53 @@ class TestRunner:
         results = []
         
         if not self.parallel:
-            print(self.color(f"Running {len(test_files)} tests sequentially{verify_note}...\n", CYAN))
+            gpu_note = f" [pinned to GPU{self.fixed_gpu}]" if self.fixed_gpu is not None else ""
+            print(self.color(f"Running {len(test_files)} tests sequentially{verify_note}{gpu_note}...\n", CYAN))
             for test_file in test_files:
-                test_result = self.run_single_test(test_file, suite_start_time=None)
+                test_result = self.run_single_test(
+                    test_file, suite_start_time=None, gpu_index=self.fixed_gpu
+                )
                 results.append(test_result)
         else:
             worker_jobs = self.jobs or min(len(test_files), os.cpu_count() or 4)
-            print(self.color(f"Running {len(test_files)} tests in parallel (jobs={worker_jobs}){verify_note}...\n", CYAN))
+
+            gpu_note = ""
+            if self.fixed_gpu is not None:
+                known = {g["index"] for g in self.gpus}
+                if self.gpus and self.fixed_gpu not in known:
+                    print(self.color(
+                        f"Warning: --gpu {self.fixed_gpu} not among detected GPUs "
+                        f"({sorted(known)}); proceeding anyway.", YELLOW
+                    ))
+                gpu_note = f" [all tests pinned to GPU{self.fixed_gpu}]"
+            elif self.gpus:
+                gpu_names = ", ".join(f"GPU{g['index']}:{g['name']}" for g in self.gpus)
+                gpu_note = f" [pinning round-robin across {len(self.gpus)} GPU(s): {gpu_names}]"
+
+            print(self.color(
+                f"Running {len(test_files)} tests in parallel (jobs={worker_jobs}){verify_note}{gpu_note}...\n",
+                CYAN
+            ))
 
             suite_start_time_parallel = time.time()
 
             with ThreadPoolExecutor(max_workers=worker_jobs) as executor:
 
+                def _gpu_for(i):
+                    if self.fixed_gpu is not None:
+                        return self.fixed_gpu
+                    if self.gpus:
+                        return self.gpus[i % len(self.gpus)]["index"]
+                    return None
+
                 future_to_test = {
                     executor.submit(
-                        self.run_single_test, 
+                        self.run_single_test,
                         test,
-                        suite_start_time=suite_start_time_parallel
-                    ): test 
-                    for test in test_files
+                        suite_start_time=suite_start_time_parallel,
+                        gpu_index=_gpu_for(i)
+                    ): test
+                    for i, test in enumerate(test_files)
                 }
 
                 iterator = as_completed(future_to_test)

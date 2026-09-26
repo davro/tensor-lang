@@ -148,6 +148,25 @@ Examples:
             help="Number of parallel jobs for tests"
         )
         parser.add_argument(
+            "--no-gpu-pinning",
+            action="store_true",
+            help="Disable round-robin CUDA_VISIBLE_DEVICES pinning across detected GPUs in parallel test runs"
+        )
+        parser.add_argument(
+            "--gpu",
+            type=int,
+            default=None,
+            metavar="N",
+            help="Pin execution to a single physical GPU index (sets CUDA_VISIBLE_DEVICES "
+                 "before any CUDA context is created). In --test mode this overrides "
+                 "round-robin pinning and pins every test subprocess to GPU N instead."
+        )
+        parser.add_argument(
+            "--list-gpus",
+            action="store_true",
+            help="List detected NVIDIA GPUs (via nvidia-smi) and exit"
+        )
+        parser.add_argument(
             "--filter",
             type=str,
             default=None,

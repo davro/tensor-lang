@@ -5,12 +5,37 @@ from tensorlang.tensor_lang import TensorLang
 from tensorlang.compiler import TensorCompiler
 from tensorlang.test_runner import TestRunner
 from tensorlang.app_runner import AppRunner
+from tensorlang.gpu import detect_gpus, pin_current_process
 
 def main():
     tensorlang = TensorLang()
     args = tensorlang.parse_arguments()
 
     try:
+        if getattr(args, 'gpu', None) is not None:
+            available = detect_gpus()
+            if available and args.gpu not in {g['index'] for g in available}:
+                print(f"Warning: --gpu {args.gpu} not among detected GPUs "
+                      f"({sorted(g['index'] for g in available)}); proceeding anyway.")
+            # Must happen before the first `import pycuda.autoinit` inside
+            # compiler.py's execution path — that import creates a CUDA
+            # context bound to whatever CUDA_VISIBLE_DEVICES says at that
+            # moment, and the binding can't be changed for the rest of
+            # this process's lifetime.
+            pin_current_process(args.gpu)
+
+        if getattr(args, 'list_gpus', False):
+            gpus = detect_gpus()
+            if not gpus:
+                print("No NVIDIA GPUs detected (is nvidia-smi installed and on PATH?)")
+            else:
+                print(f"Detected {len(gpus)} GPU(s):")
+                for g in gpus:
+                    print(f"  [{g['index']}] {g['name']}  "
+                          f"{g['memory_free_mb']}/{g['memory_total_mb']} MB free  "
+                          f"util={g['utilization_pct']}%")
+            sys.exit(0)
+
         # App Mode: Run applications from apps/ directory
         if getattr(args, 'app', None) or getattr(args, 'list_apps', False):
             runner = AppRunner(
@@ -39,7 +64,9 @@ def main():
                 parallel=not args.no_parallel,
                 jobs=args.jobs,
                 verify_tensors=args.verify_tensors,
-                debug_mode=args.debug
+                debug_mode=args.debug,
+                gpu_pinning=not getattr(args, 'no_gpu_pinning', False),
+                fixed_gpu=getattr(args, 'gpu', None)
             )
 
             # Determine which tests to run

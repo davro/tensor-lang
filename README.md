@@ -381,6 +381,35 @@ source build.sh --debug FILE.tl        # compile a single file with debug output
 source build.sh --clean                # wipe cache/ only
 ```
 
+### Multi-GPU Test Execution
+
+On a machine with more than one NVIDIA GPU, the parallel test suite (each
+`.tl` test already runs as its own `python3 tensorlang.py` subprocess)
+round-robins `CUDA_VISIBLE_DEVICES` across the detected devices, so tests
+are split across cards instead of all contending for one:
+
+```
+python3 tensorlang.py --list-gpus        # see what's detected
+python3 tensorlang.py --test             # round-robins across all detected GPUs
+python3 tensorlang.py --test --gpu 1     # pin every test to a single GPU (index 1)
+python3 tensorlang.py --test --no-gpu-pinning   # disable pinning, run unpinned as before
+```
+
+This is process-level pinning (one physical GPU per subprocess) — no
+cross-device copies, no NVLink requirement, and it degrades to a no-op on
+a single-GPU machine or a CI box with no GPU at all (`detect_gpus()`
+returns `[]` and everything runs exactly as it did before this existed).
+It does **not** let a single running program span multiple GPUs at once
+— see [Future Work](#future-work) for that (Tier-B).
+
+In practice, on a small/fast test suite like this one, most of the
+per-test wall time is fixed process overhead (interpreter startup,
+imports, CUDA context creation) rather than actual kernel execution, so
+expect a modest improvement (single-digit percent) from pinning here, not
+a linear speedup with GPU count — the real payoff shows up on heavier,
+longer-running, genuinely concurrent GPU workloads (e.g. running
+independent app benchmarks or backtests side by side, one per card).
+
 **Test Coverage:**
 
 * **Basic Operations**: Element-wise arithmetic, matrix multiplication
@@ -600,10 +629,11 @@ See `apps/README.md` for how apps are structured and discovered.
 * **Custom Functions Inside Loops**: User-defined functions callable within `for` loop bodies
 * **Memory Optimisation**: Buffer pooling and reuse strategies for long training runs
 * **Nested Loops**: Inner loops for mini-batch iteration inside an epoch loop
+* **`app.toml` GPU allocation**: `requirements.gpus` is currently cosmetic (display-only) — `tensorlang/gpu.py`'s `choose_device()` is ready to back a real `AppRunner._validate_requirements()` implementation, but that wiring isn't done yet
 
 ### Long Term
 
-* **Multi-GPU**: Distributed tensor operations across multiple devices
+* **Multi-GPU (Tier-B)**: a *single* program spanning multiple devices at once (splitting one computation graph's tensors across GPUs, with cross-device copies/peer access) — distinct from the process-level GPU pinning already implemented for the test runner (see [Multi-GPU Test Execution](#multi-gpu-test-execution)), which assigns one whole program to one whole GPU
 * **Mixed Precision**: FP16/FP32 automatic casting for memory efficiency
 * **MLIR Integration**: Leverage compiler infrastructure for portable backend targeting
 * **Hardware Backends**: Support for ROCm, Metal, and other accelerators
