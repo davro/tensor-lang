@@ -190,6 +190,16 @@ Examples:
             help="Run app in benchmark mode"
         )
         parser.add_argument(
+            "--step",
+            type=str,
+            default=None,
+            metavar="NAME",
+            help="Run a single named entry from the app's [entry_points] table "
+                 "directly, instead of the app's default action (e.g. --step reset, "
+                 "--step play). Works for both .tl entries (compiled/executed) and "
+                 ".py tool-script entries (run as a subprocess)."
+        )
+        parser.add_argument(
             "--app-args",
             nargs="*",
             help="Arguments to pass to the application"
@@ -203,6 +213,9 @@ Examples:
         
         if (args.dev or args.benchmark) and not args.app:
             parser.error("--dev and --benchmark require --app")
+
+        if args.step and not args.app:
+            parser.error("--step requires --app")
         
         if args.app_args and not args.app:
             parser.error("--app-args requires --app")

@@ -41,9 +41,28 @@ def cache_dir_for(app_category_path: str, repo_root: Optional[Path] = None) -> P
     return repo_root / "cache" / "apps" / app_category_path / "main.tl"
 
 
-def run_one(app_category_path: str, repo_root: Optional[Path] = None) -> subprocess.CompletedProcess:
-    """Invoke `python3 tensorlang.py --app <app_category_path>` once, raising
-    with the captured output if the process itself crashed (nonzero exit).
+def run_one(
+    app_category_path: str,
+    repo_root: Optional[Path] = None,
+    step: str = "main",
+) -> subprocess.CompletedProcess:
+    """Invoke `python3 tensorlang.py --app <app_category_path> --step <step>`
+    once, raising with the captured output if the process itself crashed
+    (nonzero exit).
+
+    IMPORTANT: this always passes an explicit `--step` (default "main"),
+    never a bare `--app <path>`. If the target app declares an
+    `app_runner.py` `[lifecycle]` table, a bare `--app` call runs that
+    app's *whole* default pipeline, not just its `main` entry — and if
+    that pipeline's own `train` step is what got us into this chunked
+    runner in the first place, a bare call here would re-trigger the
+    entire pipeline from inside itself, recursively, once per chunk. That
+    is a fork bomb, not a slow bug: each chunk spawns another full
+    pipeline (including another 40-chunk chained call to this same
+    function), each opening its own CUDA context, and it will make the
+    machine unresponsive long before it errors out on its own. Always go
+    through `--step`, which runs exactly the one named entry_points
+    target and nothing else.
 
     Note: a 0 exit code does NOT guarantee the compile/run actually
     succeeded — app_runner.py calls compiler.compile_and_execute()
@@ -55,7 +74,7 @@ def run_one(app_category_path: str, repo_root: Optional[Path] = None) -> subproc
     """
     repo_root = repo_root or find_repo_root()
     result = subprocess.run(
-        [sys.executable, "tensorlang.py", "--app", app_category_path],
+        [sys.executable, "tensorlang.py", "--app", app_category_path, "--step", step],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -63,7 +82,9 @@ def run_one(app_category_path: str, repo_root: Optional[Path] = None) -> subproc
     if result.returncode != 0:
         print(result.stdout)
         print(result.stderr)
-        raise RuntimeError(f"tensorlang.py --app {app_category_path} failed — see output above")
+        raise RuntimeError(
+            f"tensorlang.py --app {app_category_path} --step {step} failed — see output above"
+        )
     return result
 
 
@@ -73,6 +94,7 @@ def run_chunks(
     collect_fn: Callable[[Path], np.ndarray],
     repo_root: Optional[Path] = None,
     progress_fn: Optional[Callable[[int, int], Optional[str]]] = None,
+    step: str = "main",
 ) -> np.ndarray:
     """Run `app_category_path` n_chunks times. After each run, calls
     collect_fn(repo_root) to pull that chunk's frame — typically a
@@ -81,11 +103,16 @@ def run_chunks(
 
     progress_fn(chunk_index, n_chunks) -> optional string to print after
     each chunk; if omitted, a plain "chunk i/n" line is printed instead.
+
+    `step` is passed straight through to run_one() — see its docstring
+    for why this must always be an explicit entry_points name, never a
+    bare `--app` call, for any app that declares an app_runner.py
+    `[lifecycle]` table.
     """
     repo_root = repo_root or find_repo_root()
     frames = []
     for chunk in range(n_chunks):
-        result = run_one(app_category_path, repo_root)
+        result = run_one(app_category_path, repo_root, step=step)
         try:
             frames.append(collect_fn(repo_root))
         except Exception as e:

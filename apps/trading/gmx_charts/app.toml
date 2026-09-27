@@ -6,5 +6,13 @@ description = "GMX-native chart data + composite trading signal: SMA(10/30) cros
 gpus = 1
 memory_gb = 2
 
+# Optional: pin to a specific physical device instead of the default
+# "least utilized" pick from tensorlang/gpu.py's choose_device(). Left
+# unset here on purpose — this machine's two 1080 Tis are asymmetric
+# (one also drives the desktop), and least-utilized is exactly the
+# behaviour we want for a benchmark run.
+# [gpu]
+# device = 1
+
 [entry_points]
 main = "indicators.tl"

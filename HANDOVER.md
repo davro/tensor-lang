@@ -194,9 +194,11 @@ This is the canonical "hello world" for the app system.
 
 Run it:
 ```bash
-./apps/examples/decision_boundary/run.sh          # installs pygame if missing, trains, plays back
-./apps/examples/decision_boundary/run.sh --reset  # wipe weights and start fresh
+python3 tensorlang.py --app examples/decision_boundary          # installs pygame if missing, trains, plays back
+python3 tensorlang.py --app examples/decision_boundary --step reset  # wipe weights and start fresh
 ```
+
+(Originally a `run.sh` script; folded into the `--app`/`--step`/`[lifecycle]` app-runner machinery instead.)
 
 ---
 

@@ -41,7 +41,8 @@ def main():
             runner = AppRunner(
                 debug_mode=args.debug,
                 cache_layers=args.cache_layers,
-                verify_tensors=args.verify_tensors
+                verify_tensors=args.verify_tensors,
+                fixed_gpu=getattr(args, 'gpu', None)
             )
 
             if getattr(args, 'list_apps', False):
@@ -55,6 +56,7 @@ def main():
                 test_filter=getattr(args, 'filter', None),
                 dev_mode=getattr(args, 'dev', False),
                 benchmark=getattr(args, 'benchmark', False),
+                step=getattr(args, 'step', None),
                 app_args=getattr(args, 'app_args', None)
             )
 

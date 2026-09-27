@@ -5,6 +5,25 @@ description = "2-8-1 tanh/sigmoid MLP trained on XOR; snapshots the decision bou
 [requirements]
 gpus = 1
 memory_gb = 4
+packages = ["pygame"]  # tools/viewer.py's playback; auto-installed if missing
 
 [entry_points]
-main = "main.tl"
+main = "main.tl"           # invoked repeatedly, as a chunked subprocess, by
+                            # entry_points.train below — not meant to be run
+                            # directly via `--app`/`--step main` on a fresh
+                            # checkout, since it load()s weights a prior chunk
+                            # must have already written.
+reset = "tools/init_state.py"        # fresh random weights + eval grid + meta.json
+train = "tools/train_and_snapshot.py"  # drives 40 chunked tensorlang.py runs,
+                                        # collecting one decision-boundary
+                                        # snapshot per chunk
+play = "tools/viewer.py"             # pygame playback of the collected snapshots
+
+[lifecycle]
+# What bare `--app examples/decision_boundary` (no flags) does, in order —
+# the declarative equivalent of run.sh. reset_if_missing only runs `reset`
+# when state_marker isn't there yet; `train` always runs on top of whatever
+# weights currently exist (mirrors run.sh always re-training on top of
+# existing/fresh state, not skipping it like tic_tac_toe's run.sh does).
+default = ["reset_if_missing", "train", "play"]
+state_marker = "cache/apps/examples/decision_boundary/main.tl/weights"
