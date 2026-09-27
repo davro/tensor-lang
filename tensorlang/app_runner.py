@@ -15,7 +15,7 @@ from tensorlang.gpu import choose_device, pin_current_process, detect_gpus
 
 # Set in this process's environment (and therefore inherited by every
 # subprocess it spawns) for the duration of a [lifecycle] pipeline run.
-# See _run_lifecycle for why this exists: it's a tripwire against a
+# See _run_named_lifecycle for why this exists: it's a tripwire against a
 # nested `tensorlang.py --app <name>` call (with no --step) re-triggering
 # the whole pipeline from inside one of its own steps — unbounded
 # recursive subprocess spawning, each opening its own CUDA context, which
@@ -166,7 +166,16 @@ class AppRunner:
         elif dev_mode:
             self._run_dev_mode(full_path, config, app_args)
         elif step:
-            self._run_entry_point(full_path, config, step, app_args)
+            lifecycle = config.get('lifecycle', {})
+            pipeline = lifecycle.get(step)
+            if isinstance(pipeline, list):
+                # A named [lifecycle] pipeline (e.g. 2048's `train`, which
+                # does its own "generate data / init weights if missing"
+                # guards before its train entry) rather than a single
+                # entry_points target.
+                self._run_named_lifecycle(full_path, config, pipeline, app_args)
+            else:
+                self._run_entry_point(full_path, config, step, app_args)
         else:
             self._run_app_normal(full_path, config, app_args)
 
@@ -284,15 +293,15 @@ class AppRunner:
     def _run_app_normal(self, app_path: Path, config: Dict[str, Any], app_args: Optional[List[str]]):
         """Run app in normal mode (bare `--app <name>`, no flags).
 
-        If the app declares a `[lifecycle]` table, that's now the source
-        of truth for what "just run it" means — see `_run_lifecycle`.
-        Apps without one (hello_mlp, linear_regression, tic_tac_toe as of
-        this writing) keep the original single-`.tl`-file behavior
-        unchanged.
+        If the app declares a `[lifecycle] default` pipeline, that's now
+        the source of truth for what "just run it" means — see
+        `_run_named_lifecycle`. Apps without one (hello_mlp,
+        linear_regression, tic_tac_toe as of this writing) keep the
+        original single-`.tl`-file behavior unchanged.
         """
         lifecycle = config.get('lifecycle')
         if lifecycle and lifecycle.get('default'):
-            self._run_lifecycle(app_path, config, lifecycle)
+            self._run_named_lifecycle(app_path, config, lifecycle['default'], app_args)
             return
 
         entry_points = config.get('entry_points', {})
@@ -347,7 +356,7 @@ class AppRunner:
         """Dispatch a single named `[entry_points]` entry by file type.
 
         This is what `--step <name>` calls directly, and what
-        `_run_lifecycle` calls once per pipeline step. A `.tl` entry runs
+        `_run_named_lifecycle` calls once per pipeline step. A `.tl` entry runs
         through the compiler exactly like `main` always has. Anything
         else — the `.py` tool scripts that run.sh files were shelling out
         to (reset/train/play/generate_data/promote/rollback, depending on
@@ -377,49 +386,91 @@ class AppRunner:
             print(f"\nStep '{entry_name}' failed (exit {result.returncode}).")
             sys.exit(result.returncode)
 
-    def _lifecycle_state_exists(self, lifecycle: Dict[str, Any]) -> bool:
-        """Whether `[lifecycle] state_marker` indicates the app has
-        already been initialized — mirrors run.sh patterns like
-        `[[ -d "$WEIGHTS_DIR" ]]` / `[[ -n "$(ls -A "$WEIGHTS_DIR")" ]]`.
-        `state_marker` is resolved relative to the repo root (matching
-        cache paths like `cache/apps/<app>/main.tl/weights`, which live
-        outside the app's own directory), not relative to the app dir.
+    def _resolve_marker_path(self, app_path: Path, marker: str) -> Path:
+        """A `[lifecycle]` state marker starting with `cache/` is always
+        repo-root-relative (that's where every `.tl` file's load()/save()
+        scratch space lives — see tensorlang/compiler.py). Anything else
+        is resolved relative to the app's own directory, matching how
+        `entry_points` paths like "data/boards.npy" are already resolved
+        — since the state a tool script tracks can live in either place
+        depending on the app (decision_boundary's trained weights are
+        cache/ scratch; 2048's generated training data lives inside its
+        own app dir).
         """
-        marker = lifecycle.get('state_marker')
-        if not marker:
-            return False
-        marker_path = Path(marker)
+        if marker.startswith("cache/"):
+            return Path(marker)
+        return app_path / marker
+
+    def _marker_populated(self, marker_path: Path) -> bool:
+        """Whether a state marker indicates its state is already there —
+        mirrors run.sh patterns like `[[ -f "$APP_DIR/data/boards.npy" ]]`
+        / `[[ -n "$(ls -A "$WEIGHTS_DIR")" ]]`."""
         if not marker_path.exists():
             return False
         if marker_path.is_dir():
             return any(marker_path.iterdir())
         return True
 
-    def _run_lifecycle(self, app_path: Path, config: Dict[str, Any], lifecycle: Dict[str, Any]):
-        """Run app.toml's `[lifecycle] default` pipeline — the declarative
-        replacement for a run.sh's "check state, maybe init, train, play"
-        sequence for apps whose default action is more than one `.tl`
-        file. Each step is an `entry_points` name; suffix a step with
-        `_if_missing` (e.g. `reset_if_missing`) to only run it when
-        `state_marker` isn't yet populated, otherwise it always runs.
+    @staticmethod
+    def _parse_lifecycle_step(step: str, lifecycle: Dict[str, Any]):
+        """Parse one `[lifecycle]` pipeline step into (entry_name,
+        marker_or_None); marker is None for a step that always runs.
+
+        A step is either a plain `entry_points` name, or
+        `<name>_if_missing` / `<name>_if_missing:<marker>` to only run it
+        when `<marker>` isn't populated yet. With no inline `:<marker>`,
+        falls back to this lifecycle table's own top-level `state_marker`
+        (decision_boundary's style — one shared marker for a whole,
+        single-state-check pipeline). The inline form lets one pipeline
+        guard several independent pieces of state with different markers
+        (e.g. 2048's `train` pipeline: training data and initial weights
+        are unrelated files, checked separately).
+        """
+        if ':' in step:
+            head, marker = step.split(':', 1)
+        else:
+            head, marker = step, None
+
+        if head.endswith('_if_missing'):
+            entry_name = head[: -len('_if_missing')]
+            if marker is None:
+                marker = lifecycle.get('state_marker')
+            return entry_name, marker
+
+        return step, None
+
+    def _run_named_lifecycle(
+        self,
+        app_path: Path,
+        config: Dict[str, Any],
+        steps: List[str],
+        app_args: Optional[List[str]] = None,
+    ):
+        """Run an ordered list of `entry_points` names as one pipeline —
+        either app.toml's `[lifecycle] default` (bare `--app <name>`) or
+        any other named `[lifecycle]` pipeline invoked via `--step <name>`
+        (e.g. 2048's `train` pipeline, which does its own "generate data /
+        init weights only if missing" guards before its `train` entry,
+        the same way run.sh's `--train` did). See `_parse_lifecycle_step`
+        for the step-name syntax.
 
         Guarded against a very specific, very bad failure mode: a step's
         tool script (e.g. a chunked trainer) shelling back into
         `tensorlang.py --app <this app>` with no `--step` would re-enter
         this exact method from inside itself — and since that nested call
-        runs the *whole* pipeline again, including this same step, it
-        recurses without bound, forking a new CUDA-context-holding
-        process at every level. That's not a bug that fails loudly; it's
-        one that can make the machine unresponsive first. So the first
-        thing this method does is check (and set) an env var that every
-        subprocess it spawns inherits, and refuses outright if it's
-        already set.
+        runs a whole pipeline again, potentially including this same
+        step, it can recurse without bound, forking a new
+        CUDA-context-holding process at every level. That's not a bug
+        that fails loudly; it's one that can make the machine
+        unresponsive first. So the first thing this method does is check
+        (and set) an env var that every subprocess it spawns inherits,
+        and refuses outright if it's already set.
         """
         if os.environ.get(_LIFECYCLE_ACTIVE_ENV):
             print(
                 "Error: a [lifecycle] step tried to invoke `tensorlang.py --app "
                 f"{app_path.name}` again from inside its own pipeline (no --step "
-                "given). That would re-run the whole pipeline recursively — likely "
+                "given). That would re-run a whole pipeline recursively — likely "
                 "a tool script that needs to pass an explicit --step (e.g. "
                 "'--step main') instead of a bare --app call. Refusing to recurse."
             )
@@ -427,19 +478,15 @@ class AppRunner:
 
         os.environ[_LIFECYCLE_ACTIVE_ENV] = "1"
         try:
-            steps = lifecycle.get('default', [])
-            state_ready = self._lifecycle_state_exists(lifecycle)
-
+            lifecycle = config.get('lifecycle', {})
             for step in steps:
-                if step.endswith('_if_missing'):
-                    entry_name = step[: -len('_if_missing')]
-                    if state_ready:
-                        print(f"== existing state found ({lifecycle.get('state_marker')}); "
-                              f"skipping '{entry_name}' ==")
+                entry_name, marker = self._parse_lifecycle_step(step, lifecycle)
+                if marker is not None:
+                    marker_path = self._resolve_marker_path(app_path, marker)
+                    if self._marker_populated(marker_path):
+                        print(f"== existing state found ({marker}); skipping '{entry_name}' ==")
                         continue
-                else:
-                    entry_name = step
-                self._run_entry_point(app_path, config, entry_name)
+                self._run_entry_point(app_path, config, entry_name, app_args)
         finally:
             os.environ.pop(_LIFECYCLE_ACTIVE_ENV, None)
 

@@ -1,0 +1,36 @@
+[app]
+name = "2048"
+description = "2048: tensor-arithmetic engine (step.tl/step_*.tl), a trained move-picking network (train.tl), and a pygame UI"
+
+[requirements]
+gpus = 1
+memory_gb = 2
+packages = ["pygame"]  # tools/play.py's interactive UI; auto-installed if missing
+
+[entry_points]
+board    = "tools/make_test_board.py"  # writes a board (built-in, or --app-args <16 numbers>)
+main     = "step.tl"                   # engine smoke test: one step.tl compile+execute on
+                                        # whatever board was last written by `board`
+gen_data = "tools/generate_data.py"    # expectimax-labeled training data -> data/boards.npy
+reset    = "tools/init_weights.py"     # fresh random weights (scratch, under cache/)
+train    = "train.tl"                  # trains the move-picking network (single run, not chunked)
+promote  = "tools/promote_weights.py"  # cache/ scratch weights -> tracked weights/ (backs up old)
+rollback = "tools/rollback_weights.py" # swap weights/ <-> weights/.previous/
+play     = "tools/play.py"             # interactive pygame UI (arrow keys/WASD; B to watch the AI)
+
+[lifecycle]
+# Bare `--app games/2048` (optionally with `--app-args <16 numbers>`):
+# write a test board (built-in, or the given one), then smoke-test the
+# engine on it. Matches run.sh's default / `--board N N ...` behavior —
+# those were always the same action, just with an optional custom board.
+default = ["board", "main"]
+
+# `--step train`: generate training data / init weights only if missing
+# (mirrors run.sh --train's own guards — each on its own marker, since
+# they're unrelated pieces of state), then always train on top of
+# whatever's currently there.
+train = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/2048/train.tl/weights",
+    "train",
+]
