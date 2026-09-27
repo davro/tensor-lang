@@ -187,15 +187,18 @@ recursive itself, rather than the current single hard-coded expansion pass
 in `build_ast()` — a bigger, riskier change I deliberately didn't attempt
 blind.
 
-## run.sh
+## Running it
 
-`run.sh` mirrors `tic_tac_toe/run.sh`'s interface:
+Migrated off its original `run.sh` onto the `tensorlang.py --app`/`--step`
+runner (see HANDOVER.md's app-runner migration notes):
 
 ```
-./apps/games/2048/run.sh                 # smoke-test step.tl on a built-in tricky board
-./apps/games/2048/run.sh --board N N ... # smoke-test on a custom board (16 numbers, row-major)
-./apps/games/2048/run.sh --play          # launch the interactive pygame UI
-./apps/games/2048/run.sh --train         # generate training data (if missing) and train the network
+python3 tensorlang.py --app games/2048                     # smoke-test step.tl on a built-in tricky board
+python3 tensorlang.py --app games/2048 --app-args N N ...   # smoke-test on a custom board (16 numbers, row-major)
+python3 tensorlang.py --app games/2048 --step play          # launch the interactive pygame UI
+python3 tensorlang.py --app games/2048 --step train         # generate training data (if missing), init weights (if missing), train
+python3 tensorlang.py --app games/2048 --step promote       # promote a --step train run into weights/ that --step play's AI uses
+python3 tensorlang.py --app games/2048 --step rollback      # undo the last promote
 ```
 
 ## The trained move-picking network
@@ -343,7 +346,7 @@ python3 check.py apps/games/2048/step.tl
 python3 verify.py
 
 # real run, on your GPU:
-./apps/games/2048/run.sh --board 4 2 2 0 0 0 0 0 0 0 0 0 0 0 0 0
+python3 tensorlang.py --app games/2048 --app-args 4 2 2 0 0 0 0 0 0 0 0 0 0 0 0 0
 ```
 
 Confirmed working end-to-end on real GPU hardware:
