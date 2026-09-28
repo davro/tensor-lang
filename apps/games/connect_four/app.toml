@@ -1,0 +1,58 @@
+[app]
+name = "connect_four"
+description = "Connect Four: a self-play-trained policy+value network (train.tl/infer.tl), playable via pygame, with an alpha-beta solver fallback until a network is promoted"
+
+[requirements]
+gpus = 1
+memory_gb = 2
+packages = ["pygame"]
+
+[entry_points]
+gen_data   = "tools/generate_data.py"     # self-play data -> data/boards.npy etc.
+reset      = "tools/init_weights.py"      # fresh random weights (scratch, under cache/)
+sync_shape = "tools/sync_train_shape.py"  # keeps train.tl's declared dataset size in
+                                           # sync with data/meta.json (idempotent — a
+                                           # no-op if already in sync)
+train      = "train.tl"                   # single run, not chunked
+promote    = "tools/promote_weights.py"   # cache/ scratch weights -> tracked weights/
+rollback   = "tools/rollback_weights.py"  # swap weights/ <-> weights/.previous/
+play       = "tools/play.py"              # interactive pygame match
+
+# run.sh's two no-GPU pre-flight checks before the slow part of --train.
+# `check.py` lives at the repo root, not under this app — see the `repo:`
+# prefix on _resolve_entry_path.
+precheck_types    = { path = "repo:check.py", args = ["apps/games/connect_four/train.tl"] }
+precheck_dispatch = { path = "tools/verify_dispatch.py", args = ["apps/games/connect_four/train.tl"] }
+
+[lifecycle]
+# Bare `--app games/connect_four`: generate data / init weights only if
+# missing, then play (vs. the alpha-beta solver, until a net's been
+# promoted) — matches run.sh's default exactly.
+default = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/connect_four/train.tl/weights",
+    "play",
+]
+
+# `--step train`: same two guards as default, plus both pre-flight
+# checks, then train. sync_shape always runs (not just after a fresh
+# gen_data) since it's a cheap no-op when already in sync — simpler, and
+# more self-healing, than run.sh's "only after a regen" conditional.
+#
+# NOT covered here: run.sh --train --num-positions/--depth/--time-limit
+# (forces a regen with custom hyperparameters even when data already
+# exists — apps/games/train.sh's batch run uses this for a much bigger
+# dataset). That doesn't fit this "only if missing" pipeline shape.
+# Compose it from the primitives instead:
+#   tensorlang.py --app games/connect_four --step gen_data \
+#       --app-args --num-positions 50000 --depth 8 --time-limit 0.15
+#   tensorlang.py --app games/connect_four --step sync_shape
+#   tensorlang.py --app games/connect_four --step train
+train = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/connect_four/train.tl/weights",
+    "sync_shape",
+    "precheck_types",
+    "precheck_dispatch",
+    "train",
+]

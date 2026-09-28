@@ -1,0 +1,20 @@
+{
+  "games_played": 12,
+  "red_wins": 8,
+  "blue_wins": 4,
+  "draws": 0,
+  "by_mode": {
+    "human_vs_ai": {
+      "games": 6,
+      "red_wins": 4,
+      "blue_wins": 2,
+      "draws": 0
+    },
+    "ai_self_play": {
+      "games": 6,
+      "red_wins": 4,
+      "blue_wins": 2,
+      "draws": 0
+    }
+  }
+}

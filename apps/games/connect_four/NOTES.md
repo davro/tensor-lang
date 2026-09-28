@@ -236,14 +236,17 @@ source python-env/bin/activate
 python3 apps/games/connect_four/tools/verify_math.py     # no GPU needed, run first
 python3 check.py apps/games/connect_four/train.tl        # no GPU needed
 python3 check.py apps/games/connect_four/infer.tl        # no GPU needed
-./apps/games/connect_four/run.sh --train                 # the actual GPU run
+python3 tensorlang.py --app games/connect_four --step train    # the actual GPU run
 # inspect cache/apps/games/connect_four/train.tl/{loss,policy_loss,value_loss}.npy —
 # if policy_loss and value_loss are both decreasing sensibly, then:
-./apps/games/connect_four/run.sh --promote
-./apps/games/connect_four/run.sh --play
+python3 tensorlang.py --app games/connect_four --step promote
+python3 tensorlang.py --app games/connect_four --step play
 ```
 
-If `--train` fails or produces garbage, `run.sh --play` still works —
+(Originally a `run.sh` script; folded into the `--app`/`--step`/`[lifecycle]`
+app-runner machinery instead — see HANDOVER.md.)
+
+If `--step train` fails or produces garbage, `--step play` still works —
 `agent.py` falls back to `HeuristicSolver`, so the game is never blocked
 on a working network.
 
@@ -329,7 +332,7 @@ covers the failures, so the game stays playable either way), that's a
 driver/environment issue outside this app's code, and outside what
 could be diagnosed or fixed from this sandbox (no GPU here at all).
 Things worth checking on your machine:
-- `nvidia-smi` succeeding in the same shell you launch `run.sh --play`
+- `nvidia-smi` succeeding in the same shell you launch `--step play`
   from, right before/during a failure.
 - Whether the `--train` run's long-lived CUDA context was still
   shutting down / hadn't released the GPU when `--play`'s first rapid

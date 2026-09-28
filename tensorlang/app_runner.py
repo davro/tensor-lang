@@ -346,6 +346,16 @@ class AppRunner:
         print(f"Execution completed in {elapsed:.2f}s")
         return ok
 
+    def _resolve_entry_path(self, app_path: Path, path: str) -> Path:
+        """Resolve one entry_points path string. A `repo:` prefix means
+        "relative to the repo root" (for shared, non-app-specific tools
+        like the top-level `check.py` type checker); anything else is
+        relative to the app's own directory, same as always.
+        """
+        if path.startswith("repo:"):
+            return Path(path[len("repo:"):])
+        return app_path / path
+
     def _run_entry_point(
         self,
         app_path: Path,
@@ -363,6 +373,13 @@ class AppRunner:
         the app) — runs as a subprocess of this (already GPU-pinned, see
         `_validate_requirements`) process, so a nested `tensorlang.py`
         invocation a tool script makes itself inherits the same pin.
+
+        An entry can be a plain path string, or a table
+        `{ path = "...", args = [...] }` for a tool script that always
+        needs the same fixed arguments regardless of what (if anything)
+        `--app-args`/a lifecycle step passes in — e.g. connect_four's
+        pre-flight checks, which always run against the same `train.tl`
+        path. Fixed `args` come before any `app_args`.
         """
         entry_points = config.get('entry_points', {})
         target = entry_points.get(entry_name)
@@ -372,16 +389,25 @@ class AppRunner:
                   f"for this app")
             sys.exit(1)
 
-        target_path = app_path / target
+        if isinstance(target, dict):
+            path = target.get('path')
+            fixed_args = target.get('args', [])
+        else:
+            path = target
+            fixed_args = []
+
+        target_path = self._resolve_entry_path(app_path, path)
         if not target_path.exists():
             print(f"Error: entry point not found: {target_path}")
             sys.exit(1)
 
+        run_args = list(fixed_args) + list(app_args or [])
+
         if target_path.suffix == '.tl':
-            return self._execute_tl_file(target_path, app_args)
+            return self._execute_tl_file(target_path, run_args or None)
 
         print(f"\n== {entry_name}: {target_path} ==")
-        result = subprocess.run([sys.executable, str(target_path)] + (app_args or []))
+        result = subprocess.run([sys.executable, str(target_path)] + run_args)
         if result.returncode != 0:
             print(f"\nStep '{entry_name}' failed (exit {result.returncode}).")
             sys.exit(result.returncode)

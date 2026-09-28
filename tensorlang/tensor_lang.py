@@ -201,8 +201,11 @@ Examples:
         )
         parser.add_argument(
             "--app-args",
-            nargs="*",
-            help="Arguments to pass to the application"
+            nargs=argparse.REMAINDER,
+            help="Arguments to pass to the application. Captures everything "
+                 "after this flag verbatim (including further -/-- prefixed "
+                 "tokens meant for the app, not for tensorlang.py itself) — "
+                 "so put --app-args last on the command line."
         )
 
         args = parser.parse_args()

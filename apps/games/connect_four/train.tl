@@ -74,9 +74,9 @@
 // once — see run.sh, which does both automatically):
 //   python3 tensorlang.py apps/games/connect_four/train.tl
 
-let x:        Tensor[f32, (3000, 42)] = load("apps/games/connect_four/data/boards.npy")
-let y_policy: Tensor[f32, (3000, 7)]  = load("apps/games/connect_four/data/policy.npy")
-let y_value:  Tensor[f32, (3000, 2)]  = load("apps/games/connect_four/data/value.npy")
+let x:        Tensor[f32, (50000, 42)] = load("apps/games/connect_four/data/boards.npy")
+let y_policy: Tensor[f32, (50000, 7)]  = load("apps/games/connect_four/data/policy.npy")
+let y_value:  Tensor[f32, (50000, 2)]  = load("apps/games/connect_four/data/value.npy")
 
 let w1: Tensor[f32, (42, 128)] = load("cache/apps/games/connect_four/train.tl/weights/w1.npy") with grad
 let b1: Tensor[f32, (128,)]    = load("cache/apps/games/connect_four/train.tl/weights/b1.npy") with grad

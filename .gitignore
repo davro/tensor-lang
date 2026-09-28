@@ -13,3 +13,5 @@
 .env
 __pycache__/
 *.pyc
+cache/
+python-env/
