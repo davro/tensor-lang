@@ -35,7 +35,8 @@
 // the same pattern decision_boundary uses for its sigmoid output layer.
 //
 // Run (after tools/generate_data.py and tools/init_weights.py have run
-// once — see run.sh, which does both automatically):
+// once — see `python3 tensorlang.py --app games/tic_tac_toe`, which does
+// both automatically):
 //   python3 tensorlang.py apps/games/tic_tac_toe/train.tl
 // Expect this to take noticeably longer than the first version (12000
 // epochs vs. 300) — still well under a couple of minutes on a real GPU.

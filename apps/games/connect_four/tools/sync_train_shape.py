@@ -8,9 +8,9 @@ dynamic/runtime shapes) — three lines:
     let y_policy: Tensor[f32, (N, 7)]  = load(".../policy.npy")
     let y_value:  Tensor[f32, (N, 2)]  = load(".../value.npy")
 Whenever generate_data.py produces a dataset of a different size N (e.g.
-run.sh --train --num-positions 50000), these three declarations must be
-updated to match, or check.py's type checker rejects the shape mismatch
-against the actual .npy files on disk.
+`--step gen_data --app-args --num-positions 50000`), these three
+declarations must be updated to match, or check.py's type checker
+rejects the shape mismatch against the actual .npy files on disk.
 
 This reads the ACTUAL N from data/meta.json (written by generate_data.py
 itself — ground truth, not re-derived or guessed), and rewrites exactly
@@ -21,9 +21,9 @@ integers matching e.g. `, 7)` (the policy head's width) or `, 2)` (the
 value head's width, see NOTES.md's "REAL BUG #3"), so anchoring on the
 variable name is what keeps this from corrupting an unrelated line.
 
-Run automatically by run.sh --train whenever --num-positions/--depth/
---time-limit are passed (which force dataset regeneration); safe to run
-manually too:
+Run automatically as part of `--step train`'s pipeline (always, since
+it's a no-op when already in sync — see app.toml's [lifecycle]); safe to
+run manually too:
     python3 apps/games/connect_four/tools/sync_train_shape.py
 """
 import json

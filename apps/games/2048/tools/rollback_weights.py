@@ -4,7 +4,7 @@ Undo the last promote_weights.py: swaps apps/games/2048/weights/ with
 apps/games/2048/weights/.previous/.
 
     python3 apps/games/2048/tools/rollback_weights.py
-    # or: ./apps/games/2048/run.sh --rollback
+    # or: python3 tensorlang.py --app games/2048 --step rollback
 
 This is a SWAP, not a one-directional restore — running it twice in a
 row gets you back to where you started, rather than losing the "current"

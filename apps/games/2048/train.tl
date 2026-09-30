@@ -64,7 +64,7 @@
 // an ordinary 2D-vs-(1,1) scalar broadcast, which does work.
 //
 // Run (after tools/generate_data.py and tools/init_weights.py have run
-// once — see run.sh --train, which does both automatically):
+// once — see `--step train`, which does both automatically):
 //   python3 tensorlang.py apps/games/2048/train.tl
 // 8000 epochs over a 24000x256 input is substantially more work than
 // tic_tac_toe's 12000 epochs over 4520x9 (roughly 6x the rows, 256 vs 9

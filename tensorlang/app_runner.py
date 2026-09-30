@@ -491,6 +491,18 @@ class AppRunner:
         unresponsive first. So the first thing this method does is check
         (and set) an env var that every subprocess it spawns inherits,
         and refuses outright if it's already set.
+
+        Each unique marker is checked at most ONCE per pipeline run, not
+        re-checked fresh before every step that references it. This
+        matters whenever two guarded steps share one marker — e.g.
+        tic_tac_toe's `reset_if_missing:<weights>` immediately followed
+        by `train_if_missing:<weights>`, meant to run reset-and-train
+        together exactly when weights don't exist yet (mirroring run.sh
+        computing WEIGHTS_EXIST once at the top, then branching on that
+        single snapshot). Re-checking the filesystem after `reset` runs
+        would find weights that now exist (reset just created them) and
+        wrongly skip `train` — the same run that just proved they were
+        missing.
         """
         if os.environ.get(_LIFECYCLE_ACTIVE_ENV):
             print(
@@ -505,11 +517,14 @@ class AppRunner:
         os.environ[_LIFECYCLE_ACTIVE_ENV] = "1"
         try:
             lifecycle = config.get('lifecycle', {})
+            marker_snapshot: Dict[str, bool] = {}
             for step in steps:
                 entry_name, marker = self._parse_lifecycle_step(step, lifecycle)
                 if marker is not None:
-                    marker_path = self._resolve_marker_path(app_path, marker)
-                    if self._marker_populated(marker_path):
+                    if marker not in marker_snapshot:
+                        marker_path = self._resolve_marker_path(app_path, marker)
+                        marker_snapshot[marker] = self._marker_populated(marker_path)
+                    if marker_snapshot[marker]:
                         print(f"== existing state found ({marker}); skipping '{entry_name}' ==")
                         continue
                 self._run_entry_point(app_path, config, entry_name, app_args)

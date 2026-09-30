@@ -5,6 +5,70 @@ description = "9-32-9 MLP trained to imitate a minimax-optimal policy; play agai
 [requirements]
 gpus = 1
 memory_gb = 2
+packages = ["pygame"]
 
 [entry_points]
-main = "train.tl"
+gen_data = "tools/generate_data.py"  # exhaustively-enumerated minimax-labeled boards
+reset    = "tools/init_weights.py"   # fresh random weights (scratch, under cache/)
+train    = "train.tl"                # single run, 12000 epochs (~10min on a GPU)
+play     = "tools/play.py"           # interactive pygame match; no fallback if
+                                      # untrained — see note below
+
+[lifecycle]
+# Bare `--app games/tic_tac_toe`: generate data if missing, train ONLY
+# the first time (weights missing), then play — matches run.sh's default
+# exactly ("training is a one-time ~10min cost, not a per-launch one").
+# reset_if_missing/train_if_missing share one marker (this app's
+# weights), which is checked once for the whole pipeline (see
+# _run_named_lifecycle) — not re-checked after `reset` runs, or `train`
+# would wrongly see weights `reset` just created and skip itself.
+default = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/tic_tac_toe/train.tl/weights",
+    "train_if_missing:cache/apps/games/tic_tac_toe/train.tl/weights",
+    "play",
+]
+
+# `--step retrain`: keep existing weights if present (init only if truly
+# missing), but always train another 12000 epochs on top — matches
+# run.sh --retrain.
+retrain = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/tic_tac_toe/train.tl/weights",
+    "train",
+    "play",
+]
+
+# `--step reset`: wipe and start over — matches run.sh --reset exactly.
+# This name shadows the single entry_points.reset (tools/init_weights.py
+# alone) for `--step` dispatch purposes: `--step NAME` checks [lifecycle]
+# pipelines before single entries (see app_runner.py's run_app), so
+# `--step reset` always means this whole pipeline now, not just the bare
+# script. That's safe here specifically because run.sh never exposed
+# "reinit weights, don't train" as its own flag for this app either —
+# entry_points.reset only ever existed to be composed inside a pipeline
+# (see default/retrain above), never as a standalone action, so nothing
+# reachable before is unreachable now.
+reset = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset",
+    "train",
+    "play",
+]
+
+# `--step train_only`: same as `reset` above but without the final play —
+# matches run.sh --train-only, used by apps/games/train.sh's batch run.
+train_only = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset",
+    "train",
+]
+
+# NOTE on `--step play` (matches run.sh --play): unlike connect_four/2048,
+# this app has no alpha-beta/heuristic fallback — tools/agent.py's
+# choose_move raises RuntimeError if infer.tl can't load weights that
+# don't exist. run.sh caught this upfront with a clear "no trained
+# weights found" message before ever launching pygame; --step play here
+# doesn't add that same pre-check, so an untrained --step play surfaces
+# as that RuntimeError (with infer.tl's compiler output attached) instead
+# of run.sh's cleaner message. Ask if you'd like that guard added back.

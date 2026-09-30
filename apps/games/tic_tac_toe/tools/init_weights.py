@@ -7,8 +7,8 @@ Run ONCE, from the tensor-lang repo root, before the first training run:
 Creates a fresh random init for the 9-32-9 policy network at:
   cache/apps/games/tic_tac_toe/train.tl/weights/{w1,b1,w2,b2}.npy
 
-Re-run this (or use run.sh --reset) to wipe training progress and start
-from scratch.
+Re-run this (or use `--step reset` to also retrain immediately
+after) to wipe training progress and start from scratch.
 """
 import sys
 from pathlib import Path

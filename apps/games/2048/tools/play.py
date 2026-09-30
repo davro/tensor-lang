@@ -31,10 +31,11 @@ exactly what a blocking call during a 30+s first-time compile looks like.
 Autoplay uses tools/agent.py's choose_ai_move — the trained TensorLang
 policy network (infer.tl), the same way tic_tac_toe's choose_move calls
 its infer.tl. If the trained weights aren't there yet (run
-`./run.sh --train` first) or inference fails for any reason, choose_ai_move
-falls back to the original hand-written heuristic instead, printing a
-warning. Only the DECISION of which way to slide comes from either of
-those; the resulting board is still always computed by the real engine.
+`tensorlang.py --app games/2048 --step train` first) or inference fails
+for any reason, choose_ai_move falls back to the original hand-written
+heuristic instead, printing a warning. Only the DECISION of which way to
+slide comes from either of those; the resulting board is still always
+computed by the real engine.
 """
 import sys
 import time

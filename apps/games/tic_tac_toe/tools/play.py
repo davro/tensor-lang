@@ -3,8 +3,8 @@
 Interactive tic-tac-toe: you vs. the TensorLang-trained policy network —
 or sit back and watch TensorLang play itself.
 
-Run from the tensor-lang repo root (after run.sh has trained the network
-at least once):
+Run from the tensor-lang repo root (after `python3 tensorlang.py --app
+games/tic_tac_toe` has trained the network at least once):
 
     python3 apps/games/tic_tac_toe/tools/play.py
 
@@ -205,7 +205,7 @@ def main():
     if not (weights_dir / "w1.npy").exists():
         raise SystemExit(
             f"No trained weights found at {weights_dir}.\n"
-            "Run ./apps/games/tic_tac_toe/run.sh first (it trains automatically)."
+            "Run `python3 tensorlang.py --app games/tic_tac_toe` first (it trains automatically)."
         )
 
     # state: "start" | "playing" | "over" | "self_playing" | "self_over"

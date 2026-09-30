@@ -3,7 +3,7 @@
 Interactive Connect Four: you vs. the TensorLang-trained policy+value
 network — or sit back and watch it play itself.
 
-Run from the tensor-lang repo root (after run.sh has trained the
+Run from the tensor-lang repo root (after `--step train` has trained the
 network at least once, or even before — see the fallback note below):
 
     python3 apps/games/connect_four/tools/play.py

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Run before the first training run (run.sh does this automatically):
+Run before the first training run (--step train's gen_data_if_missing
+guard does this automatically):
 
     python3 apps/games/connect_four/tools/generate_data.py
 

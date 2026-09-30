@@ -71,7 +71,7 @@
 // whether these need adjusting; see NOTES.md's verification checklist.
 //
 // Run (after tools/generate_data.py and tools/init_weights.py have run
-// once — see run.sh, which does both automatically):
+// once — see `--step train`, which does both automatically):
 //   python3 tensorlang.py apps/games/connect_four/train.tl
 
 let x:        Tensor[f32, (50000, 42)] = load("apps/games/connect_four/data/boards.npy")

@@ -8,7 +8,7 @@ Creates a fresh random init for the 42-128-64 shared trunk plus a
 7-column policy head and a 1-unit value head, at:
   cache/apps/games/connect_four/train.tl/weights/{w1,b1,w2,b2,wp,bp,wv,bv}.npy
 
-Re-run this (or use run.sh --reset) to wipe training progress and start
+Re-run this (or use `--step reset`) to wipe training progress and start
 from scratch. This does NOT touch apps/games/connect_four/weights/ (the
 promoted, tracked, "production" copy infer.tl reads from) — see
 promote_weights.py for that step.
