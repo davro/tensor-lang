@@ -261,17 +261,20 @@ source python-env/bin/activate
 python3 apps/games/snake/tools/verify_math.py       # no GPU needed, run first
 python3 check.py apps/games/snake/train.tl          # no GPU needed
 python3 check.py apps/games/snake/infer.tl          # no GPU needed
-./apps/games/snake/run.sh --train                   # the actual GPU run
+python3 tensorlang.py --app games/snake --step train        # the actual GPU run
 # inspect cache/apps/games/snake/train.tl/loss.npy —
 # if it's dropped to a sensible plateau, then:
-./apps/games/snake/run.sh --promote
+python3 tensorlang.py --app games/snake --step promote
 python3 apps/games/snake/tools/verify_infer_matches_numpy.py   # confirms the fast
                                                                 # gameplay path matches
                                                                 # infer.tl's real output
-./apps/games/snake/run.sh --play
+python3 tensorlang.py --app games/snake --step play
 ```
 
-If `--train` fails or produces garbage, `run.sh --play` still works —
+(Originally a `run.sh` script; folded into the `--app`/`--step`/`[lifecycle]`
+app-runner machinery instead — see HANDOVER.md.)
+
+If `--step train` fails or produces garbage, `--step play` still works —
 `agent.py` falls back to the heuristic solver, so every mode (human,
 single-AI, arena) is fully playable from the very first run either way.
 

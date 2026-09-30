@@ -4,7 +4,7 @@ Undo the last promote_weights.py: swaps apps/games/snake/weights/ with
 apps/games/snake/weights/.previous/.
 
     python3 apps/games/snake/tools/rollback_weights.py
-    # or: ./apps/games/snake/run.sh --rollback
+    # or: python3 tensorlang.py --app games/snake --step rollback
 
 A SWAP, not a one-directional restore — running it twice in a row
 returns to where you started. See apps/games/2048/tools/rollback_weights.py

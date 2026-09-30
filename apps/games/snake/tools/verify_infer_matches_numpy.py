@@ -55,7 +55,8 @@ def main():
     try:
         agent.load_promoted_weights()
     except FileNotFoundError as e:
-        print(f"No promoted weights found ({e}) — run ./run.sh --train then --promote first.")
+        print(f"No promoted weights found ({e}) — run "
+              f"`tensorlang.py --app games/snake --step train` then `--step promote` first.")
         sys.exit(1)
 
     rng = random.Random(123)

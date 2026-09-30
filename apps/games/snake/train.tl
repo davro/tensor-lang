@@ -50,7 +50,7 @@
 // is an ordinary 2D-vs-(1,1) scalar broadcast, which does work.
 //
 // Run (after tools/generate_data.py and tools/init_weights.py have run
-// once — see run.sh --train, which does both automatically):
+// once — see `--step train`, which does both automatically):
 //   python3 tensorlang.py apps/games/snake/train.tl
 
 let x:      Tensor[f32, (20000, 720)] = load("apps/games/snake/data/boards.npy")

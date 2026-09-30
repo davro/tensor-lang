@@ -10,7 +10,7 @@ Promote the weights train.tl just produced into the tracked, in-repo
 Run after a training run you're happy with:
 
     python3 apps/games/snake/tools/promote_weights.py
-    # or: ./apps/games/snake/run.sh --promote
+    # or: python3 tensorlang.py --app games/snake --step promote
 
 See apps/games/2048/tools/promote_weights.py for the full reasoning
 (identical here): cache/ is scratch and untracked, a trained network
@@ -40,7 +40,8 @@ def main():
 
     missing = [f for f in WEIGHT_FILES if not (src_dir / f).exists()]
     if missing:
-        print(f"ERROR: {src_dir} is missing {missing} — run ./run.sh --train first.")
+        print(f"ERROR: {src_dir} is missing {missing} — run "
+              f"`tensorlang.py --app games/snake --step train` first.")
         sys.exit(1)
 
     existing = [f for f in WEIGHT_FILES if (dst_dir / f).exists()]

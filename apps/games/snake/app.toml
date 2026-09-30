@@ -1,0 +1,44 @@
+[app]
+name = "snake"
+description = "Snake: a self-play-trained policy network (train.tl/infer.tl), playable via pygame, with a BFS/flood-fill heuristic solver fallback until a network is promoted"
+
+[requirements]
+gpus = 1
+memory_gb = 2
+packages = ["pygame"]
+
+[entry_points]
+gen_data = "tools/generate_data.py"    # BFS/flood-fill self-play data -> data/boards.npy etc.
+reset    = "tools/init_weights.py"     # fresh random weights (scratch, under cache/)
+train    = "train.tl"                  # single run, not chunked
+promote  = "tools/promote_weights.py"  # cache/ scratch weights -> tracked weights/
+rollback = "tools/rollback_weights.py" # swap weights/ <-> weights/.previous/
+play     = "tools/play.py"             # interactive pygame: human play, single-AI
+                                        # autoplay, or a multi-agent arena
+
+# run.sh's two no-GPU pre-flight checks before the slow part of --train.
+# Unlike connect_four's verify_dispatch.py, snake's second check is
+# app-local (tools/verify_math.py), so only check.py needs the `repo:`
+# prefix.
+precheck_types = { path = "repo:check.py", args = ["apps/games/snake/train.tl"] }
+precheck_math  = "tools/verify_math.py"
+
+[lifecycle]
+# Bare `--app games/snake`: generate data / init weights only if missing,
+# then play (vs. the BFS/flood-fill solver, until a net's been promoted)
+# — matches run.sh's default exactly.
+default = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/snake/train.tl/weights",
+    "play",
+]
+
+# `--step train`: same two guards as default, plus both pre-flight
+# checks, then train.
+train = [
+    "gen_data_if_missing:data/boards.npy",
+    "reset_if_missing:cache/apps/games/snake/train.tl/weights",
+    "precheck_types",
+    "precheck_math",
+    "train",
+]
