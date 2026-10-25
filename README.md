@@ -608,8 +608,6 @@ When adding tests, copy expected values from a real run. Do not manually round o
 ## License
 
 Licensed under the GNU Lesser General Public License v3 (LGPL-3.0). See `LICENSE` for details.
-```
-
 ---
 
 ## Suggested next implementation order
