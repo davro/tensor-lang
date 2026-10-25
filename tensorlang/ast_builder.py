@@ -521,15 +521,19 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
         tensor_name = None
         axis = None
         eps = 1e-5
+        number_values = []
         for child in tree.children:
             if isinstance(child, Token) and child.type == 'NAME':
                 tensor_name = child.value
             elif isinstance(child, Token) and child.type == 'NUMBER':
-                value = float(child.value)
-                if value < 0.1:
-                    eps = value
-                else:
-                    axis = int(value)
+                number_values.append(float(child.value))
+
+        # Grammar order is: axis=..., eps=...
+        if len(number_values) >= 1:
+            axis = int(number_values[0])
+        if len(number_values) >= 2:
+            eps = number_values[1]
+
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axis={axis}, eps={eps}")
         return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}

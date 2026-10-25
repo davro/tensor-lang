@@ -1726,7 +1726,8 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
                 return kernel, (f"{op_type}_2d", name, tensor_name, None, rows, cols, eps)
 
             elif axis == 0:
-                print("DEBUG: Using column-wise normalization kernel")
+                if self.DEBUG_MODE:
+                    print("DEBUG: Using column-wise normalization kernel")
                 # Normalize along batch dimension (each column independently)
                 rows, cols = int(input_shape[0]), int(input_shape[1])
                 kernel = f"""
