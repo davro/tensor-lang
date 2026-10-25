@@ -142,7 +142,13 @@ fi
 if (( LINT )); then
     echo "=== Linting tensorlang/ ==="
     ruff check tensorlang/
-    exit 0
+    status=$?
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit "$status"
+    else
+        return "$status"
+    fi
+    #exit 0
 fi
 
 # ─────────────────────────── data pipeline ───────────────────────────────────
