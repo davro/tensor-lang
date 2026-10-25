@@ -1,27 +1,34 @@
+Here is a concrete, audit-accurate `README.md` you can replace the current one with. It keeps the project’s strengths but stops claiming features that are parsed-only, type-checked-only, or not wired into codegen/autograd.
+
+```markdown
 # TensorLang: A Native AI/ML Language
 
-TensorLang is an open-source, native machine learning (ML) language designed to compile tensor operations directly into GPU-accelerated kernels.
-This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations.
+TensorLang is an open-source, native machine-learning language designed to compile tensor operations into GPU-accelerated CUDA kernels.
+
+This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
+
+> **Status:** v0.3.0. Core suite: 109/109 tests passing.  
+> **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).  
+> **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
 
 ---
 
 ## Table of Contents
 
 * [Overview](#overview)
-* [Features](#features)
+* [Current Status and Limitations](#current-status-and-limitations)
+* [Setup](#setup)
+* [Quick Start](#quick-start)
+* [Language Overview](#language-overview)
 * [Operations](#operations)
 * [Automatic Differentiation](#automatic-differentiation)
 * [Training Loops](#training-loops)
-* [Setup](#setup)
-  + [System Requirements](#system-requirements)
-  + [Clone](#clone)
-  + [Build](#build)
-* [Tests](#tests)
+* [File I/O](#file-io)
 * [Cache](#cache)
-* [Code Examples](#code-examples)
-* [Example Applications](#example-applications)
 * [Architecture](#architecture)
 * [Performance](#performance)
+* [Testing](#testing)
+* [Applications](#applications)
 * [Future Work](#future-work)
 * [Contributing](#contributing)
 * [License](#license)
@@ -30,294 +37,61 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 
 ## Overview
 
-TensorLang eliminates Python bottlenecks by providing a unified stack for parsing, type checking, and GPU code generation. The language compiles directly to optimised CUDA kernels, enabling native GPU acceleration for machine learning workloads — including forward passes, loss computation, gradient-based weight updates, and multi-step training loops.
+TensorLang provides a unified stack for parsing, type checking, CUDA kernel generation, compilation, and execution.
 
 **Key Benefits:**
 
-* **Native GPU acceleration** - Direct CUDA kernel generation
-* **Type safety** - Compile-time tensor shape and type checking
-* **Zero Python overhead** - Native tensor operations without interpreter bottlenecks
-* **ML-first design** - Built specifically for neural network operations
-* **Automatic differentiation** - Reverse-mode autograd with broadcast-aware gradient reduction
-* **Training loops** - `for` loops with `backward()` and weight rebinding for multi-step SGD
-* **Inline expressions** - Nested binary op calls without intermediate `let` bindings
-* **Extensible architecture** - Clean separation of parsing, type checking, and code generation
+* **Native GPU acceleration** — tensor operations compile to CUDA kernels
+* **Type safety** — compile-time tensor shape and broadcasting checks
+* **ML-first design** — built specifically for neural network operations
+* **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
+* **Training loops** — `for` loops with `backward()` and pointer-swap weight rebinding
+* **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
+* **Extensible architecture** — clean separation of parsing, type checking, and code generation
 
-## Features
-
-* **Tensor Declarations**: Explicit tensor types with shape inference (`Tensor[f32, (batch, features)]`)
-* **Comprehensive Operations**: 40+ operations covering linear algebra, activations, reductions, and comparisons
-* **GPU Acceleration**: Compiles to optimised CUDA kernels with shared memory and broadcasting
-* **Automatic Differentiation**: Reverse-mode autograd with `with grad` tagging and `backward()` — gradients flow through `matmul`, `add`, `mse_loss`, and more
-* **Training Loops**: `for epoch in range(N)` with `backward()` and weight rebinding (`w = w_updated`)
-* **Inline Expressions**: Nest binary ops directly — `minus(w, mult(lr, w_grad))` — AST builder flattens to synthetic bindings automatically
-* **Neural Network Support**: Build complete MLPs, classification networks, and feature extractors
-* **Batch Processing**: Efficient handling of mini-batch training and inference
-* **Memory Management**: Automatic GPU memory allocation and cleanup
-* **Pipeline Operations**: Chain complex operations (slice → activate → reduce)
-* **Control Flow**: `if` / `elif` / `else` conditional statements
-* **User-Defined Functions**: `fn` definitions with typed parameters and return values
-* **File I/O**: `load()` and `save()` for tensor persistence
-* **Comment Support**: Single-line (`//`) and multi-line (`/* */`) comments
-* **Comprehensive Testing**: 109 test cases with expected results validation
-
-## Operations
-
-### **Tensor Creation & Manipulation**
-
-* **Literals**: `[[1.0, 2.0], [3.0, 4.0]]` - Multi-dimensional tensor literals
-* **Fill**: `fill(0.0, (3, 3))` - Create tensors with constant values
-* **Slicing**: `tensor[1:3, :]` - Extract subtensors with NumPy-style syntax
-* **Reshape**: `reshape(tensor, (4, 1))` - Change tensor dimensions (accepts a `*_grad` tensor directly, e.g. `reshape(w_grad, (8,))` — see the Automatic Differentiation section)
-* **Transpose**: `transpose(tensor)` - Axis permutation with optional `axes=` argument
-* **Concat**: `concat(a, b, axis=0)` - Concatenate along a dimension
-
-> **Note:** `concat(a, b, axis=1)` (side-by-side, same row count) is now implemented — it previously had no CUDA kernel at all and silently returned `None`, surfacing as an opaque `TypeError` at the call site rather than a clear error. Both `axis=0` (stacking rows) and `axis=1` now work.
-
-### **Linear Algebra**
-
-* **Matrix Multiplication**: `matmul(A, B)` - Optimised GPU matrix multiplication
-* **Element-wise Operations**: `add`, `minus`, `mult`, `div` with broadcasting support and inline nesting
-* **Linear Layers**: `linear(input, weight, bias)` - Complete neural network layers
-
-> **Note:** the type checker now correctly accepts broadcasting a `(1,1)` scalar against a 1D vector of any size (e.g. scaling a bias gradient by a scalar learning rate) — the earlier false "shape mismatch" rejection is fixed. However, CUDA kernel generation for `add`/`minus`/`mult`/`div` doesn't yet have a matching code path for this case: it will now fail later, with a Python `ValueError` during kernel generation, instead of a clean type error. Workaround unchanged for now: use a same-shaped vector instead of a scalar (e.g. `Tensor[f32,(8,)]` filled with the scalar value) so the operation is an equal-shape op rather than a scalar broadcast. Tracked as a known limitation — see Future Work.
-
-### **Activation Functions**
-
-* **ReLU**: `relu(x)` - Rectified Linear Unit activation
-* **GELU**: `gelu(x)` - Gaussian Error Linear Unit
-* **Swish**: `swish(x)` - Self-gated activation
-* **Sigmoid**: `sigmoid(x)` - Logistic activation function
-* **Tanh**: `tanh(x)` - Hyperbolic tangent activation
-* **Softmax**: `softmax(x, axis=1)` - Normalised exponential with numerical stability
-
-> **Note:** activation functions now accept a nested call, not just a bare variable name — `tanh(matmul(x, w))` parses and compiles correctly, matching `matmul`/`add`/`minus`/`mult`/`div`. Nested calls are hoisted into synthetic intermediate bindings at compile time, so `let h = tanh(matmul(x, w))` behaves identically to writing `let h_pre = matmul(x, w)` / `let h = tanh(h_pre)` yourself — either form works.
-
-### **Reductions**
-
-* **Statistical**: `sum`, `mean` - Along specified axes or full tensor
-* **Min/Max**: `min`, `max` - Find minimum/maximum values
-* **Argmin/Argmax**: `argmin`, `argmax` - Locate indices of extreme values
-
-### **Normalisations**
-
-* **Layer Norm**: `layer_norm(x, axis=1, eps=1e-5)`
-* **Batch Norm**: `batch_norm(x, gamma, beta, eps=1e-5)`
-* **Instance Norm**: `instance_norm(x, eps=1e-5)`
-
-### **Loss Functions**
-
-* **Cross Entropy**: `cross_entropy(logits, targets)`
-* **MSE Loss**: `mse_loss(predictions, targets)`
-
-### **Comparisons**
-
-* **Element-wise**: `greater`, `less`, `equal` - Boolean operations returning 0.0/1.0
-* **Broadcasting**: Support different tensor shapes following NumPy rules
-* **Masking**: Create conditional masks for data filtering
+**Important framing:** Python is the host/compiler language. Tensor operations run as native CUDA kernels, but the compiler, runtime orchestration, and test runner are Python-based.
 
 ---
 
-## Automatic Differentiation
+## Current Status and Limitations
 
-TensorLang implements reverse-mode automatic differentiation. Tensors marked `with grad` accumulate gradients during `backward()`, which traverses the computation graph in reverse and computes gradients via the chain rule.
+TensorLang is usable for small-to-medium static-shape ML programs, but several features are intentionally limited or not yet implemented.
 
-### Syntax
+### Implemented and working
 
-```
-// Mark a tensor as requiring gradient tracking
-let w: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
+* Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]`
+* Element-wise arithmetic with broadcasting
+* Matrix multiplication (`matmul`)
+* Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish`
+* Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax`
+* Comparisons: `greater`, `less`, `equal`
+* Slicing, reshape, transpose, concat
+* Normalisations: `layer_norm`, `batch_norm`, `instance_norm`
+* Losses: `mse_loss`, `cross_entropy`
+* Linear layers: `linear`
+* Reverse-mode autograd for a defined subset of operations
+* Training loops with weight rebinding
+* User-defined functions
+* File I/O: `load()`, `save()`
+* Comments: `//` and `/* */`
 
-// Run the forward pass
-let y    = matmul(x, w)
-let loss = sum(y)
+### Known limitations
 
-// Compute gradients — populates w.grad
-backward(loss)
-```
-
-### Accessing Gradients
-
-After `backward()`, gradients are available as a synthesised variable usable in subsequent expressions:
-
-```
-// w_grad is automatically available after backward(loss)
-// Can be used directly in inline expressions:
-let w_new = minus(w, mult(lr, w_grad))
-```
-
-Gradients are also saved to the cache as `w.grad.npy` for inspection and integration with Python workflows.
-
-### Supported Gradient Operations
-
-| Operation | Gradient |
-|-----------|----------|
-| `matmul(A, B)` | `dL/dA = dL/dY @ B.T`, `dL/dB = A.T @ dL/dY` |
-| `add(A, B)` | `dL/dA`, `dL/dB` with broadcast reduction |
-| `sum(x)` | Ones tensor broadcast to input shape |
-| `mse_loss(pred, target)` | `2/N * (pred - target)` |
-| `linear(x, w, b)` | Gradients for `w` and `b` |
-| `relu(x)` | `dL/dx = dL/dy * (x > 0)` |
-| `sigmoid(x)` | `dL/dx = dL/dy * sigmoid(x) * (1 - sigmoid(x))` |
-| `tanh(x)` | `dL/dx = dL/dy * (1 - tanh²(x))` |
-| `softmax(x)` | `dL/dx = softmax(x) * (dL/dy - sum(dL/dy * softmax(x)))` |
-
-Broadcast-aware gradient reduction is implemented via `_unbroadcast()`, so bias gradients sum correctly over the batch dimension.
-
-### Autograd Examples
-
-**Basic gradient — matmul + sum:**
-```
-let x: Tensor[f32, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
-let w: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
-
-let y    = matmul(x, w)
-let loss = sum(y)
-backward(loss)
-// w.grad = [[4.0, 4.0], [6.0, 6.0]]
-```
-
-**Chain rule — gradient through two matmuls:**
-```
-let x:  Tensor[f32, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
-let w1: Tensor[f32, (2, 2)] = [[1.0, 0.0], [0.0, 1.0]] with grad
-let w2: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
-
-let h    = matmul(x, w1)
-let y    = matmul(h, w2)
-let loss = sum(y)
-backward(loss)
-// w1.grad and w2.grad both computed correctly via chain rule
-```
-
-**Gradient through relu — chain rule across activation:**
-```
-let x:  Tensor[f32, (2, 3)] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-let w1: Tensor[f32, (3, 2)] = [[0.1, 0.2], [-0.1, 0.3], [0.2, -0.1]] with grad
-let w2: Tensor[f32, (2, 1)] = [[0.5], [-0.5]]                         with grad
-
-let h_pre = matmul(x, w1)
-let h     = relu(h_pre)
-let y     = matmul(h, w2)
-let loss  = sum(y)
-backward(loss)
-// w1.grad = [[2.5, -2.5], [3.5, -3.5], [4.5, -4.5]]  (non-zero: grad flows through relu)
-// w2.grad = [[1.6], [2.2]]
-```
-
-### Gradient Naming Convention
-
-After `backward()`, gradients are accessible two ways:
-
-| Name | Where used | What it is |
-|------|-----------|------------|
-| `w.grad` | `@EXPECTED` block, `.npy` cache filename | Gradient attribute saved by `backward()` |
-| `w_grad` | Inside TensorLang expressions | Synthesised variable for weight update steps |
-
-```
-backward(loss)
-
-// Use w_grad in expressions:
-let w_updated = minus(w, mult(lr, w_grad))
-
-// w.grad is saved to cache/tests/.../w.grad.npy for inspection
-```
-```
-let a: Tensor[f32, (3, 2)] = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
-let b: Tensor[f32, (2,)]   = [0.5, 0.5] with grad
-
-let y    = add(a, b)
-let loss = sum(y)
-backward(loss)
-// b.grad = [3.0, 3.0]  (summed over the 3-row broadcast dimension)
-```
-
-`add`/`minus`/`mult`/`div` can resolve a `*_grad` name's shape from its base tensor when it isn't found directly in scope — and `reshape()`, `transpose()`, `sum`/`mean`, `softmax`, `slice`, `layer_norm`, `batch_norm`, `instance_norm`, `max`/`min`/`argmax`/`argmin`, and `concat` now share the same fallback, so `reshape(w_grad, (1, 8))` works directly without first materializing the gradient into a normal (non-`_grad`-named) tensor.
-
----
-
-## Training Loops
-
-TensorLang supports multi-step gradient descent natively via `for` loops. The loop body can contain a full forward pass, `backward()`, and a weight update step. The `w = w_updated` rebind syntax advances the weight to its updated value for the next iteration — no GPU memory copy is performed, only a pointer swap.
-
-### Syntax
-
-```
-for <var> in range(<N>) {
-    // forward pass
-    // backward()
-    // weight update via let + rebind (or inline expression)
-}
-```
-
-### Weight Update — two equivalent styles
-
-**Flat bindings (explicit intermediates):**
-```
-let grad_step = mult(lr, w_grad)
-let w_updated = minus(w, grad_step)
-w = w_updated
-```
-
-**Inline expression (compact):**
-```
-let w_updated = minus(w, mult(lr, w_grad))
-w = w_updated
-```
-
-Both compile to identical CUDA kernels. The AST builder automatically flattens inline expressions into synthetic `__tmp_N` bindings before code generation.
-
-### Naming Constraints
-
-Because all kernels — from both the loop body and the top level — are compiled into a single `.cu` file, **tensor names used inside a `for` loop body cannot be reused at the top level**. Use distinct names for any post-loop computations:
-
-```
-for epoch in range(5) {
-    let y_pred = matmul(x, w)   // defines 'y_pred' kernel
-    let loss   = mse_loss(...)
-    ...
-}
-
-// Post-loop: must use different names to avoid CUDA symbol collisions
-let y_pred_final = matmul(x, w)
-let loss_final   = mse_loss(y_pred_final, y_true)
-```
-
-### Complete Training Loop Example
-
-5-step SGD on linear regression (`y = 2x`), converging from `w=0.5` toward `w=2.0`:
-
-```
-let x:      Tensor[f32, (4, 1)] = [[1.0], [2.0], [3.0], [4.0]]
-let y_true: Tensor[f32, (4, 1)] = [[2.0], [4.0], [6.0], [8.0]]
-let w:      Tensor[f32, (1, 1)] = [[0.5]] with grad
-let lr:     Tensor[f32, (1, 1)] = [[0.1]]
-
-for epoch in range(5) {
-    let y_pred    = matmul(x, w)
-    let loss      = mse_loss(y_pred, y_true)
-    backward(loss)
-    let w_updated = minus(w, mult(lr, w_grad))
-    w = w_updated
-}
-
-// Post-loop evaluation with distinct names
-let y_pred_final = matmul(x, w)
-let loss_final   = mse_loss(y_pred_final, y_true)
-// loss_final = 0.0164794921875
-// w          = [[2.046875]]
-```
-
-**Step-by-step convergence:**
-
-| Iteration | Loss | w after update |
-|-----------|------|----------------|
-| 1 | 16.875000 | [[2.75]] |
-| 2 | 4.218750 | [[1.625]] |
-| 3 | 1.054688 | [[2.1875]] |
-| 4 | 0.263672 | [[1.90625]] |
-| 5 | 0.065918 | [[2.046875]] |
-| post-loop | 0.016479 | — |
+* **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**.
+* **`any()` / `all()` reductions:** present in the grammar but **not implemented**.
+* **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`.
+* **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)).
+* **For-loop bodies support only a subset of operations** (see [Training Loops](#training-loops)).
+* **Most kernels are 1D/2D only.** Higher-rank tensors are not generally supported.
+* **Axis support is limited** for reductions and normalisations (commonly full reduction or axis `0`/`1` on 2D tensors).
+* **`transpose(..., axes=...)`** is currently ignored; only default 2D transpose is generated.
+* **`argmin` without an axis** is not supported.
+* **Scalar `(1,1)` broadcasting** type-checks but currently fails during CUDA code generation.
+* **Broadcast `equal`** has a code-generation dispatch bug.
+* **`cross_entropy`** expects probability tensors, not logits, despite the name.
+* **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters.
+* **Dev mode hot reload** is not implemented.
+* **`--transpile` (WGSL)** is exposed but not currently functional.
 
 ---
 
@@ -325,334 +99,526 @@ let loss_final   = mse_loss(y_pred_final, y_true)
 
 ### System Requirements
 
-```
+```bash
 sudo apt install nvidia-cuda-toolkit python3-dev
 sudo apt install python3.12-venv
 ```
 
 ### Clone
 
-```
+```bash
 git clone https://github.com/davro/tensor-lang.git
 cd tensor-lang
 ```
 
 ### Build
 
-```
+```bash
 chmod +x build.sh
 
 # Install dependencies
-source build.sh --install
+bash build.sh --install
+
+# Activate the venv
+source python-env/bin/activate
 
 # Run the full test suite
 source build.sh
 ```
 
-## Tests
+---
+
+## Quick Start
+
+```bash
+# Compile and run a single file
+python3 tensorlang.py tests/activation_pipeline.tl
+
+# Debug mode
+python3 tensorlang.py tests/inline_expr_basic.tl --debug
+
+# Run tests
+python3 tensorlang.py --test
+python3 tensorlang.py --test --filter autograd
+```
+
+---
+
+## Language Overview
+
+### Tensor Declarations
+
+```text
+let x: Tensor[f32, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
+let w: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
+```
+
+Shapes are part of the type system. The compiler checks shape compatibility and broadcasting rules at compile time.
+
+### User-Defined Functions
+
+```text
+fn normalize(x: Tensor[M, N]) -> Tensor[M, N] {
+    let mu = mean(x, axis=1)
+    return minus(x, mu)
+}
+```
+
+Function calls are inlined. Generic dimensions such as `M` and `N` are primarily syntactic; concrete shapes are resolved at call sites.
+
+### Inline Expressions
+
+Nested binary and unary calls are flattened into synthetic `__tmp_N` bindings:
+
+```text
+let w_updated = minus(w, mult(lr, w_grad))
+```
+
+This is equivalent to:
+
+```text
+let __tmp_0 = mult(lr, w_grad)
+let w_updated = minus(w, __tmp_0)
+```
+
+---
+
+## Operations
+
+### Tensor Creation and Manipulation
+
+| Operation | Status | Notes |
+|---|---|---|
+| Tensor literals | Supported | `[[1.0, 2.0], [3.0, 4.0]]` |
+| `fill(value, shape)` | Supported | Scalar fill value only |
+| Slicing | Supported | 1D/2D, NumPy-style ranges and indices |
+| `reshape(tensor, shape)` | Supported | Element count must match |
+| `transpose(tensor)` | Partial | 2D only; `axes=` is currently ignored |
+| `concat(a, b, axis=...)` | Partial | 2 tensors, 2D, axis `0` or `1` |
+
+### Linear Algebra
+
+| Operation | Status | Notes |
+|---|---|---|
+| `matmul(A, B)` | Supported | 2D×2D or 2D×1D |
+| `add`, `minus`, `mult`, `div` | Supported | Broadcasting supported |
+| `linear(input, weight, bias)` | Supported | 1D or 2D input |
+
+### Activations
+
+| Operation | Status | Gradient |
+|---|---|---|
+| `relu` | Supported | Yes |
+| `sigmoid` | Supported | Yes |
+| `tanh` | Supported | Yes |
+| `softmax` | Supported | Yes (1D or 2D axis `1`) |
+| `gelu` | Supported | No |
+| `swish` | Supported | No |
+
+### Reductions
+
+| Operation | Status | Notes |
+|---|---|---|
+| `sum` | Supported | Full or 2D axis `0`/`1` |
+| `mean` | Supported | Full or 2D axis `0`/`1` |
+| `min`, `max` | Supported | Full or 2D axis `0`/`1` |
+| `argmin` | Partial | 2D axis `1` only |
+| `argmax` | Partial | Full reduction is unreliable; 2D axis `1` supported |
+
+### Normalisations
+
+| Operation | Status | Notes |
+|---|---|---|
+| `layer_norm` | Partial | 1D or 2D axis `0`/`1`; `axis=0` has a known bug |
+| `batch_norm` | Partial | 2D; uses running mean/variance; no gamma/beta |
+| `instance_norm` | Partial | 2D only |
+
+### Losses
+
+| Operation | Status | Notes |
+|---|---|---|
+| `mse_loss` | Supported | Predictions and targets must have the same shape |
+| `cross_entropy` | Partial | Expects probability tensors and class indices; not wired into autograd |
+
+### Comparisons
+
+| Operation | Status | Notes |
+|---|---|---|
+| `greater`, `less`, `equal` | Partial | Equal shapes or limited 2D/1D broadcast; broadcast `equal` has a dispatch bug |
+
+---
+
+## Automatic Differentiation
+
+TensorLang implements reverse-mode automatic differentiation. Tensors marked `with grad` accumulate gradients during `backward()`.
+
+### Syntax
+
+```text
+let w: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
+
+let y = matmul(x, w)
+let loss = sum(y)
+
+backward(loss)
+```
+
+After `backward()`, gradients are available as synthesised variables:
+
+```text
+let w_grad = ...   // synthesised
+let w_updated = minus(w, mult(lr, w_grad))
+```
+
+Gradients are also saved as `*.grad.npy` when `--cache-layers` is used.
+
+### Supported Gradient Operations
+
+| Operation | Gradient |
+|---|---|
+| `matmul(A, B)` | 2D only |
+| `add(A, B)` | Broadcast-aware reduction |
+| `minus(A, B)` | Broadcast-aware reduction |
+| `mult(A, B)` | Broadcast-aware reduction |
+| `div(A, B)` | Broadcast-aware reduction |
+| `relu` | Yes |
+| `sigmoid` | Yes |
+| `tanh` | Yes |
+| `softmax` | Yes |
+| `sum` | Yes |
+| `mean` | Yes |
+| `mse_loss` | Yes |
+
+### Not Currently Wired into Autograd
+
+The following operations may be present in the language but are **not currently recorded for gradient computation**:
+
+* `linear`
+* `layer_norm`
+* `cross_entropy`
+* `gelu`
+* `swish`
+* `batch_norm`
+* `instance_norm`
+* `concat`
+* `reshape`
+* `transpose`
+* `slice`
+* `max`, `min`
+* `argmax`, `argmin`
+* `greater`, `less`, `equal`
+
+### Autograd Notes
+
+* `matmul` gradients assume 2D operands.
+* Broadcast-aware gradient reduction is implemented via `_unbroadcast()`.
+* `cross_entropy` autograd is implemented in the NumPy reference but not wired into the compiler path.
+
+---
+
+## Training Loops
+
+TensorLang supports multi-step gradient descent via `for` loops.
+
+```text
+for epoch in range(5) {
+    let y_pred = matmul(x, w)
+    let loss = mse_loss(y_pred, y_true)
+    backward(loss)
+    let w_updated = minus(w, mult(lr, w_grad))
+    w = w_updated
+}
+```
+
+### Weight Update Styles
+
+Flat bindings:
+
+```text
+let grad_step = mult(lr, w_grad)
+let w_updated = minus(w, grad_step)
+w = w_updated
+```
+
+Inline expression:
+
+```text
+let w_updated = minus(w, mult(lr, w_grad))
+w = w_updated
+```
+
+Both compile to the same CUDA kernels. Inline expressions are flattened into synthetic `__tmp_N` bindings.
+
+### Training Loop Constraints
+
+* Loop counts must be integer literals: `range(5)`, not `range(n)`.
+* Loop bodies support only a subset of operations.
+* `save()` inside a loop is not currently executed.
+* Alias nodes such as `let y = x` inside a loop are not currently resolved.
+* Nested loops are not supported.
+* Because all kernels are emitted into one `.cu` file, tensor names used inside a loop body cannot be reused at top level.
+
+Example:
+
+```text
+for epoch in range(5) {
+    let y_pred = matmul(x, w)
+    let loss = mse_loss(y_pred, y_true)
+    ...
+}
+
+let y_pred_final = matmul(x, w)
+let loss_final = mse_loss(y_pred_final, y_true)
+```
+
+### Rebinding
+
+```text
+w = w_updated
+```
+
+This swaps GPU buffer pointers rather than copying memory.
+
+---
+
+## File I/O
+
+### Load
+
+```text
+let data: Tensor[f32, (10, 4)] = load("data.npy")
+```
+
+Supported formats:
+
+* `.npy`
+* `.npz` (uses `data` array or first available array)
+* `.csv` (requires pandas; drops a leading date/time/index/id column)
+
+If no type annotation is provided, shape is inferred from the file.
+
+### Save
+
+```text
+save(tensor, "output.npy")
+```
+
+`save()` is currently supported at top level. It is not executed inside `for` loops.
+
+---
+
+## Cache
+
+TensorLang stores compilation artifacts under:
+
+```text
+cache/<input-file>/
+```
+
+Contents include:
+
+* `kernel.cu` — generated CUDA source
+* `kernel.so` — compiled shared library
+* `tensor_name.npy` — computed tensor results
+* `tensor_name.grad.npy` — gradients, when `--cache-layers` is used
+
+The full test suite clears `cache/` before running. For isolated runs after modifying a test, clear its cache entry manually:
+
+```bash
+rm -rf cache/tests/my_test.tl/
+python3 tensorlang.py tests/my_test.tl --cache-layers
+```
+
+---
+
+## Architecture
+
+### Compilation Pipeline
+
+1. **Lexing & Parsing** — Lark grammar (`tensorlang.lark`)
+2. **AST Construction** — flatten inline expressions; inline user-defined functions
+3. **Type Checking** — validate tensor shapes, broadcasting rules, and gradient tensor pre-registration
+4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations
+5. **Compilation** — `nvcc` to shared library
+6. **Execution** — PyCUDA kernel launching, memory management, and loop iteration with pointer-swap rebinding
+
+### Key Modules
+
+* `tensorlang/ast_builder.py` — AST construction and inlining
+* `tensorlang/type_checker.py` — shape and broadcasting checks
+* `tensorlang/kernel_generator.py` — CUDA kernel generation
+* `tensorlang/compiler.py` — orchestration, execution, caching
+* `tensorlang/autograd.py` — NumPy reference autograd implementation
+* `tensorlang/test_runner.py` — test discovery and execution
+* `tensorlang/app_runner.py` — application discovery and execution
+* `tensorlang/gpu.py` — GPU detection and process-level pinning
+
+---
+
+## Performance
+
+Current performance characteristics:
+
+* Matrix multiplication uses a straightforward CUDA kernel, not cuBLAS or a tiled/shared-memory implementation.
+* Training-loop weight updates use pointer swaps (no GPU memory copy between iterations).
+* Generated CUDA source is cached and reused when unchanged.
+* 4096×4096 matrix multiplication runs, but has not been benchmarked against cuBLAS or PyTorch.
+
+Performance claims should be treated as unverified until baselined on the same hardware.
+
+---
+
+## Testing
 
 ### Single File
 
-```
+```bash
 python3 tensorlang.py tests/for_loop_basic.tl
 python3 tensorlang.py tests/inline_expr_basic.tl --debug
 ```
 
 ### Full Test Suite
 
-```
-# Via build script (recommended — clears cache automatically)
+```bash
 source build.sh
-
-# Filter to a group
 source build.sh --test --filter autograd
 source build.sh --test --filter for_loop
 source build.sh --test --filter inline
 ```
 
-### Build Script Reference
+### Test Annotations
 
+Expected results:
+
+```text
+// @EXPECTED
+// {"loss_final": 0.0164794921875}
 ```
-source build.sh                        # full test suite (clears cache first)
-source build.sh --install              # install/upgrade all dependencies
-source build.sh --lint                 # ruff lint check
-source build.sh --test --filter NAME   # run tests matching NAME
-source build.sh --debug FILE.tl        # compile a single file with debug output
-source build.sh --clean                # wipe cache/ only
+
+Negative tests:
+
+```text
+// @EXPECT_FAILURE
 ```
+
+`@EXPECT_FAILURE` currently passes if the compiler exits non-zero. It does not verify the specific failure reason.
+
+### Tensor Verification
+
+```bash
+python3 tensorlang.py --test --verify-tensors
+```
+
+Tensor verification is performed by the test runner, not the compiler. It checks NaN/Inf, extreme values, expected values, and cached `.npy` files.
 
 ### Multi-GPU Test Execution
 
-On a machine with more than one NVIDIA GPU, the parallel test suite (each
-`.tl` test already runs as its own `python3 tensorlang.py` subprocess)
-round-robins `CUDA_VISIBLE_DEVICES` across the detected devices, so tests
-are split across cards instead of all contending for one:
-
-```
-python3 tensorlang.py --list-gpus        # see what's detected
-python3 tensorlang.py --test             # round-robins across all detected GPUs
-python3 tensorlang.py --test --gpu 1     # pin every test to a single GPU (index 1)
-python3 tensorlang.py --test --no-gpu-pinning   # disable pinning, run unpinned as before
+```bash
+python3 tensorlang.py --list-gpus
+python3 tensorlang.py --test
+python3 tensorlang.py --test --gpu 1
+python3 tensorlang.py --test --no-gpu-pinning
 ```
 
-This is process-level pinning (one physical GPU per subprocess) — no
-cross-device copies, no NVLink requirement, and it degrades to a no-op on
-a single-GPU machine or a CI box with no GPU at all (`detect_gpus()`
-returns `[]` and everything runs exactly as it did before this existed).
-It does **not** let a single running program span multiple GPUs at once
-— see [Future Work](#future-work) for that (Tier-B).
+This is process-level pinning only. A single TensorLang program does not span multiple GPUs.
 
-In practice, on a small/fast test suite like this one, most of the
-per-test wall time is fixed process overhead (interpreter startup,
-imports, CUDA context creation) rather than actual kernel execution, so
-expect a modest improvement (single-digit percent) from pinning here, not
-a linear speedup with GPU count — the real payoff shows up on heavier,
-longer-running, genuinely concurrent GPU workloads (e.g. running
-independent app benchmarks or backtests side by side, one per card).
+---
 
-**Test Coverage:**
+## Applications
 
-* **Basic Operations**: Element-wise arithmetic, matrix multiplication
-* **Activation Functions**: ReLU, GELU, Swish, sigmoid, tanh, softmax
-* **Reductions**: Sum, mean, min, max, argmin, argmax
-* **Comparisons**: Greater, less, equal with broadcasting
-* **Slicing**: 1D/2D tensor slicing with range specifications
-* **Linear Layers**: 1D and batch processing with bias
-* **Normalisations**: Layer norm, batch norm, instance norm
-* **Loss Functions**: MSE loss, cross entropy
-* **Autograd**: Gradient tracking, chain rule, broadcast reduction, weight update, and activation function gradients (relu, sigmoid, tanh, softmax)
-* **Training Loops**: Multi-step SGD with `for` loops, weight rebinding, pure-forward loops
-* **Inline Expressions**: Nested binary op calls flattened at AST level
-* **User-Defined Functions**: Single and nested function calls with inlining
-* **Neural Networks**: Complete MLP construction and classification
-* **Pipeline Operations**: Multi-stage tensor transformations
-* **Performance**: Large tensor operations (4096×4096 matrices)
+Applications live under `apps/` and are discovered by `app.toml`.
 
-### For Loop Tests
-
-```
-source build.sh --test --filter for_loop
+```bash
+python3 tensorlang.py --list-apps
+python3 tensorlang.py --app examples/hello_mlp
+python3 tensorlang.py --app examples/decision_boundary
+python3 tensorlang.py --app games/2048 --app-args <16 numbers>
 ```
 
-```
-================================================================================
-State  TestCase                       Time
---------------------------------------------------------------------------------
-PASS   for_loop_basic.tl              [0.0s → 4.1s]
-PASS   for_loop_convergence_check.tl  [0.0s → 4.2s]
-PASS   for_loop_more_iterations.tl    [0.0s → 4.3s]
-PASS   for_loop_no_backward.tl        [0.0s → 4.1s]
-PASS   for_loop_two_weights.tl        [0.0s → 4.2s]
-================================================================================
-Summary: 5/5 tests passed
+### App Requirements
+
+`app.toml` may declare:
+
+```toml
+[requirements]
+gpus = 1
+packages = ["pygame"]
 ```
 
-## Cache
+* `requirements.gpus` is enforced via least-utilized GPU selection and process pinning.
+* `requirements.packages` are auto-installed if missing.
+* `cuda_version` and `memory_gb` are display-only.
+* `[gpu] device = N` can pin an app to a specific GPU.
 
-TensorLang stores all compilation artifacts in a cache directory organised by input file:
+### App Tests
 
-### Cache Structure (`cache/tests/program.tl/`)
-
-* **`kernel.cu`**: Generated CUDA source code with optimised kernels
-* **`kernel.so`**: Compiled shared library for GPU execution
-* **`tensor_name.npy`**: NumPy arrays containing computed tensor results
-* **`tensor_name.grad.npy`**: Gradient arrays for tensors declared `with grad`
-* **Logs**: Detailed compilation and execution information
-
-### Stale Cache Warning
-
-The full test suite (`source build.sh`) always clears `cache/` before running to prevent stale `.npy` files causing false passes or wrong `@EXPECTED` comparisons. If you modify a test and re-run it in isolation, clear its cache entry first:
-
-```
-rm -rf cache/tests/my_test.tl/
-python3 tensorlang.py tests/my_test.tl --cache-layers
+```bash
+python3 tensorlang.py --app examples/hello_mlp --test
 ```
 
-### Cache Benefits
+App tests run sequentially.
 
-* **Reusability**: Compiled kernels can be loaded directly in Python
-* **Debugging**: Inspect generated CUDA code, intermediate results, and gradients
-* **Integration**: Use TensorLang computations in existing Python workflows
-
-## Architecture
-
-### Compilation Pipeline
-
-1. **Lexing & Parsing**: Lark-based grammar with `inline_expr` rule enabling nested binary *and* unary op arguments (e.g. `tanh(matmul(x, w))`)
-2. **AST Construction**: Build abstract syntax tree; flatten inline expressions into synthetic `__tmp_N` let bindings; inline user-defined function calls
-3. **Type Checking**: Validate tensor shapes, broadcasting rules, and operation compatibility — including pre-registration of gradient tensor shapes for `with grad` tensors
-4. **CUDA Generation**: Emit optimised forward and backward GPU kernels; `for` loop bodies compiled once into the shared kernel file; broadcast helper emitted once per compilation unit
-5. **Compilation**: `nvcc` compilation to shared libraries
-6. **Execution**: PyCUDA-based kernel launching with memory management, gradient accumulation, and loop iteration with pointer-swap weight rebinding
-
-### Design Principles
-
-* **Type Safety**: Compile-time shape checking prevents runtime errors
-* **GPU-First**: All operations generate native CUDA kernels — including gradient kernels
-* **Composability**: Operations chain naturally with automatic memory management
-* **Performance**: Optimised kernels with broadcasting, shared memory, and numerical stability
-* **Extensibility**: Clean separation enables easy addition of new operations and their gradients
-
-## Performance
-
-**Benchmark Results** (NVIDIA GPU):
-
-* **Matrix Multiplication**: 4096×4096 matrices execute efficiently
-* **Batch Processing**: Linear layers handle large batch sizes
-* **Memory Efficiency**: Weight updates in training loops use pointer swaps — no GPU memory copy between iterations
-* **Test Suite**: 109 tests complete in ~95 seconds including compilation
-
-**Optimisation Features:**
-
-* **Shared Memory**: Reduction operations use efficient parallel patterns
-* **Broadcasting**: Hardware-accelerated element-wise operations with gradient reduction
-* **Zero-Copy Rebinding**: Training loop weight updates swap GPU buffer pointers rather than copying memory
-* **Single-Emission Guards**: File-scope CUDA helper functions (`compute_broadcast_index`) emitted once per compilation unit regardless of how many ops use them
-* **Kernel Fusion**: Potential for combining operations (future work)
-* **Numerical Stability**: Softmax uses max subtraction, comparisons use tolerance
-
-## Code Examples
-
-### Non-Linear Network Training (ReLU)
-
-```
-// 2-layer network with ReLU — trains end-to-end via backward()
-let x:      Tensor[f32, (3, 2)] = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
-let y_true: Tensor[f32, (3, 1)] = [[1.0], [0.0], [1.0]]
-let w1:     Tensor[f32, (2, 2)] = [[0.5, 0.5], [-0.5, 0.5]] with grad
-let w2:     Tensor[f32, (2, 1)] = [[0.5], [0.5]]             with grad
-let lr:     Tensor[f32, (1, 1)] = [[0.1]]
-
-for epoch in range(5) {
-    let h_pre      = matmul(x, w1)
-    let h          = relu(h_pre)
-    let y_pred     = matmul(h, w2)
-    let loss       = mse_loss(y_pred, y_true)
-    backward(loss)
-    let w1_updated = minus(w1, mult(lr, w1_grad))
-    let w2_updated = minus(w2, mult(lr, w2_grad))
-    w1 = w1_updated
-    w2 = w2_updated
-}
-// loss: 0.1875 → 0.1519 → 0.1176 → 0.0931 → 0.0759 → 0.0641
-```
-
-### Multi-Step Training Loop (linear, inline style)
-
-```
-let x:      Tensor[f32, (4, 1)] = [[1.0], [2.0], [3.0], [4.0]]
-let y_true: Tensor[f32, (4, 1)] = [[2.0], [4.0], [6.0], [8.0]]
-let w:      Tensor[f32, (1, 1)] = [[0.5]] with grad
-let lr:     Tensor[f32, (1, 1)] = [[0.1]]
-
-for epoch in range(5) {
-    let y_pred    = matmul(x, w)
-    let loss      = mse_loss(y_pred, y_true)
-    backward(loss)
-    let w_updated = minus(w, mult(lr, w_grad))
-    w = w_updated
-}
-
-let y_pred_final = matmul(x, w)
-let loss_final   = mse_loss(y_pred_final, y_true)
-```
-
-### Neural Network Inference
-
-```
-// 2-layer MLP for binary classification
-let input: Tensor[f32, (batch, 784)] = load("input.npy")
-
-let w1: Tensor[f32, (784, 256)] = load("w1.npy")
-let b1: Tensor[f32, (256,)]     = load("b1.npy")
-let hidden = relu(linear(input, w1, b1))
-
-let w2: Tensor[f32, (256, 2)] = load("w2.npy")
-let b2: Tensor[f32, (2,)]     = load("b2.npy")
-let logits      = linear(hidden, w2, b2)
-let probs       = softmax(logits, axis=1)
-let predictions = argmax(probs, axis=1)
-```
-
-### Data Processing Pipeline
-
-```
-let raw_data: Tensor[f32, (1000, 50)] = load("features.npy")
-
-let zeros    = fill(0.0, (1000, 50))
-let mask     = greater(raw_data, zeros)
-let filtered = mult(raw_data, mask)
-
-let col_means = mean(filtered, axis=0)
-let centered  = minus(filtered, col_means)
-```
-
-### User-Defined Functions
-
-```
-fn normalize(x: Tensor[M, N]) -> Tensor[M, N] {
-    let mu    = mean(x, axis=1)
-    let sigma = mean(x, axis=1)
-    return minus(x, mu)
-}
-
-fn risk_adjusted(returns: Tensor[M, N], weights: Tensor[N, P], risk: Tensor[M, 1]) -> Tensor[M, P] {
-    let port = matmul(returns, weights)
-    return div(port, risk)
-}
-```
-
-## Example Applications
-
-The snippets above are language demonstrations; `apps/` has full, runnable programs:
-
-* **`apps/examples/hello_mlp`** — the minimal "hello world": a single weight trained to fit `y = 2x` over 5 epochs. Start here.
-* **`apps/examples/linear_regression`** — a slightly larger single-run training example.
-* **`apps/examples/decision_boundary`** — trains a 2-8-1 tanh/sigmoid MLP on XOR and plays back the decision boundary morphing across training as a pygame animation. Demonstrates the chunked-invocation pattern (`load()`/`save()` state across repeated `tensorlang.py` runs) needed for any app that wants to visualize *how* training progresses, not just its final result. Run with `python3 tensorlang.py --app examples/decision_boundary` (fresh clone: initializes weights, trains 40 chunks, then plays back; `--step reset` to start over, `--step play` to just replay the last run's snapshots).
-* **`apps/tlkit/`** — shared toolkit extracted from `decision_boundary` for building further visual/interactive apps: a chunked-invocation runner, a pygame play/pause/scrub harness, and colormap/grid helpers. See `apps/tlkit/README.md`.
-* **`apps/games/tic_tac_toe`** — a 9-32-9 MLP trained to imitate a minimax-optimal policy, playable interactively (human-vs-AI or AI-vs-AI self-play) via pygame. First app in a new `apps/games/` category: tensor-lang runs the neural net, plain Python runs the game rules — same architectural split as the `apps/examples/` apps.
-* **`apps/games/2048`** — a deliberately different kind of test case: instead of tensor-lang only running a neural net, the actual game mechanics (sliding, compacting, merging tiles) are implemented *as* tensor arithmetic in `step.tl`, stress-testing whether the language's primitive set (no gather/scatter/sort) is expressive enough for a real non-trivial algorithm. Verified end-to-end on real GPU hardware. Building it surfaced and fixed four compiler bugs — see `apps/games/2048/NOTES.md` for the full writeup and `HANDOVER.md` §17 for the handover-level summary. Run with `python3 tensorlang.py --app games/2048 --app-args <16 numbers>`.
-
-See `apps/README.md` for how apps are structured and discovered.
+---
 
 ## Future Work
 
 ### Short Term
 
-* **Scoped Kernel Names**: Prefix loop-body kernel symbols with the loop variable to eliminate the post-loop naming constraint (`loss` inside loop clashing with `loss_final` at top level)
-* **Error Messages**: Descriptive shape mismatch errors from the type checker with operand names and actual vs expected shapes
-* **CUDA kernel dispatch for `(1,1)` × 1D vector broadcasting**: the type checker correctly accepts this case now, but `compiler.py`'s codegen dispatch routes any `(2D, 1D)` shape pair through `binary_broadcast()`, which assumes the 2D operand is a genuine matrix and does `rows, cols = output_shape` — this fails for a disguised scalar like `(1,1)`. A purpose-built scalar kernel (`binary_1d_broadcast`) already exists but is currently only reachable when *both* operands are 1D. Needs a dispatch branch that detects a true scalar regardless of its declared rank and routes to a (possibly new) kernel that preserves operand order for non-commutative ops (`minus`/`div`).
+* Scope kernel names to remove post-loop naming constraints
+* Improve shape-mismatch error messages
+* Fix scalar `(1,1)` broadcast code generation
+* Fix broadcast `equal` dispatch
+* Fix `transpose` axes support
+* Fix `layer_norm` axis `0`
+* Expand autograd coverage
+* Expand for-loop body operation coverage
+* Fix rebind GPU memory leak
 
 ### Medium Term
 
-* **Optimisers**: Built-in SGD and Adam update rules as language primitives, removing the need for manual gradient application
-* **Custom Functions Inside Loops**: User-defined functions callable within `for` loop bodies
-* **Memory Optimisation**: Buffer pooling and reuse strategies for long training runs
-* **Nested Loops**: Inner loops for mini-batch iteration inside an epoch loop
-* **`app.toml` GPU allocation**: `requirements.gpus` is currently cosmetic (display-only) — `tensorlang/gpu.py`'s `choose_device()` is ready to back a real `AppRunner._validate_requirements()` implementation, but that wiring isn't done yet
+* Built-in optimisers (SGD, Adam)
+* Kernel fusion
+* Buffer pooling for long training runs
+* Nested loops
+* Hot reload in dev mode
+* Zero-copy Python/PyTorch interop
 
 ### Long Term
 
-* **Multi-GPU (Tier-B)**: a *single* program spanning multiple devices at once (splitting one computation graph's tensors across GPUs, with cross-device copies/peer access) — distinct from the process-level GPU pinning already implemented for the test runner (see [Multi-GPU Test Execution](#multi-gpu-test-execution)), which assigns one whole program to one whole GPU
-* **Mixed Precision**: FP16/FP32 automatic casting for memory efficiency
-* **MLIR Integration**: Leverage compiler infrastructure for portable backend targeting
-* **Hardware Backends**: Support for ROCm, Metal, and other accelerators
-
-## Contributing
-
-Contributions welcome! TensorLang is designed for extensibility:
-
-* **New Operations**: Add grammar rules, type checking, forward kernels, and backward gradient kernels
-* **Optimisations**: Improve existing kernel implementations
-* **Testing**: Add test cases with `@EXPECTED` annotations — always copy exact values from a real run, never manually rounded approximations
-* **Documentation**: Improve examples and architectural documentation
-
-See `CONTRIBUTING.md` for detailed guidelines.
-
-## License
-
-Licensed under GNU Lesser General Public License v3 (LGPL-3.0) - see `LICENSE` file for details.
+* Multi-GPU single-program execution (Tier-B)
+* Mixed precision (FP16/FP32), validated on appropriate hardware
+* MLIR integration
+* Additional hardware backends (ROCm, Metal)
 
 ---
 
-**TensorLang** - Native ML language with GPU acceleration, automatic differentiation, training loops, and inline expressions. Built for performance, designed for productivity.
+## Contributing
+
+Contributions are welcome. Useful areas include:
+
+* New operations and their gradients
+* Kernel optimisations
+* Tests with exact `@EXPECTED` values from real runs
+* Documentation improvements
+* Application examples
+
+When adding tests, copy expected values from a real run. Do not manually round or approximate them.
+
+---
+
+## License
+
+Licensed under the GNU Lesser General Public License v3 (LGPL-3.0). See `LICENSE` for details.
+```
+
+---
+
+## Suggested next implementation order
+
+1. Fix `broadcast equal` dispatch.
+2. Fix `(1,1)` scalar broadcast dispatch.
+3. Fix `transpose` axes.
+4. Fix `layer_norm` axis `0`.
+5. Wire `linear` into autograd recording.
+6. Add exact tests for each fixed behavior.
+7. Update this README again as features become genuinely supported.
