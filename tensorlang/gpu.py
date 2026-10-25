@@ -23,9 +23,9 @@ bigger change to the execution engine in compiler.py, and isn't what
 this module is for.
 """
 
+import functools
 import os
 import subprocess
-import functools
 
 
 @functools.lru_cache(maxsize=1)

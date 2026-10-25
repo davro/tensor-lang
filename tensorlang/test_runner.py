@@ -1,13 +1,14 @@
 # tensorlang/test_runner.py
+import json
 import os
+import re
+import subprocess
 import sys
 import time
-import json
-import re
-import numpy as np
-import subprocess
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import numpy as np
 
 try:
     from tqdm import tqdm
@@ -84,7 +85,7 @@ class TestRunner:
         try:
             with open(tl_file_path, "r") as f:
                 content = f.read()
-        except Exception:
+        except (OSError, UnicodeError):
             return False
         return bool(re.search(r"//\s*@EXPECT_FAILURE\b", content))
 
@@ -99,7 +100,6 @@ class TestRunner:
 
         Returns tuple: (test_file, success, timing_str, failure_reason, report_data)
         """
-        original_dir = os.getcwd()
         subprocess_env = pin_env(gpu_index) if gpu_index is not None else None
 
         try:
@@ -142,8 +142,8 @@ class TestRunner:
                     return (test_file, True, timing_str, None, None)
                 else:
                     return (test_file, False, timing_str,
-                             "Expected non-zero exit code (compile should have failed) "
-                             "but tensorlang exited 0", None)
+                             ("Expected non-zero exit code (compile should have failed) "
+                             "but tensorlang exited 0"), None)
 
             expected_results = self.extract_expected_from_tl(tl_path)
             
@@ -212,7 +212,7 @@ class TestRunner:
                 verifier = TensorVerifier()
                 computed_tensors = {
                     name: self.load_npy_result(cache_dir, name)
-                    for name in expected_results.keys()
+                    for name in expected_results
                 }
                 computed_tensors = {k: v for k, v in computed_tensors.items() if v is not None}
                 
@@ -385,7 +385,7 @@ class TestRunner:
         try:
             with open(tl_file_path, "r") as f:
                 content = f.read()
-        except Exception as e:
+        except (OSError, UnicodeError) as e:
             print(f"Warning: Failed to read {tl_file_path}: {e}")
             return None
         
@@ -425,7 +425,7 @@ class TestRunner:
             try:
                 start_str = timing_str.split(" → ")[0].replace("[", "").replace("s", "")
                 return float(start_str)
-            except:
+            except (ValueError, IndexError):
                 return 0
         return 0
 
@@ -445,7 +445,7 @@ class TestRunner:
         
         try:
             return np.load(npy_path)
-        except Exception as e:
+        except (OSError, ValueError, EOFError) as e:
             print(f"Warning: Failed to load {npy_path}: {e}")
             return None
 
@@ -475,8 +475,8 @@ class TestRunner:
                 if not np.allclose(computed_arr, expected_arr, rtol=1e-5, atol=1e-8):
                     max_diff = np.abs(computed_arr - expected_arr).max()
                     return False, f"Values differ (max diff: {max_diff})"
-            except Exception as e:
-                return False, f"Comparison error: {str(e)}"
+            except (ValueError, TypeError, RuntimeError) as e:
+                return False, f"Comparison error: {e!s}"
         
         return True, None
 
@@ -523,7 +523,7 @@ class TestRunner:
             if verify_tensors:
                 if report_data:
                     if isinstance(report_data, tuple):
-                        v_report, tensor_summary = report_data
+                        _v_report, tensor_summary = report_data
                         s = tensor_summary
                     else:
                         s = report_data.get("summary", {}) if report_data else {}

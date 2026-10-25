@@ -5,16 +5,17 @@ Implements automatic differentiation for training neural networks.
 File: tensorlang/autograd.py
 """
 
+
 import numpy as np
-from typing import Dict, List, Optional, Set, Tuple
-from collections import defaultdict
+
 from tensorlang.tensor_lang import TensorLang
+
 
 class ComputationNode:
     """Represents a single operation in the computation graph."""
     
-    def __init__(self, op_type: str, output_name: str, inputs: List[str], 
-                 metadata: Optional[Dict] = None):
+    def __init__(self, op_type: str, output_name: str, inputs: list[str], 
+                 metadata: dict | None = None):
         self.op_type = op_type
         self.output_name = output_name
         self.inputs = inputs
@@ -33,10 +34,10 @@ class ComputationGraph:
     """
     
     def __init__(self, debug_mode: bool = False):
-        self.nodes: List[ComputationNode] = []
-        self.tensors: Dict[str, np.ndarray] = {}
-        self.gradients: Dict[str, np.ndarray] = {}
-        self.requires_grad: Set[str] = set()
+        self.nodes: list[ComputationNode] = []
+        self.tensors: dict[str, np.ndarray] = {}
+        self.gradients: dict[str, np.ndarray] = {}
+        self.requires_grad: set[str] = set()
         self.tensorlang = TensorLang()
         self.debug_mode = debug_mode
         
@@ -47,8 +48,8 @@ class ComputationGraph:
             self.requires_grad.add(name)
             self.gradients[name] = np.zeros_like(value)
             
-    def add_operation(self, op_type: str, output_name: str, inputs: List[str], 
-                     metadata: Optional[Dict] = None):
+    def add_operation(self, op_type: str, output_name: str, inputs: list[str], 
+                     metadata: dict | None = None):
         """Record an operation in the computation graph."""
         node = ComputationNode(op_type, output_name, inputs, metadata)
         self.nodes.append(node)
@@ -160,7 +161,7 @@ class ComputationGraph:
         self.gradients[loss_name] = np.ones_like(self.tensors[loss_name])
         
         if self.debug_mode:
-            self.tensorlang.print(message=f"[AUTOGRAD] Set loss gradient to 1.0")
+            self.tensorlang.print(message="[AUTOGRAD] Set loss gradient to 1.0")
         
         # ================================================================
         # Step 4: Backward pass - traverse graph in REVERSE topological order
@@ -206,7 +207,7 @@ class ComputationGraph:
         # Step 6: Debug output
         # ================================================================
         if self.debug_mode:
-            self.tensorlang.print(message=f"[AUTOGRAD] Backward pass complete")
+            self.tensorlang.print(message="[AUTOGRAD] Backward pass complete")
             self.tensorlang.print(message=f"[AUTOGRAD] Gradients computed for {len(self.gradients)} tensors")
             
             # Print gradients for leaf tensors (requires_grad)
@@ -353,7 +354,7 @@ class ComputationGraph:
     #     return grad
     
 
-    def _unbroadcast(self, grad: np.ndarray, target_shape: Tuple) -> np.ndarray:
+    def _unbroadcast(self, grad: np.ndarray, target_shape: tuple) -> np.ndarray:
         """
         Reverse broadcasting by summing over broadcast dimensions.
         
@@ -685,9 +686,6 @@ class ComputationGraph:
         mean = x.mean(axis=axis, keepdims=True)
         var = x.var(axis=axis, keepdims=True)
         std = np.sqrt(var + eps)
-        
-        # Normalized input
-        x_norm = (x - mean) / std
         
         # Gradient computation
         N = x.shape[axis]

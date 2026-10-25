@@ -8,9 +8,8 @@ This module defines the `TensorLang` class, which handles:
 It serves as the entry point for running TensorLang scripts or tests.
 """
 
-import sys
-from pathlib import Path
 import argparse
+
 
 class TensorLang:
     """Main utility and setup class for the TensorLang runtime."""

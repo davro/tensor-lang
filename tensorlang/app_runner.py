@@ -1,15 +1,15 @@
 import os
+import subprocess
 import sys
 import time
-import subprocess
-import tomli
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any
+
+import tomli
 
 from tensorlang.compiler import TensorCompiler
+from tensorlang.gpu import choose_device, detect_gpus, pin_current_process
 from tensorlang.test_runner import TestRunner
-from tensorlang.gpu import choose_device, pin_current_process, detect_gpus
-
 
 # https://claude.ai/chat/f02bfbe4-7e6e-42c8-affb-e6e6809acd75
 
@@ -43,7 +43,7 @@ class AppRunner:
         if not self.apps_dir.exists():
             raise FileNotFoundError(f"Apps directory not found: {self.apps_dir}")
 
-    def list_apps(self, category: Optional[str] = None):
+    def list_apps(self, category: str | None = None):
         """List all available apps, optionally filtered by category"""
         print("=" * 60)
         print("Available TensorLang Applications")
@@ -52,7 +52,7 @@ class AppRunner:
         apps = self._discover_apps()
 
         # Group by category
-        by_category: Dict[str, List[Dict[str, Any]]] = {}
+        by_category: dict[str, list[dict[str, Any]]] = {}
         for app in apps:
             cat = app['category']
             if cat not in by_category:
@@ -64,7 +64,7 @@ class AppRunner:
             by_category = {k: v for k, v in by_category.items() if k.startswith(category)}
 
         if not by_category:
-            print(f"No apps found" + (f" in category: {category}" if category else ""))
+            print("No apps found" + (f" in category: {category}" if category else ""))
             return
 
         # Display
@@ -81,7 +81,7 @@ class AppRunner:
         print("\nUsage: python tensorlang.py --app <name>")
         #print("Example: python tensorlang.py --app web/desktop/dynamic")
 
-    def _discover_apps(self) -> List[Dict[str, Any]]:
+    def _discover_apps(self) -> list[dict[str, Any]]:
         """Discover all apps with app.toml files"""
         apps = []
 
@@ -100,13 +100,13 @@ class AppRunner:
                         'requirements': self._format_requirements(config.get('requirements', {})),
                         'config': config
                     })
-                except Exception as e:
+                except (OSError, ValueError, KeyError, UnicodeError) as e:
                     if self.debug_mode:
                         print(f"Warning: Failed to load {app_path / 'app.toml'}: {e}")
 
         return sorted(apps, key=lambda x: (x['category'], x['name']))
 
-    def _format_requirements(self, reqs: Dict[str, Any]) -> str:
+    def _format_requirements(self, reqs: dict[str, Any]) -> str:
         """Format requirements for display"""
         parts = []
         if 'gpus' in reqs:
@@ -117,7 +117,7 @@ class AppRunner:
             parts.append(f"{reqs['memory_gb']}GB RAM")
         return ", ".join(parts) if parts else ""
 
-    def _load_app_config(self, config_path: Path) -> Dict[str, Any]:
+    def _load_app_config(self, config_path: Path) -> dict[str, Any]:
         """Load and parse app.toml configuration"""
         with open(config_path, 'rb') as f:
             return tomli.load(f)
@@ -126,11 +126,11 @@ class AppRunner:
         self,
         app_path: str,
         run_tests: bool = False,
-        test_filter: Optional[str] = None,
+        test_filter: str | None = None,
         dev_mode: bool = False,
         benchmark: bool = False,
-        step: Optional[str] = None,
-        app_args: Optional[List[str]] = None
+        step: str | None = None,
+        app_args: list[str] | None = None
     ):
         """Run a tensorlang application"""
         # Resolve app path
@@ -179,7 +179,7 @@ class AppRunner:
         else:
             self._run_app_normal(full_path, config, app_args)
 
-    def _validate_requirements(self, config: Dict[str, Any]):
+    def _validate_requirements(self, config: dict[str, Any]):
         """Validate/act on system requirements declared in app.toml.
 
         Runs two independent checks, unconditionally, regardless of which
@@ -204,7 +204,7 @@ class AppRunner:
         self._ensure_packages(requirements.get('packages', []))
         self._validate_gpu_requirements(config, requirements)
 
-    def _ensure_packages(self, packages: List[str]):
+    def _ensure_packages(self, packages: list[str]):
         """Import-check each named package, `pip install`-ing any that are
         missing. Mirrors run.sh's `python3 -c "import X" || pip install X`
         pattern, including its fail-loud behavior on a failed install —
@@ -220,13 +220,13 @@ class AppRunner:
                 importlib.import_module(pkg)
             except ImportError:
                 print(f"== installing missing dependency: {pkg} ==")
-                result = subprocess.run([sys.executable, "-m", "pip", "install", pkg])
+                result = subprocess.run([sys.executable, "-m", "pip", "install", pkg], check=False)
                 if result.returncode != 0:
                     print(f"Error: failed to install required package '{pkg}' "
                           f"(exit {result.returncode}).")
                     sys.exit(result.returncode)
 
-    def _validate_gpu_requirements(self, config: Dict[str, Any], requirements: Dict[str, Any]):
+    def _validate_gpu_requirements(self, config: dict[str, Any], requirements: dict[str, Any]):
         """The `requirements.gpus` / `[gpu] device` half of
         `_validate_requirements` — see that method's docstring."""
         requested_gpus = requirements.get('gpus')
@@ -290,7 +290,7 @@ class AppRunner:
         print(f"GPU: pinned to device {chosen[0]} (least-utilized of "
               f"{len(detect_gpus())} detected; app requests {requested_gpus} GPU(s))")
 
-    def _run_app_normal(self, app_path: Path, config: Dict[str, Any], app_args: Optional[List[str]]):
+    def _run_app_normal(self, app_path: Path, config: dict[str, Any], app_args: list[str] | None):
         """Run app in normal mode (bare `--app <name>`, no flags).
 
         If the app declares a `[lifecycle] default` pipeline, that's now
@@ -319,7 +319,7 @@ class AppRunner:
 
         self._execute_tl_file(main_file, app_args)
 
-    def _execute_tl_file(self, tl_path: Path, app_args: Optional[List[str]]) -> bool:
+    def _execute_tl_file(self, tl_path: Path, app_args: list[str] | None) -> bool:
         """Compile and execute a single `.tl` file. Shared by the plain
         `main` entry, `--step <name>` for a `.tl` entry, and each step of
         a `[lifecycle]` pipeline."""
@@ -359,9 +359,9 @@ class AppRunner:
     def _run_entry_point(
         self,
         app_path: Path,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         entry_name: str,
-        app_args: Optional[List[str]] = None
+        app_args: list[str] | None = None
     ):
         """Dispatch a single named `[entry_points]` entry by file type.
 
@@ -407,7 +407,7 @@ class AppRunner:
             return self._execute_tl_file(target_path, run_args or None)
 
         print(f"\n== {entry_name}: {target_path} ==")
-        result = subprocess.run([sys.executable, str(target_path)] + run_args)
+        result = subprocess.run([sys.executable, str(target_path)] + run_args, check=False)
         if result.returncode != 0:
             print(f"\nStep '{entry_name}' failed (exit {result.returncode}).")
             sys.exit(result.returncode)
@@ -438,7 +438,7 @@ class AppRunner:
         return True
 
     @staticmethod
-    def _parse_lifecycle_step(step: str, lifecycle: Dict[str, Any]):
+    def _parse_lifecycle_step(step: str, lifecycle: dict[str, Any]):
         """Parse one `[lifecycle]` pipeline step into (entry_name,
         marker_or_None); marker is None for a step that always runs.
 
@@ -468,9 +468,9 @@ class AppRunner:
     def _run_named_lifecycle(
         self,
         app_path: Path,
-        config: Dict[str, Any],
-        steps: List[str],
-        app_args: Optional[List[str]] = None,
+        config: dict[str, Any],
+        steps: list[str],
+        app_args: list[str] | None = None,
     ):
         """Run an ordered list of `entry_points` names as one pipeline —
         either app.toml's `[lifecycle] default` (bare `--app <name>`) or
@@ -517,7 +517,7 @@ class AppRunner:
         os.environ[_LIFECYCLE_ACTIVE_ENV] = "1"
         try:
             lifecycle = config.get('lifecycle', {})
-            marker_snapshot: Dict[str, bool] = {}
+            marker_snapshot: dict[str, bool] = {}
             for step in steps:
                 entry_name, marker = self._parse_lifecycle_step(step, lifecycle)
                 if marker is not None:
@@ -531,7 +531,7 @@ class AppRunner:
         finally:
             os.environ.pop(_LIFECYCLE_ACTIVE_ENV, None)
 
-    def _run_app_tests(self, app_path: Path, config: Dict[str, Any], test_filter: Optional[str]):
+    def _run_app_tests(self, app_path: Path, config: dict[str, Any], test_filter: str | None):
         """Run app test suite"""
         tests_dir = app_path / "tests"
 
@@ -555,12 +555,12 @@ class AppRunner:
             test_files = [t for t in test_files if test_filter in t]
 
         if not test_files:
-            print(f"No tests found" + (f" matching: {test_filter}" if test_filter else ""))
+            print("No tests found" + (f" matching: {test_filter}" if test_filter else ""))
             sys.exit(1)
 
         runner.run_test_suite(test_files)
 
-    def _run_benchmark(self, app_path: Path, config: Dict[str, Any]):
+    def _run_benchmark(self, app_path: Path, config: dict[str, Any]):
         """Run app in benchmark mode"""
         entry_points = config.get('entry_points', {})
         bench_entry = entry_points.get('benchmark', entry_points.get('main', None))
@@ -622,7 +622,7 @@ class AppRunner:
         print(f"Max:     {max_time:.4f}s")
         print(f"Range:   {max_time - min_time:.4f}s")
 
-    def _run_dev_mode(self, app_path: Path, config: Dict[str, Any], app_args: Optional[List[str]]):
+    def _run_dev_mode(self, app_path: Path, config: dict[str, Any], app_args: list[str] | None):
         """Run app in development mode with hot reload"""
         print(f"\n{'=' * 60}")
         print("DEVELOPMENT MODE - File watching enabled")

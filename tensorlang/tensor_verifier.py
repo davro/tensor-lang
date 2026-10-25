@@ -4,11 +4,11 @@ Validates computed tensors against cached .npy references
 Captures metadata: shape, dtype, statistics, hash, operation type
 """
 
-import json
 import hashlib
-import numpy as np
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Any
+from typing import Any
+
+import numpy as np
 
 
 class TensorMetadata:
@@ -22,7 +22,7 @@ class TensorMetadata:
         self.dtype = str(array.dtype)
         self.size = array.size
 
-    def compute_stats(self) -> Dict[str, Any]:
+    def compute_stats(self) -> dict[str, Any]:
         """Compute statistical properties."""
         return {
             "shape": self.shape,
@@ -40,7 +40,7 @@ class TensorMetadata:
         """Compute SHA256 hash of tensor data."""
         return hashlib.sha256(self.array.tobytes()).hexdigest()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize metadata to dict."""
         return {
             "name": self.name,
@@ -56,15 +56,15 @@ class TensorVerifier:
     def __init__(self, rtol: float = 1e-5, atol: float = 1e-8):
         self.rtol = rtol
         self.atol = atol
-        self.verification_log: Dict[str, Any] = {}
+        self.verification_log: dict[str, Any] = {}
 
-    def load_npy_file(self, npy_path: str) -> Optional[np.ndarray]:
+    def load_npy_file(self, npy_path: str) -> np.ndarray | None:
         """Load .npy file, return None if not found."""
         try:
             return np.load(npy_path)
         except FileNotFoundError:
             return None
-        except Exception as e:
+        except (OSError, ValueError, EOFError):
             return None
 
     def compare_arrays(
@@ -72,7 +72,7 @@ class TensorVerifier:
         computed: np.ndarray,
         expected: np.ndarray,
         name: str
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """
         Compare two arrays with tolerance.
         Returns (is_match, message).
@@ -106,19 +106,19 @@ class TensorVerifier:
                     f"Values don't match within tolerance "
                     f"(max diff: {max_diff:.2e}, rtol={self.rtol}, atol={self.atol})"
                 )
-        except Exception as e:
-            return False, f"Comparison error: {str(e)}"
+        except (ValueError, TypeError, RuntimeError) as e:
+            return False, f"Comparison error: {e!s}"
 
         return True, "Values match within tolerance"
 
     def verify_tensor(
         self,
         computed: np.ndarray,
-        expected: Optional[np.ndarray],
+        expected: np.ndarray | None,
         name: str,
         op_type: str = "unknown",
-        npy_path: Optional[str] = None
-    ) -> Dict[str, Any]:
+        npy_path: str | None = None
+    ) -> dict[str, Any]:
         """
         Verify a single tensor against expected value and/or .npy file.
         Returns verification report with metadata.
@@ -194,11 +194,11 @@ class TensorVerifier:
 
     def verify_all_tensors(
         self,
-        computed_tensors: Dict[str, np.ndarray],
-        expected_results: Dict[str, Any],
+        computed_tensors: dict[str, np.ndarray],
+        expected_results: dict[str, Any],
         cache_dir: str,
-        op_types: Optional[Dict[str, str]] = None
-    ) -> Tuple[bool, Dict[str, Any]]:
+        op_types: dict[str, str] | None = None
+    ) -> tuple[bool, dict[str, Any]]:
         """
         Verify all tensors from a test.
         Returns (all_passed, detailed_report).
@@ -243,7 +243,7 @@ class TensorVerifier:
 
         return all_passed, detailed_report
 
-    def format_report(self, report: Dict[str, Any], tensor_name: str) -> str:
+    def format_report(self, report: dict[str, Any], tensor_name: str) -> str:
         """Format verification report for console output."""
         tensor_report = report["tensors"][tensor_name]
         lines = []
@@ -273,7 +273,7 @@ class TensorVerifier:
 
         return "\n".join(lines)
 
-    def get_test_summary(self, report: Dict[str, Any]) -> str:
+    def get_test_summary(self, report: dict[str, Any]) -> str:
         """Get summary string for test results."""
         s = report["summary"]
         passed_str = f"✅ {s['passed']}/{s['total']}"

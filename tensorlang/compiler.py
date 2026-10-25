@@ -1,31 +1,22 @@
-import sys
-import os
-import time
 import errno
-import textwrap  
-import traceback 
 import subprocess
-
-import pandas as pd
-from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
-
-from pathlib import Path
-import numpy as np
-from lark import Lark, Tree, Token, UnexpectedInput
-from datetime import datetime
-from ctypes import c_void_p, c_int, c_float
+import sys
+import time
+import traceback
+from ctypes import c_float, c_int, c_void_p
 from functools import reduce
-from typing import Optional
 from pathlib import Path
+from typing import Any
 
-from tensorlang.tensor_lang import TensorLang
-from tensorlang.kernel_generator import KernelGenerator
-from tensorlang.type_checker import type_checker
+import numpy as np
+import pandas as pd
+from lark import Lark, UnexpectedInput
+
 from tensorlang.ast_builder import build_ast
-from tensorlang.type_checker import _is_scalar_shape
-
-from tensorlang.autograd import ComputationGraph, AutogradContext
+from tensorlang.autograd import AutogradContext, ComputationGraph
+from tensorlang.kernel_generator import KernelGenerator
+from tensorlang.tensor_lang import TensorLang
+from tensorlang.type_checker import _is_scalar_shape, type_checker
 
 
 class TensorCompiler:
@@ -66,7 +57,7 @@ class TensorCompiler:
                 return False
         return True
 
-    def _load_data_file(self, file_path: str, array_name: Optional[str] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _load_data_file(self, file_path: str, array_name: str | None = None) -> tuple[np.ndarray, dict[str, Any]]:
         path = Path(file_path)
         if not path.is_absolute():
             path = Path.cwd() / path
@@ -131,7 +122,7 @@ class TensorCompiler:
                 self.tensorlang.print(message=f"[COMPILER] Loading .csv file: {path.name}")
             try:
                 df = pd.read_csv(path)
-            except Exception as e:
+            except (OSError, ValueError, UnicodeError) as e:
                 raise ValueError(f"Failed to parse CSV file {path.name}: {e}")
             metadata['columns'] = df.columns.tolist()
             metadata['rows'] = len(df)
@@ -466,7 +457,7 @@ class TensorCompiler:
             )
 
         elif op_type == 'softmax':
-            rows, cols, axis = dims
+            rows, cols, _axis = dims
             getattr(lib, f'launch_softmax_{name}')(
                 c_void_p(int(gpu_allocs[arg1])),
                 c_void_p(int(gpu_allocs[name])),
@@ -474,7 +465,7 @@ class TensorCompiler:
             )
 
         elif op_type in ['sum_axis', 'sum_axis0']:
-            rows, cols, axis = dims
+            rows, cols, _axis = dims
             getattr(lib, f'launch_sum_{name}')(
                 c_void_p(int(gpu_allocs[arg1])),
                 c_void_p(int(gpu_allocs[name])),
@@ -516,7 +507,7 @@ class TensorCompiler:
             )
 
         elif op_type in ['mean_axis', 'mean_axis0']:
-            rows, cols, axis = dims
+            rows, cols, _axis = dims
             getattr(lib, f'launch_mean_{name}')(
                 c_void_p(int(gpu_allocs[arg1])),
                 c_void_p(int(gpu_allocs[name])),
@@ -533,7 +524,7 @@ class TensorCompiler:
             )
 
         elif op_type in ['max_axis', 'max_axis0', 'min_axis', 'min_axis0']:
-            rows, cols, axis = dims
+            rows, cols, _axis = dims
             op_name = op_type.split('_')[0]
             getattr(lib, f'launch_{op_name}_{name}')(
                 c_void_p(int(gpu_allocs[arg1])),
@@ -550,7 +541,7 @@ class TensorCompiler:
                     c_int(size)
                 )
             else:
-                rows, cols, axis = dims
+                rows, cols, _axis = dims
                 getattr(lib, f'launch_argmax_{name}')(
                     c_void_p(int(gpu_allocs[arg1])),
                     c_void_p(int(gpu_allocs[name])),
@@ -566,7 +557,7 @@ class TensorCompiler:
                     c_int(size)
                 )
             else:
-                rows, cols, axis = dims
+                rows, cols, _axis = dims
                 getattr(lib, f'launch_argmin_{name}')(
                     c_void_p(int(gpu_allocs[arg1])),
                     c_void_p(int(gpu_allocs[name])),
@@ -765,7 +756,7 @@ class TensorCompiler:
                 )
             else:
                 self.tensorlang.print(message=f"[COMPILER] Saved {tensor_name} to {save_path}")
-        except IOError as e:
+        except OSError as e:
             self.tensorlang.print(message=f"[COMPILER] Error saving {tensor_name} to {file_path}: {e}")
 
     # =========================================================================
@@ -921,7 +912,7 @@ class TensorCompiler:
         if tensorlang_file:
             file_path = Path(tensorlang_file)
         else:
-            self.tensorlang.print(message=f"[COMPILER] Error missing file")
+            self.tensorlang.print(message="[COMPILER] Error missing file")
             return False
 
         if not file_path.exists():
@@ -944,7 +935,7 @@ class TensorCompiler:
             else:
                 print(f"[COMPILER] TensorLang {self.version} — compiling {file_path.name}")
         else:
-            self.tensorlang.print(message=f"[COMPILER] file not found, suffix is not .tl")
+            self.tensorlang.print(message="[COMPILER] file not found, suffix is not .tl")
             self.tensorlang.separator()
             sys.exit(1)
 
@@ -977,12 +968,12 @@ class TensorCompiler:
         try:
             if self.debug_mode:
                 self.tensorlang.separator()
-                self.tensorlang.print(type=f"")
+                self.tensorlang.print(type="")
                 self.tensorlang.print(type=f"{code}")
                 self.tensorlang.separator()
-                self.tensorlang.print(type=f"")
+                self.tensorlang.print(type="")
                 self.tensorlang.separator()
-                self.tensorlang.print(type=f"[COMPILER] TensorLang > Lark > Parser > Compiler > CUDA Kernel -> Results")
+                self.tensorlang.print(type="[COMPILER] TensorLang > Lark > Parser > Compiler > CUDA Kernel -> Results")
                 self.tensorlang.separator()
 
             cache_base     = Path("cache")
@@ -996,7 +987,7 @@ class TensorCompiler:
                 self.tensorlang.print(message=f"[COMPILER] CACHE TENSORLANG_FILE: {tensorlang_file}")
 
             if self.debug_info:
-                self.tensorlang.print(type="[INFO]", message=f"Created cache for tensor outputs directory")
+                self.tensorlang.print(type="[INFO]", message="Created cache for tensor outputs directory")
 
             parse_tree = parser.parse(code)
             if self.debug_ast:
@@ -1164,7 +1155,7 @@ class TensorCompiler:
                             except FileNotFoundError as e:
                                 self.tensorlang.print(message=f"[COMPILER] Error: {e}")
                                 return False
-                            except Exception as e:
+                            except (OSError, ValueError, KeyError) as e:
                                 self.tensorlang.print(message=f"[COMPILER] Error loading {file_path_load}: {e}")
                                 if self.debug_mode:
                                     traceback.print_exc()
@@ -1514,7 +1505,7 @@ class TensorCompiler:
                 # ============================================================
                 if kernels:
                     if self.debug_mode:
-                        self.tensorlang.print(message=f"[COMPILER] KERNEL CUDA!")
+                        self.tensorlang.print(message="[COMPILER] KERNEL CUDA!")
 
                     kernel_cu_path = cache_file_dir / "kernel.cu"
                     kernel_so_path = cache_file_dir / "kernel.so"
@@ -1560,7 +1551,6 @@ class TensorCompiler:
 
                     if self.transpile:
                         try:
-                            import json
                             from tensorlang.transpiler.wgsl import WGSLTranspiler
                             if self.debug_mode:
                                 self.tensorlang.print(message=f"[TRANSPILE] Reading {kernel_cu_path} for WGSL...")
@@ -1569,7 +1559,7 @@ class TensorCompiler:
                             transpiler.save(wgsl, cache_file_dir)
                             if self.debug_mode:
                                 self.tensorlang.print(f"[WGSL] Saved to {cache_file_dir}")
-                        except Exception as e:
+                        except (ImportError, OSError, RuntimeError, ValueError, AttributeError) as e:
                             self.tensorlang.print(message=f"[TRANSPILE] ERROR: {e}")
                             traceback.print_exc()
                             sys.exit(1)
@@ -1578,9 +1568,10 @@ class TensorCompiler:
                     # EXECUTION
                     # =========================================================
                     try:
-                        import pycuda.driver as cuda
-                        import pycuda.autoinit
                         from ctypes import cdll
+
+                        import pycuda.autoinit  # noqa: F401
+                        import pycuda.driver as cuda
 
                         lib = cdll.LoadLibrary(str(kernel_so_path))
 
@@ -1694,19 +1685,19 @@ class TensorCompiler:
                         # Cache tensor literals
                         # =====================================================
                         if self.cache_layers:
-                            for name in tensors:
+                            for name, value in tensors.items():
                                 cache_npy_path = cache_file_dir / f"{name}.npy"
                                 if not cache_npy_path.exists():
-                                    np.save(cache_npy_path, tensors[name])
+                                    np.save(cache_npy_path, value)
                                     if self.debug_mode:
                                         self.tensorlang.print(message=f"[COMPILER] CUDA Execute: tensor literal: {name}")
 
                         # =====================================================
                         # Register tensors in autograd graph
                         # =====================================================
-                        for name in tensors:
+                        for name, value in tensors.items():
                             requires_grad = name in self.requires_grad_tensors
-                            self.comp_graph.register_tensor(name, tensors[name], requires_grad)
+                            self.comp_graph.register_tensor(name, value, requires_grad)
                             if self.debug_mode and requires_grad:
                                 self.tensorlang.print(message=f"[COMPILER] [Autograd] CUDA Execute: registered '{name}' with gradient tracking")
 
@@ -1755,7 +1746,7 @@ class TensorCompiler:
                                             if self.cache_layers:
                                                 grad_var_cache_path = cache_file_dir / f"{grad_tensor_name}.npy"
                                                 np.save(grad_var_cache_path, grad_tensor)
-                                except Exception as e:
+                                except (RuntimeError, ValueError, KeyError, OSError, TypeError) as e:
                                     self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
                                     if self.debug_mode:
                                         traceback.print_exc()
@@ -1822,7 +1813,7 @@ class TensorCompiler:
                     except ImportError as e:
                         self.tensorlang.print(message=f"[COMPILER] PyCUDA error: {e}. Run 'pip install pycuda' and ensure CUDA toolkit is installed.")
                         sys.exit(1)
-                    except Exception as e:
+                    except (RuntimeError, OSError, ValueError, TypeError) as e:
                         self.tensorlang.print(message=f"[COMPILER] Error executing CUDA kernel: {e}")
                         traceback.print_exc()
                         sys.exit(1)

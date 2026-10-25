@@ -4,6 +4,7 @@
 # Complete type checker with backward statement support
 
 import numpy as np
+
 from tensorlang.tensor_lang import TensorLang
 
 tensorlang = TensorLang()
@@ -243,7 +244,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                                     
                                     inferred_shape = tuple(df.shape)
                                 except ImportError:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: pandas required for CSV loading")
+                                    tensorlang.print(message="[TYPE CHECKER] error: pandas required for CSV loading")
                                     return False, env
                             
                             else:
@@ -262,7 +263,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         except FileNotFoundError:
                             tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
                             return False, env
-                        except Exception as e:
+                        except (OSError, UnicodeError, ValueError) as e:
                             tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
                             return False, env
 
@@ -421,7 +422,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     var_shape = var_type['shape']
                     
                     if len(input_shape) < 2:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm input must be at least 2D")
+                        tensorlang.print(message="[TYPE CHECKER] error: BatchNorm input must be at least 2D")
                         return False, env
                     
                     num_features = input_shape[1]
@@ -488,10 +489,10 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         output_shape = tuple(reversed(input_shape))
                     else:
                         if len(axes) != len(input_shape):
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Transpose axes length mismatch")
+                            tensorlang.print(message="[TYPE CHECKER] error: Transpose axes length mismatch")
                             return False, env
                         if set(axes) != set(range(len(input_shape))):
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Transpose axes must be permutation")
+                            tensorlang.print(message="[TYPE CHECKER] error: Transpose axes must be permutation")
                             return False, env
                         output_shape = tuple(input_shape[i] for i in axes)
                     
@@ -513,7 +514,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     new_elements = int(np.prod([int(dim) for dim in new_shape]))
                     
                     if input_elements != new_elements:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Reshape element count mismatch")
+                        tensorlang.print(message="[TYPE CHECKER] error: Reshape element count mismatch")
                         return False, env
                     
                     env[name] = {'dtype': 'f32', 'shape': new_shape}
@@ -534,19 +535,19 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     
                     first_shape = tensor_types[0]['shape']
                     if axis < 0 or axis >= len(first_shape):
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Concat axis out of bounds")
+                        tensorlang.print(message="[TYPE CHECKER] error: Concat axis out of bounds")
                         return False, env
                     
                     concat_dim_size = 0
                     for i, tensor_type in enumerate(tensor_types):
                         shape = tensor_type['shape']
                         if len(shape) != len(first_shape):
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Concat tensor dimension count mismatch")
+                            tensorlang.print(message="[TYPE CHECKER] error: Concat tensor dimension count mismatch")
                             return False, env
                         
                         for dim_idx, (dim1, dim2) in enumerate(zip(first_shape, shape)):
                             if dim_idx != axis and dim1 != dim2:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: Concat tensor shape mismatch")
+                                tensorlang.print(message="[TYPE CHECKER] error: Concat tensor shape mismatch")
                                 return False, env
                         
                         concat_dim_size += shape[axis]
@@ -625,7 +626,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             
                         if expr['type'] == 'matmul':
                             if args[0]['shape'][1] != args[1]['shape'][0]:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch")
+                                tensorlang.print(message="[TYPE CHECKER] error: Matmul shape mismatch")
                                 return False, env
                             env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
                             if DEBUG_INFO:
@@ -772,7 +773,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
 
                         elif expr['type'] == 'linear':
                             if len(args) != 3:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: Linear requires exactly 3 arguments")
+                                tensorlang.print(message="[TYPE CHECKER] error: Linear requires exactly 3 arguments")
                                 return False, env
                             
                             input_tensor, weight_tensor, bias_tensor = args
@@ -783,26 +784,26 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             if len(input_shape) == 1:
                                 in_features = input_shape[0]
                                 if len(weight_shape) != 2 or weight_shape[0] != in_features:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: Linear weight shape mismatch")
+                                    tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
                                     return False, env
                                 out_features = weight_shape[1]
                                 if len(bias_shape) != 1 or bias_shape[0] != out_features:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: Linear bias shape mismatch")
+                                    tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
                                     return False, env
                                 output_shape = (out_features,)
                                 
                             elif len(input_shape) == 2:
                                 batch_size, in_features = input_shape
                                 if len(weight_shape) != 2 or weight_shape[0] != in_features:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: Linear weight shape mismatch")
+                                    tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
                                     return False, env
                                 out_features = weight_shape[1]
                                 if len(bias_shape) != 1 or bias_shape[0] != out_features:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: Linear bias shape mismatch")
+                                    tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
                                     return False, env
                                 output_shape = (batch_size, out_features)
                             else:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: Linear input must be 1D or 2D tensor")
+                                tensorlang.print(message="[TYPE CHECKER] error: Linear input must be 1D or 2D tensor")
                                 return False, env
                             
                             env[name] = {'dtype': 'f32', 'shape': output_shape}
@@ -820,22 +821,20 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             
                             if expr['type'] == 'cross_entropy':
                                 if len(pred_shape) == 2:
-                                    batch_size, num_classes = pred_shape
+                                    batch_size, _num_classes = pred_shape
                                     
-                                    if len(target_shape) == 1 and target_shape[0] == batch_size:
-                                        output_shape = ()
-                                    elif len(target_shape) == 2 and target_shape == pred_shape:
+                                    if len(target_shape) == 1 and target_shape[0] == batch_size or len(target_shape) == 2 and target_shape == pred_shape:
                                         output_shape = ()
                                     else:
-                                        tensorlang.print(message=f"[TYPE CHECKER] error: Cross entropy target shape incompatible")
+                                        tensorlang.print(message="[TYPE CHECKER] error: Cross entropy target shape incompatible")
                                         return False, env
                                 else:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: Cross entropy predictions must be 2D")
+                                    tensorlang.print(message="[TYPE CHECKER] error: Cross entropy predictions must be 2D")
                                     return False, env
                                     
                             elif expr['type'] == 'mse_loss':
                                 if pred_shape != target_shape:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: MSE loss shape mismatch")
+                                    tensorlang.print(message="[TYPE CHECKER] error: MSE loss shape mismatch")
                                     return False, env
                                 output_shape = ()
                             
