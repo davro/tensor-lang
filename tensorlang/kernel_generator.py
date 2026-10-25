@@ -688,7 +688,7 @@ extern "C" void launch_greater_{name}(float* A, float* B, float* C, int rows, in
 
 
     # ================================================================
-    # Less broadcast
+    # Less / Less broadcast
     # ================================================================
     def less_broadcast(self, op_type, name, arg1, arg2, shape1, shape2, output_shape):
         if shape1 == shape2:
@@ -733,7 +733,7 @@ extern "C" void launch_less_{name}(float* A, float* B, float* C, int rows, int c
 
 
     # ================================================================
-    # equal
+    # Equal / Equal Broadcast
     # ================================================================
     def equal(self, op_type, name, arg1, arg2, shape1, shape2, output_shape):
 
@@ -775,7 +775,7 @@ extern "C" void launch_equal_{name}(float* A, float* B, float* C, int rows, int 
     {self.cuda_debug()}
 }}
 """
-            return kernel, (f"{op_type}", name, arg1, arg2, rows, cols)
+            return kernel, (f"{op_type}_broadcast", name, arg1, arg2, rows, cols)
 
 
     # ================================================================
