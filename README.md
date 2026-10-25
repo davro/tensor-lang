@@ -1,6 +1,6 @@
 Here is a concrete, audit-accurate `README.md` you can replace the current one with. It keeps the project’s strengths but stops claiming features that are parsed-only, type-checked-only, or not wired into codegen/autograd.
 
-```markdown
+
 # TensorLang: A Native AI/ML Language
 
 TensorLang is an open-source, native machine-learning language designed to compile tensor operations into GPU-accelerated CUDA kernels.
@@ -10,7 +10,6 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 > **Status:** v0.3.0. Core suite: 109/109 tests passing.  
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).  
 > **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
-
 ---
 
 ## Table of Contents
