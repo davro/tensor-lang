@@ -1,6 +1,3 @@
-Here is the final, audit-accurate `README.md`. It reflects the fixes made during this pass and no longer claims features that are only parsed, type-checked, or partially implemented.
-
-```markdown
 # TensorLang: A Native AI/ML Language
 
 TensorLang is an open-source, native machine-learning language designed to compile tensor operations into GPU-accelerated CUDA kernels.
