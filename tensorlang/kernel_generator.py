@@ -72,6 +72,12 @@ class KernelGenerator:
             'tanh': {
                 'tanh':  []
             },
+            'gelu': {
+                'gelu':  []
+            },
+            'swish': {
+                'swish':  []
+            },
             'softmax': {
                 'softmax':  []
             },
@@ -540,6 +546,26 @@ extern "C" void launch_matmul_{name}(float* A, float* B, float* C, int M, int N,
             operation="fmaxf(0.0f, input[idx])"
         )
 
+
+    # ================================================================
+    # GELU
+    # ================================================================
+    def gelu(self, op_type, name, arg1, size):
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        return self.generate_unary_op_kernel(
+            op_type, name, arg1, size,
+            operation="0.5f * input[idx] * (1.0f + erff(input[idx] * 0.70710678f))"
+        )
+
+    # ================================================================
+    # Swish
+    # ================================================================
+    def swish(self, op_type, name, arg1, size):
+        self._validate(inspect.currentframe().f_code.co_name, op_type)
+        return self.generate_unary_op_kernel(
+            op_type, name, arg1, size,
+            operation="input[idx] / (1.0f + expf(-input[idx]))"
+        )
 
     # ================================================================
     # Sigmoid

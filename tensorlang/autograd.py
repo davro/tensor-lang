@@ -272,6 +272,12 @@ class ComputationGraph:
             
         elif node.op_type == 'tanh':
             self._backward_tanh(node, output_grad)
+
+        elif node.op_type == 'gelu':
+            self._backward_gelu(node, output_grad)
+
+        elif node.op_type == 'swish':
+            self._backward_swish(node, output_grad)
             
         elif node.op_type == 'softmax':
             self._backward_softmax(node, output_grad)
@@ -559,6 +565,28 @@ class ComputationGraph:
         grad = output_grad * (1 - tanh_out ** 2)
         self._accumulate_grad(inp, grad)
     
+
+    def _backward_gelu(self, node: ComputationNode, output_grad: np.ndarray):
+        """Gradient of GELU."""
+        inp = node.inputs[0]
+        x = self.tensors[inp]
+
+        erf_vec = np.vectorize(__import__("math").erf)
+        cdf = (0.5 * (1.0 + erf_vec(x / np.sqrt(2.0)))).astype(np.float32)
+        pdf = (np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi)).astype(np.float32)
+        grad = output_grad * (cdf + x * pdf)
+
+        self._accumulate_grad(inp, grad)
+
+    def _backward_swish(self, node: ComputationNode, output_grad: np.ndarray):
+        """Gradient of Swish: x * sigmoid(x)."""
+        inp = node.inputs[0]
+        x = self.tensors[inp]
+
+        sigmoid_x = (1.0 / (1.0 + np.exp(-x))).astype(np.float32)
+        grad = output_grad * (sigmoid_x + x * sigmoid_x * (1.0 - sigmoid_x))
+
+        self._accumulate_grad(inp, grad)
 
     def _backward_softmax(self, node: ComputationNode, output_grad: np.ndarray):
         """

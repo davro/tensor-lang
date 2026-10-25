@@ -858,7 +858,7 @@ class TensorCompiler:
             self._record_operation('matmul', name, [arg1, arg2])
             return generator.matmul(expr['type'], name, arg1, arg2, int(m), int(n), int(p))
 
-        elif expr['type'] in ['relu', 'sigmoid', 'tanh']:
+        elif expr['type'] in ['relu', 'sigmoid', 'tanh', 'gelu', 'swish']:
             arg1 = expr['args'][0]
             size = int(np.prod([int(d) for d in env[arg1]['shape']]))
             self._record_operation(expr['type'], name, [arg1])
@@ -1258,7 +1258,7 @@ class TensorCompiler:
                         # ====================================================
                         # ReLU | SIGMOID | TANH
                         # ====================================================
-                        elif expr['type'] in ['relu', 'sigmoid', 'tanh']:
+                        elif expr['type'] in ['relu', 'sigmoid', 'tanh', 'gelu', 'swish']:
                             arg1 = expr['args'][0]
                             size = int(np.prod([int(dim) for dim in env[arg1]['shape']]))
                             method = getattr(generator, f"{expr['type']}", None)
