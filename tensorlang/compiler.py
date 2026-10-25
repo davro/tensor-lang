@@ -23,6 +23,7 @@ from tensorlang.tensor_lang import TensorLang
 from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.type_checker import type_checker
 from tensorlang.ast_builder import build_ast
+from tensorlang.type_checker import _is_scalar_shape
 
 from tensorlang.autograd import ComputationGraph, AutogradContext
 
@@ -818,6 +819,12 @@ class TensorCompiler:
             if shape1 == shape2:
                 size = int(np.prod([int(d) for d in output_shape]))
                 return generator.elementwise(expr['type'], name, arg1, arg2, size)
+            elif _is_scalar_shape(shape1) or _is_scalar_shape(shape2):
+                scalar_on_left = _is_scalar_shape(shape1) and not _is_scalar_shape(shape2)
+                size = int(np.prod([int(d) for d in output_shape]))
+                return generator.binary_1d_broadcast(
+                    expr['type'], name, arg1, arg2, size, scalar_on_left=scalar_on_left
+                )
             elif len(shape1) == 2 and len(shape2) == 1:
                 return generator.binary_broadcast(
                     expr['type'], expr['type'], name, arg1, arg2, shape1, shape2, output_shape
@@ -1168,6 +1175,14 @@ class TensorCompiler:
                             if shape1 == shape2:
                                 size = int(np.prod([int(dim) for dim in output_shape]))
                                 kernel, kernel_info = generator.elementwise(expr['type'], name, arg1, arg2, size)
+                                kernels.append(kernel_info)
+                                cuda_code += kernel
+                            elif _is_scalar_shape(shape1) or _is_scalar_shape(shape2):
+                                scalar_on_left = _is_scalar_shape(shape1) and not _is_scalar_shape(shape2)
+                                size = int(np.prod([int(dim) for dim in output_shape]))
+                                kernel, kernel_info = generator.binary_1d_broadcast(
+                                    expr['type'], name, arg1, arg2, size, scalar_on_left=scalar_on_left
+                                )
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
                             elif len(shape1) == 2 and len(shape2) == 1:

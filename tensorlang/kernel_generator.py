@@ -351,7 +351,7 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, 
     # ================================================================
     # Binary 1D Broadcast (add, minus, mult, div)
     # ================================================================
-    def binary_1d_broadcast(self, op_type, name, arg1, arg2, size):
+    def binary_1d_broadcast(self, op_type, name, arg1, arg2, size, scalar_on_left=False):
         """Handle broadcasting with scalar (0-D tensor)"""
 
         self._validate(inspect.currentframe().f_code.co_name, op_type)
@@ -359,11 +359,16 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, 
             'add': '+', 'minus': '-', 'mult': '*', 'div': '/'
         }[op_type]
         
+        if scalar_on_left:
+            scalar_expr = "A[0] " + op_symbol + " B_scalar[idx]"
+        else:
+            scalar_expr = "A[idx] " + op_symbol + " B_scalar[0]"
+
         kernel = f"""
 __global__ void {op_type}_scalar_kernel_{name}(float* A, float* B_scalar, float* C, int size) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {{
-        C[idx] = A[idx] {op_symbol} B_scalar[0];
+        C[idx] = {scalar_expr};
     }}
 }}
 extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) {{
