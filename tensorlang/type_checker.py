@@ -20,6 +20,35 @@ def _is_scalar_shape(shape):
     return len(shape) == 0 or all(d == 1 for d in shape)
 
 
+def _shape_error(op, name, shape1, shape2, arg_names=None, hint=None):
+    """
+    Build a readable shape-mismatch message that names the operation, the
+    tensor being defined, both operand shapes and (when known) the operand
+    names, e.g.
+
+      [TYPE CHECKER] error: add: shape mismatch computing 'c':
+      'a' (2, 3) vs 'b' (3, 2). <hint>
+    """
+    if arg_names and len(arg_names) == 2:
+        operands = f"'{arg_names[0]}' {tuple(shape1)} vs '{arg_names[1]}' {tuple(shape2)}"
+    else:
+        operands = f"left {tuple(shape1)} vs right {tuple(shape2)}"
+    msg = f"[TYPE CHECKER] error: {op}: shape mismatch computing '{name}': {operands}"
+    if hint:
+        msg += f". {hint}"
+    return msg
+
+
+_ELEMENTWISE_HINT = (
+    "Shapes must match, one operand must be a scalar, or they must broadcast "
+    "(trailing dimensions equal or 1)"
+)
+_MATRIX_VECTOR_HINT = (
+    "A 1D operand combined with a 2D operand must have length equal to "
+    "one of the 2D operand's dimensions"
+)
+
+
 def _resolve_tensor_type(env, tensor_name):
     """
     Look up a tensor's type in env, falling back to inferring gradient
@@ -626,7 +655,11 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             
                         if expr['type'] == 'matmul':
                             if args[0]['shape'][1] != args[1]['shape'][0]:
-                                tensorlang.print(message="[TYPE CHECKER] error: Matmul shape mismatch")
+                                tensorlang.print(message=_shape_error(
+                                    'matmul', name, args[0]['shape'], args[1]['shape'],
+                                    arg_names,
+                                    hint=(f"Inner dimensions must match: left has {args[0]['shape'][1]} "
+                                          f"columns but right has {args[1]['shape'][0]} rows")))
                                 return False, env
                             env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
                             if DEBUG_INFO:
@@ -721,13 +754,17 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                                 if shape1[0] == shape2[0] or shape1[1] == shape2[0]:
                                     output_shape = shape1
                                 else:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: {expr['type']} shape mismatch")
+                                    tensorlang.print(message=_shape_error(
+                                        expr['type'], name, shape1, shape2, arg_names,
+                                        hint=_MATRIX_VECTOR_HINT))
                                     return False, env
                             elif len(shape2) == 2 and len(shape1) == 1:
                                 if shape2[0] == shape1[0] or shape2[1] == shape1[0]:
                                     output_shape = shape2
                                 else:
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: {expr['type']} shape mismatch")
+                                    tensorlang.print(message=_shape_error(
+                                        expr['type'], name, shape1, shape2, arg_names,
+                                        hint=_MATRIX_VECTOR_HINT))
                                     return False, env
                             else:
                                 ndim = max(len(shape1), len(shape2))
@@ -743,7 +780,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                                     elif d2 == 1:
                                         output_shape.append(d1)
                                     else:
-                                        print(f"Type error: {expr['type']} incompatible broadcast shapes")
+                                        tensorlang.print(message=_shape_error(
+                                            expr['type'], name, shape1, shape2, arg_names,
+                                            hint=_ELEMENTWISE_HINT))
                                         return False, env
                                 
                                 output_shape = tuple(output_shape)
@@ -754,6 +793,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
 
                         elif expr['type'] in ['greater', 'less', 'equal']:
                             shape1, shape2 = args[0]['shape'], args[1]['shape']
+                            orig_shape1, orig_shape2 = shape1, shape2  # for error messages
                             if len(shape1) < len(shape2):
                                 shape1, shape2 = shape2, shape1
                             if len(shape2) == 0:
@@ -764,7 +804,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                                     if d1 == d2 or d2 == 1:
                                         output_shape.append(d1)
                                     else:
-                                        tensorlang.print(message=f"[TYPE CHECKER] error: {expr['type']} shape mismatch")
+                                        tensorlang.print(message=_shape_error(
+                                            expr['type'], name, orig_shape1, orig_shape2, arg_names,
+                                            hint=_ELEMENTWISE_HINT))
                                         return False, env
                                 output_shape = shape1[:-len(shape2)] + tuple(output_shape)
                             env[name] = {'dtype': 'f32', 'shape': output_shape}
