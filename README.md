@@ -4,7 +4,7 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.3.0. Core suite: 122/122 tests passing.  
+> **Status:** v0.3.0. Core suite: 125/125 tests passing.  
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).  
 > **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
 
@@ -44,6 +44,7 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
 * **Training loops** — `for` loops with `backward()` and pointer-swap weight rebinding
 * **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
+* **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
 * **Extensible architecture** — clean separation of parsing, type checking, and code generation
 
 **Important framing:** Python is the host/compiler language. Tensor operations run as native CUDA kernels, but the compiler, runtime orchestration, and test runner are Python-based.
@@ -68,6 +69,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Linear layers: `linear`
 * Reverse-mode autograd for a defined subset of operations
 * Training loops with weight rebinding
+* Scoped kernel names for loop bodies
 * User-defined functions
 * File I/O: `load()`, `save()`
 * Comments: `//` and `/* */`
@@ -276,7 +278,7 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `relu` | Yes |
 | `sigmoid` | Yes |
 | `tanh` | Yes |
-| `softmax` | Yes |
+| `softmax` | Yes (1D or 2D axis `1`) |
 | `sum` | Yes |
 | `mean` | Yes |
 | `mse_loss` | Yes |
@@ -348,7 +350,7 @@ Both compile to the same CUDA kernels. Inline expressions are flattened into syn
 * `save()` inside a loop is not currently executed.
 * Alias nodes such as `let y = x` inside a loop are not currently resolved.
 * Nested loops are not supported.
-* Because all kernels are emitted into one `.cu` file, tensor names used inside a loop body cannot be reused at top level.
+* Kernel symbols generated inside loop bodies are scoped with a `loopN_` prefix, so the same tensor name can be reused across loop iterations, multiple loops, and top-level code without CUDA symbol collisions.
 
 Example:
 
@@ -455,7 +457,7 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 * `tensorlang/ast_builder.py` — AST construction and inlining
 * `tensorlang/type_checker.py` — shape and broadcasting checks
 * `tensorlang/kernel_generator.py` — CUDA kernel generation
-* `tensorlang/compiler.py` — orchestration, execution, caching
+* `tensorlang/compiler.py` — orchestration, execution, caching, scoped kernel names
 * `tensorlang/autograd.py` — NumPy reference autograd implementation
 * `tensorlang/test_runner.py` — test discovery and execution
 * `tensorlang/app_runner.py` — application discovery and execution
@@ -481,7 +483,7 @@ Performance claims should be treated as unverified until baselined on the same h
 ### Single File
 
 ```bash
-python3 tensorlang.py tests/for_loop_basic.tl
+python3 tensorlang.py tests/activation_pipeline.tl
 python3 tensorlang.py tests/inline_expr_basic.tl --debug
 ```
 
@@ -572,7 +574,6 @@ App tests run sequentially.
 
 ### Short Term
 
-* Scope kernel names to remove post-loop naming constraints
 * Improve shape-mismatch error messages
 * Expand for-loop body operation coverage
 * Add alias resolution inside loop bodies
