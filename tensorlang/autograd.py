@@ -696,7 +696,20 @@ class ComputationGraph:
         pred, target = node.inputs
         pred_val = self.tensors[pred]  # Should be softmax output
         target_val = self.tensors[target]
-        
+
+        if target_val.shape != pred_val.shape:
+            if target_val.ndim == 1 and target_val.shape[0] == pred_val.shape[0]:
+                num_classes = pred_val.shape[1]
+                one_hot = np.zeros_like(pred_val)
+                class_indices = np.clip(target_val.astype(np.int64), 0, num_classes - 1)
+                one_hot[np.arange(pred_val.shape[0]), class_indices] = 1.0
+                target_val = one_hot
+            else:
+                raise ValueError(
+                    f"cross_entropy target shape {target_val.shape} is incompatible "
+                    f"with prediction shape {pred_val.shape}"
+                )
+
         batch_size = pred_val.shape[0]
         scalar_grad = output_grad.item() if output_grad.size == 1 else output_grad
         grad = (pred_val - target_val) / batch_size * scalar_grad

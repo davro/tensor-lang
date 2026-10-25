@@ -1437,6 +1437,7 @@ class TensorCompiler:
                             pred_name, target_name = expr['args']
                             pred_shape   = env[pred_name]['shape']
                             target_shape = env[target_name]['shape']
+                            self._record_operation('cross_entropy', name, [pred_name, target_name])
                             kernel, kernel_info = generator.cross_entropy(
                                 expr['type'], name, pred_name, pred_shape, target_shape, target_name
                             )
