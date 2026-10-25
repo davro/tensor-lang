@@ -134,7 +134,10 @@ if (( INSTALL )); then
     pip install web3-ethereum-defi
 
     pip freeze > requirements.txt
+
     echo "=== requirements.txt updated ==="
+
+    #sudo apt install python3-pytest
     #exit 0
 fi
 

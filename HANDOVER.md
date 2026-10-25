@@ -1,8 +1,8 @@
 # TensorLang Handover Document
 
-**Last updated:** 2026-09-26
+**Last updated:** 2026-09-27
 **Project:** [davro/tensor-lang](https://github.com/davro/tensor-lang)
-**Status:** Core language + test suite healthy (109/109). App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. §12 fixes from 2026-09-03 all still holding. Of the five compiler/runner limitations discovered while building `decision_boundary` (§13.3), four are now fixed upstream and hardware-verified (§15); the fifth uncovered a second, still-open issue in CUDA kernel dispatch for scalar broadcasting (§15.4). New app category `apps/games/` started (`tic_tac_toe` done; `2048` in progress). Building `2048`'s tensor-ops game engine (`step.tl`) surfaced and fixed four more real compiler bugs — two AST-inlining renaming gaps, one entirely missing CUDA kernel (`concat` axis=1), and one execution-ordering/priority bug in GPU-computed alias resolution — all hardware-verified; see §17. New (2026-09-26): a second physical GPU was added to the dev machine (2x GTX 1080 Ti); process-level ("Tier-A") multi-GPU pinning is now implemented for the test runner and single/app runs — see §18.
+**Status:** Core language + test suite healthy (122/122). README updated to match implementation. Lint clean (`ruff check tensorlang/` passes). `build.sh --lint` now returns to the sourcing shell instead of exiting it. App system restored and demonstrated with two working apps (`hello_mlp`, `decision_boundary`). New shared toolkit (`apps/tlkit/`) for building visual/interactive apps. The five compiler/runner limitations discovered while building `decision_boundary` (§13.3) are now fixed upstream and hardware-verified (§15, §19). New app category `apps/games/` started (`tic_tac_toe` done; `2048` in progress). Building `2048`'s tensor-ops game engine (`step.tl`) surfaced and fixed four more real compiler bugs — two AST-inlining renaming gaps, one entirely missing CUDA kernel (`concat` axis=1), and one execution-ordering/priority bug in GPU-computed alias resolution — all hardware-verified; see §17. New (2026-09-26): a second physical GPU was added to the dev machine (2x GTX 1080 Ti); process-level ("Tier-A") multi-GPU pinning is now implemented for the test runner and single/app runs — see §18.
 
 ---
 
@@ -54,11 +54,11 @@ python3 tensorlang.py --test
 tensor-lang/
 ├── tensorlang.py              # CLI entry point
 ├── tensorlang/                # Core package
-│   ├── app_runner.py          # Application runner (restored 2026-08-29)
+│   ├── app_runner.py          # Application runner
 │   ├── ast_builder.py
 │   ├── autograd.py
 │   ├── compiler.py
-│   ├── gpu.py                 # NEW (2026-09-26): GPU detection + CUDA_VISIBLE_DEVICES pinning, see §18
+│   ├── gpu.py                 # GPU detection + CUDA_VISIBLE_DEVICES pinning
 │   ├── kernel_generator.py
 │   ├── tensor_lang.py         # Argument parsing etc.
 │   ├── tensor_verifier.py
@@ -66,68 +66,49 @@ tensor-lang/
 │   └── type_checker.py
 ├── tensorlang.lark            # Grammar
 ├── build.sh                   # Install / test / lint helper
-├── tests/                     # 109 core language tests
-│   └── python/                # NEW (2026-09-26): plain-Python unittest suite (not .tl fixtures), see §18
+├── tests/                     # 122 core language tests
+│   └── python/                # Plain-Python unittest suite
 ├── apps/                      # User-facing applications
-│   ├── tlkit/                 # Shared toolkit for visual/interactive apps (new, 2026-09-04)
-│   │   ├── chunked_runner.py  # drives repeated `tensorlang.py --app` invocations
-│   │   ├── sequence_player.py # pygame play/pause/scrub/speed harness
-│   │   ├── colormap.py        # numpy colormaps + 2D grid generation
+│   ├── tlkit/                 # Shared toolkit for visual/interactive apps
+│   │   ├── chunked_runner.py
+│   │   ├── sequence_player.py
+│   │   ├── colormap.py
 │   │   └── README.md
-│   └── examples/
-│       ├── hello_mlp/         # Minimal working app
-│       │   ├── app.toml
-│       │   └── main.tl
-│       └── decision_boundary/ # 2nd app: XOR MLP + pygame boundary animation (new, 2026-09-04)
-│           ├── app.toml
-│           ├── main.tl
-│           ├── run.sh         # install pygame, init/train/view in one command
-│           ├── data/          # static grid + metadata (checked in)
-│           ├── snapshots/     # generated animation frames (gitignored)
-│           └── tools/         # init_state.py, train_and_snapshot.py, viewer.py
-├── games/                     # NEW app category (2026-09-08/09), see §17
-│   ├── tic_tac_toe/           # 9-32-9 MLP imitating minimax, played via pygame
-│   └── 2048/                  # game mechanics implemented AS tensor ops, not just the NN
-│       ├── step.tl            # slide-and-merge-left engine (done, hardware-verified)
-│       ├── run.sh
-│       ├── NOTES.md           # full design + bug writeup
-│       └── tools/
-│           └── make_test_board.py
+│   ├── examples/
+│   │   ├── hello_mlp/
+│   │   └── decision_boundary/
+│   └── games/
+│       ├── tic_tac_toe/
+│       └── 2048/
 ├── examples/                  # Older / misc examples
 ├── cache/                     # Generated CUDA, .npy, etc. (gitignored)
-├── check.py                   # NEW (2026-09-09): parse+typecheck any .tl file, no GPU needed
-├── verify.py                  # NEW (2026-09-09): NumPy-interpret a .tl AST, no GPU needed
+├── check.py                   # Parse + typecheck any .tl file, no GPU needed
+├── verify.py                  # NumPy-interpret a .tl AST, no GPU needed
 └── requirements.txt
 ```
 
 ---
 
-## 4. Current Health (2026-09-03)
+## 4. Current Health
 
-| Component                         | Status                                                             |
-|------------------------------------|---------------------------------------------------------------------|
-| Core test suite (default, parallel) | **106/106 passed** (~94 s, re-confirmed after all §12 fixes)      |
-| Core test suite (`--no-parallel`)  | **Fixed & verified on hardware** (2026-09-03) — see §12              |
-| Default compiler output (no flags) | **Fixed & verified on hardware** (2026-09-03) — see §12              |
-| AppRunner                          | Restored and working for normal app execution                       |
-| App test mode (`--app X --test`)   | **Fixed & verified on hardware** (2026-09-03) — see §12               |
-| Example app (1st)                  | `apps/examples/hello_mlp` runs successfully                         |
-| Example app (2nd)                  | `apps/examples/decision_boundary` — verified on hardware (2026-09-04); loss 0.244 → 0.0016 over 1000 epochs, see §13.2 |
-| Shared app toolkit                 | `apps/tlkit/` — extracted from `decision_boundary`, unit-smoke-tested, see §13.1 |
-| Autograd + training loops          | Working (verified by hello_mlp + decision_boundary + tests)         |
-| Missing file history                | `app_runner.py` was absent from main; restored from previous work   |
-| Games app category (new, §17)      | `apps/games/tic_tac_toe` done; `apps/games/2048` engine (`step.tl`) hardware-verified, other files (`agent.py`, `generate_data.py`, `train.tl`, `play.py`) not yet built — see §17.5 |
-
-**Known temporary fix applied earlier:**
-The import of `AppRunner` had to be commented out until the file was restored. It is now present again.
-
-**Recent fixes (2026-09-03):** Three issues were found during a code review of `tensorlang.py`, `app_runner.py`, `test_runner.py`, and `compiler.py`, and patched in `test_runner.py`, `compiler.py`, and `type_checker.py`. Full detail, root cause, and verification status are in §12.
+| Component | Status |
+|---|---|
+| Core test suite (default, parallel) | **122/122 passed** |
+| Lint (`ruff check tensorlang/`) | **Clean** |
+| `build.sh --lint` | Safe when sourced |
+| AppRunner | Working for normal app execution |
+| App test mode (`--app X --test`) | Working |
+| Example apps | `hello_mlp`, `decision_boundary` verified |
+| Shared app toolkit | `apps/tlkit/` available |
+| Autograd + training loops | Working |
+| Games app category | `tic_tac_toe` done; `2048` engine verified |
 
 ---
 
 ## 5. How to Run Things
 
 ### Tests
+
 ```bash
 source build.sh --test
 source build.sh --test --filter for_loop
@@ -136,15 +117,18 @@ python3 tensorlang.py --test --filter mlp
 ```
 
 ### Single file
+
 ```bash
 python3 tensorlang.py --cache-layers tests/training_pipeline.tl
 python3 tensorlang.py --debug --cache-layers path/to/file.tl
 ```
 
 ### Applications
+
 ```bash
-python3 tensorlang.py --list-apps          # if CLI flag is wired
+python3 tensorlang.py --list-apps
 python3 tensorlang.py --app examples/hello_mlp
+python3 tensorlang.py --app examples/decision_boundary
 ```
 
 ---
@@ -154,21 +138,23 @@ python3 tensorlang.py --app examples/hello_mlp
 Apps are discovered by the presence of an `app.toml`.
 
 ### Required layout
+
 ```
 apps/
 └── [<category>/]
     └── <app-name>/
-        ├── app.toml          # required
-        ├── <entry>.tl        # main / train entry point
-        └── tests/            # optional
+        ├── app.toml
+        ├── <entry>.tl
+        └── tests/
             └── *.tl
 ```
 
 ### Minimal `app.toml`
+
 ```toml
 [app]
 name = "hello_mlp"
-description = "Minimal 2-layer MLP training example (linear regression style)"
+description = "Minimal 2-layer MLP training example"
 
 [requirements]
 gpus = 1
@@ -176,33 +162,26 @@ memory_gb = 4
 
 [entry_points]
 main = "main.tl"
-# train = "train.tl"          # fallback if main missing
-# benchmark = "bench.tl"      # optional
 ```
 
-### Example that currently works
-`apps/examples/hello_mlp` trains a single weight to fit `y = 2x` over 5 epochs and produces the expected convergence:
+### App requirements
 
-- Final loss ≈ 0.01648
-- Final weight ≈ 2.046875
+* `requirements.gpus` is enforced via least-utilized GPU selection and process pinning.
+* `requirements.packages` are auto-installed if missing.
+* `cuda_version` and `memory_gb` are display-only.
+* `[gpu] device = N` can pin an app to a specific GPU.
 
-This is the canonical "hello world" for the app system.
+### App tests
 
-### Second app: a visual, interactive-feeling example
-
-`apps/examples/decision_boundary` (added 2026-09-04) trains a 2-8-1 tanh/sigmoid MLP on XOR and plays back the decision boundary morphing across training as a pygame animation. It's a genuinely different shape of app from `hello_mlp` — a single training run isn't enough here, the point is to *see* training happen — and it surfaced real constraints in the compiler that a single-file, single-run app never would. See §13 for the full writeup, including the five compiler/runner gotchas found along the way and the general-purpose `apps/tlkit/` toolkit extracted from it.
-
-Run it:
 ```bash
-python3 tensorlang.py --app examples/decision_boundary          # installs pygame if missing, trains, plays back
-python3 tensorlang.py --app examples/decision_boundary --step reset  # wipe weights and start fresh
+python3 tensorlang.py --app examples/hello_mlp --test
 ```
 
-(Originally a `run.sh` script; folded into the `--app`/`--step`/`[lifecycle]` app-runner machinery instead.)
+App tests run sequentially.
 
 ---
 
-## 7. Language Features (Implemented)
+## 7. Language Features
 
 - Explicit tensor types: `Tensor[f32, (batch, features)]`
 - 40+ operations (matmul, element-wise, activations, norms, losses, reductions, slicing, etc.)
@@ -210,31 +189,32 @@ python3 tensorlang.py --app examples/decision_boundary --step reset  # wipe weig
 - Training loops with weight rebinding (`w = w_updated`) — pointer swap, no copy
 - Inline binary expressions (flattened to temporaries)
 - User-defined functions
-- Control flow (`if`/`elif`/`else`)
+- Control flow in grammar only: `if` / `elif` / `else` is **not currently built or executed**
 - File I/O (`load` / `save`)
 - Caching of kernels and intermediate tensors
 
 **Important constraint:**
-All kernels from a compilation unit (including loop bodies) go into one `.cu` file. Tensor names used inside a `for` loop body cannot be reused at top level (use `y_pred_final` etc.).
+
+All kernels from a compilation unit (including loop bodies) go into one `.cu` file. Tensor names used inside a `for` loop body cannot be reused at top level.
 
 ---
 
-## 8. Test Inventory (current `tests/`)
+## 8. Test Inventory
 
 The suite covers:
 
 - Basics, arithmetic, broadcasting
-- Activations (relu, sigmoid, tanh, softmax, …)
+- Activations (relu, sigmoid, tanh, softmax, gelu, swish)
 - Reductions, slicing, reshape, transpose, concat
 - Linear layers, MLP, neural nets
 - Normalisations (layer/batch/instance)
 - Losses (mse, cross-entropy)
-- Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update)
+- Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish)
 - Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
 - Functions, pipelines, portfolio-style examples
 - Load/save
 
-Full list is available via `ls tests/`. All 109 currently pass (106 + 3 added in §15.2).
+Full list is available via `ls tests/`. All 122 currently pass.
 
 ---
 
@@ -253,29 +233,33 @@ Key modules: `compiler.py`, `kernel_generator.py`, `type_checker.py`, `autograd.
 
 ## 10. Known Pain Points & Future Work
 
-From README + recent experience:
+### Short term
 
-**Short term**
 - Scoped kernel names (remove post-loop renaming constraint)
-- ~~Inline unary ops (`relu(linear(...))`)~~ — **done, see §15.1**
 - Better shape-mismatch error messages
-- ~~Cleaner / quieter compiler output for app runs~~ — **done, see §12.3**
-- **New (2026-09-04, see §13 for full detail):**
-  - ~~`mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch only special-cases a size-1 vector correctly; a same-shape-but-larger 1D operand (e.g. an 8-wide bias gradient against a `(1,1)` scalar) hits a false "shape mismatch"~~ — **type checker fixed 2026-09-06, see §15.1; CUDA kernel dispatch for this case still needs a fix, see §15.4**
-  - ~~`reshape()` does a standalone env lookup with no `_grad`-suffix inference, unlike `add`/`minus`/`mult`/`div` — it can never take a gradient tensor directly, independent of shape~~ — **done, see §15.1** (fixed for every single-tensor-field op, not just `reshape`)
-  - ~~`app_runner.py` calls `compiler.compile_and_execute()` without checking its return value, so a failed compile/execute can still exit `0` — scripts driving `tensorlang.py` as a subprocess cannot trust the exit code alone~~ — **done, see §15.1**
-- **New (2026-09-09, found+fixed same session while building `apps/games/2048`, see §17.1 for full detail):**
-  - ~~`concat()`'s operand names, stored under `tensors` (not `args`), were never renamed during function inlining — broke calling the same function more than once~~ — **done, see §17.1 Bug 1/2**
-  - ~~`concat(axis=1)` had no CUDA kernel implementation at all, silently returning `None`~~ — **done, see §17.1 Bug 3**
-  - ~~a GPU-computed function-return value bound to a name at its call site (an AST alias node) was never actually pointed at the right device buffer, only ever at a host-side copy — silently produced all-zero results with no error~~ — **done, see §17.1 Bug 4**
+- Expand for-loop body operation coverage
+- Alias resolution inside loop bodies
+- Support `save()` inside loops
+- Implement or remove `if`, `any()`, and `all()`
 
-**Medium term**
+### Medium term
+
 - Built-in optimisers (SGD, Adam) as language primitives
-- Real implementation of AppRunner requirement validation — `tensorlang/gpu.py`'s `choose_device()` (added 2026-09-26, see §18) is ready to back this for the `requirements.gpus` field, but `AppRunner._validate_requirements()` still doesn't call it
-- Hot-reload in dev mode
 - Kernel fusion
+- Buffer pooling for long training runs
+- Nested loops
+- Hot reload in dev mode
+- Zero-copy Python/PyTorch interop
 
-**Product / motivation**
+### Long term
+
+- Multi-GPU single-program execution (Tier-B)
+- Mixed precision (FP16/FP32), validated on appropriate hardware
+- MLIR integration
+- Additional hardware backends (ROCm, Metal)
+
+### Product / motivation
+
 - More practical example applications (vision, simple game agent, signal processing, finance) so the language does not feel purely abstract.
 
 ---
@@ -285,659 +269,201 @@ From README + recent experience:
 - Fresh clone + `bash build.sh --install` succeeded.
 - `ModuleNotFoundError: tensorlang.app_runner` occurred because the file was missing from main.
 - File was restored from prior local work; import re-enabled.
-- Full test suite went green (106/106).
+- Full test suite went green.
 - First app (`examples/hello_mlp`) runs end-to-end and matches documented training numbers.
 
 ---
 
 ## 12. Known Issues & Recent Fixes (2026-09-03)
 
-Two bugs were found in `test_runner.py` during a code review (triggered by
-tracing how `AppRunner._run_app_tests` wires into `TestRunner`, and by
-inspecting the sequential branch of `run_test_suite`). Both were pre-existing
-bugs, not introduced by anything in this session's changes — the second one
-in particular means **app-level tests have likely never worked** since
-`AppRunner` was written.
-
-### 12.1 `--no-parallel` crashed with a `TypeError` — FIXED, verified on hardware
-
-**Symptom (confirmed on real hardware):**
-```
-python3 tensorlang.py --test --no-parallel
-Running 106 tests sequentially...
-Unexpected error: TestRunner.run_single_test() got multiple values for argument 'suite_start_time'
-```
-
-**Root cause:** `run_test_suite`'s sequential branch called:
-```python
-self.run_single_test(test_file, self.verify_tensors, suite_start_time=None, debug_mode=self.debug_mode)
-```
-but `run_single_test`'s signature is `(self, test_file, suite_start_time=None)`.
-`self.verify_tensors` was landing in the `suite_start_time` positional slot,
-clashing with the explicit `suite_start_time=None` keyword, and `debug_mode`
-isn't a parameter at all. `verify_tensors` and `debug_mode` are already read
-from `self` inside `run_single_test`, so the extra arguments were never
-needed.
-
-**Fix:**
-```python
-test_result = self.run_single_test(test_file, suite_start_time=None)
-```
-
-**Verification (hardware, 2026-09-03):**
-```
-python3 tensorlang.py --test --no-parallel --filter sum
-Running 3 tests sequentially...
-================================================================================
-State TestCase      Time
---------------------------------------------------------------------------------
-PASS   sum_axis.tl    (3.53s)
-PASS   sum_axis0.tl   (3.57s)
-PASS   sum_full.tl    (3.42s)
-================================================================================
-Summary: 3/3 tests passed in 10.52s
-✅ All tests passed successfully!
-```
-Filtered run used to speed up validation; a full `--no-parallel` run (106
-tests, ~100s+ since sequential is slower than the parallel default) is still
-worth doing once, but the crash itself is confirmed gone.
-
-### 12.2 `--app <name> --test` crashed with a `TypeError` — FIXED, verified on hardware
-
-**Root cause:** `AppRunner._run_app_tests` constructs:
-```python
-TestRunner(parallel=False, verify_tensors=..., debug_mode=..., tests_dir=str(tests_dir))
-```
-but `TestRunner.__init__` didn't accept a `tests_dir` parameter at all —
-guaranteed `TypeError` before a single app test could run. Separately, even
-if the constructor accepted it, `discover_tests()` and `run_single_test()`
-both hardcoded `Path("tests")` / `"tests/{test_file}"`, so app-scoped tests
-under `apps/<name>/tests/*.tl` could never be found or executed through this
-path — `AppRunner` and `TestRunner` had drifted out of sync.
-
-**Fix (in `test_runner.py`):**
-- `TestRunner.__init__` now takes `tests_dir=None`, defaulting to `"tests"`
-  (preserves existing core-suite behavior).
-- `discover_tests()` now globs `Path(self.tests_dir)` instead of the
-  hardcoded `Path("tests")`.
-- `run_single_test()` now builds the `.tl` path, the `tensorlang.py`
-  subprocess command, and the cache directory from `self.tests_dir` instead
-  of a hardcoded `"tests/"` string. Cache now lands at
-  `cache/<tests_dir>/<test_file>/` — so app tests get their own cache
-  location instead of colliding with the core suite's `cache/tests/`.
-- The failure-log path printed in `print_results_table`/summary output also
-  now respects `self.tests_dir`.
-
-`app_runner.py` itself needed **no changes** — it was already calling the
-intended API; `TestRunner` just hadn't been built to match yet.
-
-**Also added:** neither `apps/examples/hello_mlp` nor
-`apps/examples/linear_regression` had a `tests/` subdirectory, so there was
-nothing for the fix to discover. Added one test each, with `@EXPECTED`
-values taken directly from real hardware output (not rounded
-approximations) and independently cross-checked against a from-scratch
-numpy re-implementation of the same full-batch gradient descent at float32
-precision (bit-exact match in both cases):
-- `apps/examples/hello_mlp/tests/loss_final.tl` — expects `loss_final = 0.0164794921875`
-- `apps/examples/linear_regression/tests/loss_final.tl` — expects `loss_final = 0.022800864651799202`
-
-**Verification (hardware, 2026-09-03):**
-```
-python3 tensorlang.py --app examples/hello_mlp --test
-Running tests from: apps/examples/hello_mlp/tests
-Running 1 tests sequentially...
-================================================================================
-State TestCase       Time
---------------------------------------------------------------------------------
-PASS   loss_final.tl   (3.58s)
-================================================================================
-Summary: 1/1 tests passed in 3.58s
-✅ All tests passed successfully!
-
-python3 tensorlang.py --app examples/linear_regression --test
-Running tests from: apps/examples/linear_regression/tests
-Running 1 tests sequentially...
-================================================================================
-State TestCase       Time
---------------------------------------------------------------------------------
-PASS   loss_final.tl   (4.03s)
-================================================================================
-Summary: 1/1 tests passed in 4.03s
-✅ All tests passed successfully!
-```
-Both apps' training loops are now independently confirmed mathematically
-correct (autograd, `mse_loss`, `backward()`, weight-rebind pointer-swap in
-`for` loops), not just "didn't crash" — and the app-test wiring fix is
-confirmed working end-to-end on real hardware.
-
-### 12.3 Default compiler output was extremely noisy — FIXED, verified on hardware
-
-**Symptom:** a plain `python3 tensorlang.py file.tl` (no flags) printed 40+
-lines before showing anything useful — a full ASCII banner, a file-details
-block, "Loaded Lark Grammer file"/"Loaded TensorLang file", the entire raw
-`.tl` source dumped back to stdout, a pipeline banner, a `[COMPILER] Result`
-block for *every* intermediate tensor (not just the final one), and a
-content-free `[COMPILER] KERNEL CUDA!` line. This is the item listed under
-§10 "Cleaner / quieter compiler output for app runs" — now resolved.
-
-**Root cause:** none of this output was gated behind `self.debug_mode`; it
-all fired unconditionally on every run, regardless of flags.
-
-**Fix:** gated everything above behind `self.debug_mode` in `compiler.py`
-(`--debug` still shows exactly the original verbose output — confirmed
-byte-for-byte identical). Also fixed `type_checker.py`'s
-`[TYPE CHECKER] Arg Names`/`Args` trace, which printed unconditionally for
-every `let` binding — now gated behind `DEBUG_MODE` to match the identical
-pattern already used one line below it.
-
-Added an explicit final-result print using `output_tensor` — the AST's
-designated result name, returned by `build_ast` but previously never
-actually looked up or printed. Before this fix, the "final answer" a user
-saw was really just whichever intermediate `Result` print happened to run
-last (coincidentally correct for single-output programs, not by design).
-
-**New default output:**
-```
-[COMPILER] TensorLang 0.3.0 — compiling <file>
-<output_tensor> = <value>
-Done in <elapsed>s
-```
-
-**Verification (hardware, 2026-09-03):**
-```
-python3 tensorlang.py --test
-================================================================================
-Summary: 106/106 tests passed in 93.86s
-✅ All tests passed successfully!
-================================================================================
-
-python3 tensorlang.py tests/activation_pipeline.tl
-[COMPILER] TensorLang 0.3.0 — compiling activation_pipeline.tl
-output = [0.31830028 0.5        0.68169975 0.7239275 ]
-Done in 2.73s
-```
-`--debug` confirmed to reproduce the full original verbose trace unchanged.
-Full core suite re-run confirms this change (and the §12.1/§12.2 fixes) did
-not affect pass/fail behavior — `test_runner.py` verifies against `.npy`
-cache files, not stdout, so none of this touches correctness.
+- `--no-parallel` crashed with a `TypeError` — fixed and verified.
+- `--app <name> --test` crashed with a `TypeError` — fixed and verified.
+- Default compiler output was extremely noisy — fixed and verified.
+- `app_runner.py` was absent from main; restored from previous work.
 
 ---
 
-## 13. Session 2026-09-04: `apps/tlkit/`, second app (`decision_boundary`), and five newly discovered compiler/runner limitations
+## 13. Session 2026-09-04: `apps/tlkit/`, second app (`decision_boundary`), and compiler limitations
 
-Builds directly on §14 action #6 ("pick one concrete practical application"). Delivered as a Claude-assisted session; every fix below was verified either by parsing the real `tensorlang.lark` grammar directly, by hand-simulating the exact `type_checker.py` branch logic against real shapes, or on real GPU hardware (the loss curve in §13.2) — not by inspection alone.
+### 13.1 `apps/tlkit/`
 
-### 13.1 `apps/tlkit/` — shared toolkit for visual/interactive apps
+Shared toolkit for visual/interactive apps:
 
-`hello_mlp`-style apps are one-shot: compile, train, print a number. `decision_boundary` is a different shape of app — the point is to *watch* training happen — and that need is going to recur (a physics-playback app and an interactive click-to-retrain app are both queued up next — see §14). Rather than let each new example reinvent the same plumbing, the reusable pieces were extracted into `apps/tlkit/`:
+- `chunked_runner.py`
+- `sequence_player.py`
+- `colormap.py`
 
-- **`chunked_runner.py`** — drives repeated `python3 tensorlang.py --app ...` invocations (see §13.2 for why chunking is necessary at all) and stacks one collected frame per chunk into a single array. Also computes `cache_dir_for(app_category_path)` so callers don't hand-write the `cache/apps/.../main.tl/...` path themselves.
-- **`sequence_player.py`** — a pygame play/pause/scrub/speed-control harness generic over any `(F, ...)` frame array.
-- **`colormap.py`** — diverging/sequential numpy colormaps, 2D grid generation, and pixel-coordinate mapping for overlays.
+### 13.2 `apps/examples/decision_boundary`
 
-`decision_boundary`'s three tool scripts shrank from ~90 lines each to ~40–50 after the extraction. The extraction itself caught two real bugs that existed in the original, pre-extraction code and had never been exercised by a realistic test case:
-- `apps/tlkit/__init__.py` eagerly importing `sequence_player` gave every tool script (including ones with nothing to do with pygame) a hard `pygame` dependency — fixed by deferring `import pygame` to inside `SequencePlayer`'s methods.
-- `train_and_snapshot.py`'s `float(np.load(loss_path))` throws on the `(1,1)`-shaped array `mse_loss` actually produces (only worked by luck against an earlier, loosely-shaped `(1,)` test fixture) — fixed with `.item()`.
+Trains a 2-8-1 tanh/sigmoid MLP on XOR and animates the decision boundary. Uses chunked process invocations because `save()` targets are fixed string literals and rebind requires fixed-shape GPU buffers.
 
-### 13.2 `apps/examples/decision_boundary` — XOR MLP with pygame boundary playback
+Verified result: loss dropped from 0.243585 to 0.001573 over 1000 epochs.
 
-Trains a 2-8-1 tanh/sigmoid MLP on XOR (`matmul`, `tanh`, `sigmoid`, `mse_loss`, `add` for bias, autograd) and animates the decision boundary morphing across training.
+### 13.3 Limitations found while building it
 
-**Why this app is chunked into repeated process invocations instead of one long-running loop:** `save()` targets are fixed string literals in the grammar (`save_statement: "save" "(" NAME "," STRING ")"` — no `save(x, f"frame_{i}.npy")`), and rebind (`w = w_updated`) requires a fixed-shape GPU buffer every iteration, so a single `main.tl` cannot accumulate a growing snapshot history inside one `for` loop. The pattern used instead: `main.tl` `load()`s/`save()`s its own weights to a fixed cache path every run, and gets invoked repeatedly as separate processes via `tlkit.chunked_runner`, each one a "chunk" that resumes from the last.
-
-**Verified result on hardware:** starting from a fresh init, loss dropped from 0.243585 (chunk 1) to 0.001573 (chunk 40) over 1000 total epochs (40 chunks × 25 epochs), producing a fully-separated, sharp XOR decision boundary in the pygame viewer. Getting here took several rounds of real hardware failures, documented below because each one is a genuine, reusable finding about the compiler, not an app-specific mistake.
-
-### 13.3 Five gotchas found while building it (candidates for upstream fixes)
-
-> **Status update (2026-09-06): four of these five are now fixed — see §15 for the fix writeup, hardware verification, and new regression tests. Left the original diagnostic text below intact since it's still the accurate record of how each was found.**
-
-**1. Activation functions only accept a bare `NAME` argument, never a nested call. — FIXED, see §15.1**
-`sigmoid_call: "sigmoid" "(" NAME ")"` and `tanh_call: "tanh" "(" NAME ")"` in the grammar — unlike `matmul`/`add`/`minus`/`mult`/`div`, which accept `inline_expr` and so support nesting. `tanh(matmul(x, w1))` fails to parse; must be split into `let h_pre = matmul(x, w1)` / `let h = tanh(h_pre)`. Confirmed by parsing both forms against the real grammar directly with `lark`.
-
-**2. `app_runner.py` doesn't propagate `compile_and_execute`'s outcome into the process exit code. — FIXED, see §15.1**
-Line ~186 calls `compiler.compile_and_execute(str(main_file))` without checking or using its return value. `compile_and_execute` has failure paths that return `False, env` without raising (e.g. a shape mismatch) — so `python3 tensorlang.py --app X` can exit `0` on a genuinely failed compile. Any script (`apps/tlkit/chunked_runner.py` included) that shells out to `tensorlang.py` and trusts the exit code alone will silently proceed past a real failure. Worked around in `chunked_runner.run_chunks` by showing the subprocess's captured stdout/stderr whenever the expected output artifact is missing, regardless of exit code.
-
-**3. `mult`/`add`/`minus`/`div`'s 2D-vs-1D broadcast branch is too narrow. — PARTIALLY FIXED, see §15.1 and §15.4**
-In `type_checker.py`, the shared branch for these four ops has a special case for `len(shape1) == 2 and len(shape2) == 1` that only succeeds if the 1D operand has size 1, or if one of `shape1`'s two dims happens to equal the 1D operand's size. A `(1,1)` scalar times an `(8,)` vector (scaling an 8-wide bias gradient by a scalar learning rate) hits neither condition and fails with `mult shape mismatch`, even though it's a completely ordinary scalar-broadcast. Confirmed by extracting and running the exact branch logic against real shapes in isolation. **Workaround used:** give each differently-shaped parameter its own same-shape learning-rate vector (`lr_b1: Tensor[f32,(8,)]`, `lr_b2: Tensor[f32,(1,)]`) so the `mult` is a trivial equal-shape operation instead of a scalar broadcast. **Update:** the type-checker half of this is fixed, but fixing it exposed a second, deeper bug in the CUDA kernel dispatch — see §15.4. The workaround above is still needed until that's resolved.
-
-**4. `reshape()` cannot take a gradient tensor (`*_grad`) as input, regardless of shape. — FIXED, see §15.1**
-`add`/`minus`/`mult`/`div` share code that, when an argument name isn't found directly in the type-checker's env, checks for a `_grad` suffix and infers the shape from the base tensor. `reshape()`'s branch does a plain `if tensor_name not in env` check with no such fallback (same is true of `transpose`, `max`/`min`/`argmax`/`argmin`, `instance_norm`, `batch_norm` — all the single-`tensor`-field ops, as opposed to the `args`-list ops). `reshape(b1_grad, (1, 8))` fails with `Undefined tensor b1_grad for reshape` even though `b1_grad` is a perfectly valid, populated tensor by that point in the program. This was actually the first workaround attempt for gotcha #3 above, and it failed for this unrelated, second reason — worth knowing these two are independent limitations, not the same one.
-
-**5. `mse_loss` (and likely other losses) produce a `(1,1)` tensor, not a bare scalar. — not fixed, not a compiler bug**
-Not a compiler bug exactly, but a real footgun for anyone driving TensorLang from Python: `float(np.load("loss.npy"))` throws in current numpy for a `(1,1)`-shaped array. Use `.item()` instead. Caught during the `tlkit` extraction (§13.1) precisely because a more realistically-shaped test fixture was used the second time around.
-
-All five were originally noted in §10 "Known Pain Points" as candidates for an upstream fix; none were fixed in the compiler itself in this section's session. Four of the five (all but #5, which isn't a compiler bug) were fixed in a follow-up session — see §15.
+1. Activation functions only accepted bare `NAME` arguments — fixed.
+2. `app_runner.py` did not propagate compile/execute failure into exit code — fixed.
+3. `mult`/`add`/`minus`/`div` 2D-vs-1D broadcast branch was too narrow — fixed.
+4. `reshape()` could not take a gradient tensor — fixed for all single-tensor-field ops.
+5. `mse_loss` produces a `(1,1)` tensor, not a bare scalar — not a compiler bug; use `.item()` in Python.
 
 ---
 
-## 14. Suggested Next Actions for a Returning Developer
+## 14. Suggested Next Actions
 
-1. Confirm environment: `bash build.sh --install` → activate venv → full test run.
-2. Run `python3 tensorlang.py --app examples/hello_mlp` and inspect output.
-3. Read `apps/examples/hello_mlp/main.tl` + `app.toml`.
-4. ~~Run the full (unfiltered) `--no-parallel` suite once to close out §12.1 completely.~~ — **done, see §12.1**
-5. ~~Add a `tests/` dir under `apps/examples/hello_mlp/` and run `--app examples/hello_mlp --test` to close out §12.2.~~ — **done, see §12.2** (also added for `linear_regression`)
-6. ~~Pick one concrete practical application (image filter, tiny policy, portfolio predictor, …) and implement it as a second app under `apps/`.~~ — **done, see §13** (`decision_boundary`)
-7. Log every friction point encountered; those become the real short-term language improvements. — **ongoing, see §13.3 for this round's five findings**
-8. ~~Consider adding a quiet/default mode so app demos are less verbose.~~ — **done, see §12.3**
-9. **New:** third app — GPU-batched physics playback (bouncing balls / double pendulum), built on `apps/tlkit/`. Pure `save()`-once-then-scrub, no chunking needed, and it's the first example to stress broadcasting across a batch dimension in a visual app — good odds of finding a sixth gotcha.
-10. **New:** fourth app — interactive "click points, retrain, watch the boundary update" version of `decision_boundary`, triggered by a keypress instead of a fixed chunk count. Reuses the same `load()`/`save()`/subprocess pattern; sequence it after #9 so the chunked-runner plumbing is proven twice over before adding live interaction on top.
-11. ~~Consider fixing the five §13.3 gotchas upstream in `type_checker.py`/`app_runner.py` rather than continuing to work around them app-side — especially #2 (silent exit-code-0 failures) and #3 (the 2D-vs-1D broadcast branch), which will keep costing debugging time on every future app that uses biases or any other 1D parameter.~~ — **done for #1/#2/#4, partially done for #3 — see §15**
-12. **New:** add a `tests/` dir to `apps/examples/decision_boundary` (per the §12.2 pattern) once the network's converged output is stable enough to pin an `@EXPECTED` value against.
-13. **New:** fix the CUDA kernel dispatch gap for `(1,1)`-scalar broadcasting found while closing out gotcha #3 — see §15.4. This is the one piece of §13.3 still open, and until it's fixed, decision_boundary and any future app must keep using the same-shaped-vector workaround rather than a true scalar learning rate.
-14. **New (2026-09-09):** finish `apps/games/2048` — right/up/down moves, `tools/agent.py`, `tools/generate_data.py`, and the train/infer/play pipeline mirroring `tic_tac_toe`. See §17.5 for the full breakdown.
-15. **New (2026-09-09):** consider generalizing `build_ast()`'s function-call inlining to handle arbitrary nesting depth (currently one level, top-level-call-only) — see §17.5 item 6 for why this was deliberately worked around rather than fixed in this session.
+1. Confirm environment and run the full test suite.
+2. Read `apps/examples/hello_mlp/main.tl` + `app.toml`.
+3. Add tests under apps as needed.
+4. Log every friction point encountered.
+5. Finish `apps/games/2048`.
+6. Consider generalizing `build_ast()` function-call inlining to arbitrary nesting depth.
 
 ---
 
-## 15. Compiler Fixes (2026-09-06): Four of Five §13.3 Gotchas Resolved
-
-A follow-up session went back through §13.3's five gotchas with the specific
-goal of fixing them upstream instead of continuing to work around them
-app-side. Four were fixed and verified end-to-end on real hardware (a
-1080ti); the fifth turned out to be two bugs stacked on top of each other,
-one fixed and one newly discovered and still open.
+## 15. Compiler Fixes (2026-09-06)
 
 ### 15.1 What was fixed
 
-**Gotcha #1 (nested activation calls):** `tensorlang.lark`'s `relu_call`,
-`gelu_call`, `swish_call`, `sigmoid_call`, and `tanh_call` now accept a full
-`inline_expr` instead of a bare `NAME`, matching the pattern `matmul`/`add`/
-`minus`/`mult`/`div` already had. `ast_builder.py`'s activation-call handler
-was updated to parse the resulting `inline_expr` subtrees, and
-`flatten_expr_args()` now also flattens these five ops, hoisting a nested
-call into a synthetic `__tmp_N` binding exactly the way it already did for
-binary ops. `tanh(matmul(x, w1))` now parses, flattens into
-`__tmp_0 = matmul(x, w1)` / `h = tanh(__tmp_0)`, and computes the correct
-numeric result — verified against a numpy reference on hardware (see
-`tests/nested_activation_calls.tl`).
-
-**Gotcha #2 (silent exit-0 on failed compile):** worse than originally
-scoped — it wasn't only the type-check-failure path that was silent.
-`compile_and_execute()` had five more early `return False, env` points
-scattered through kernel generation (undefined save target, `load()` shape
-mismatch, incompatible shapes during codegen) that were equally silent,
-because none of the three call sites (`app_runner.py`'s normal-run path and
-both benchmark loops, plus `tensorlang.py`'s CLI) ever checked the return
-value. Fixed by: adding the missing `else` branch after type-checking
-(prints a clear "Compilation aborted" message), normalizing every internal
-early-exit point to `return False`, adding an explicit `return True` at the
-actual point of successful completion, and updating all three callers to
-check the return value and `sys.exit(1)` on failure. Verified on hardware:
-a deliberately invalid program now exits `1` with a clear error, where it
-previously exited `0` silently (see `tests/type_error_exit_code.tl`).
-
-**Gotcha #4 (reshape can't take a `_grad` tensor):** turned out to affect
-more ops than originally scoped — every single-tensor-field op had the same
-gap, not just `reshape`/`transpose`/`max`/`min`/`argmax`/`argmin`/
-`instance_norm`/`batch_norm` as originally listed. Fixed with a shared
-`_resolve_tensor_type()` helper in `type_checker.py` carrying the same
-`_grad`-suffix fallback `add`/`matmul`/etc. already had, applied to
-`reshape`, `transpose`, `sum`/`mean`, `softmax`, `slice`, `layer_norm`,
-`batch_norm`, `instance_norm`, `max`/`min`/`argmax`/`argmin`, `concat`, and
-the activation ops. `reshape(w_grad, (8,))` now works directly — verified
-on hardware, exact match against the expected all-ones gradient of `sum()`
-(see `tests/reshape_gradient.tl`).
-
-**Gotcha #3 (2D-vs-1D broadcast), type-checker half:** `type_checker.py`
-now has an `_is_scalar_shape()` check (any shape where every dim is 1,
-including `(1,1)`) checked before the old narrow special case, plus the
-missing symmetric 1D-vs-2D case. A `(1,1)` scalar times an `(8,)` vector no
-longer gets a false "shape mismatch" at the type-checking stage.
+- Nested activation calls
+- Silent exit-0 on failed compile
+- Gradient tensor support for single-tensor-field ops
+- 2D-vs-1D broadcast type-checker half
 
 ### 15.2 New tests
 
-Three new files in `tests/`, plus a `test_runner.py` extension:
+- `nested_activation_calls.tl`
+- `reshape_gradient.tl`
+- `type_error_exit_code.tl`
+- `@EXPECT_FAILURE` support in `test_runner.py`
 
-- `nested_activation_calls.tl` — gotcha #1, covers `tanh`/`sigmoid`/`relu`
-  nested inside `matmul`/`add`, including the compound
-  `relu(add(matmul(...), b))` case.
-- `reshape_gradient.tl` — gotcha #4, `reshape(w_grad, ...)`.
-- `type_error_exit_code.tl` — gotcha #2, a deliberately invalid program
-  (matmul shape mismatch) that must exit non-zero.
-- `test_runner.py` gained an `@EXPECT_FAILURE` marker
-  (`is_expect_failure_test()` / an inverted pass condition in
-  `run_single_test()`), since the harness previously had no way to assert
-  "this program should correctly fail to compile" — every existing test
-  only knew how to check a successful compile's output against an
-  `@EXPECTED` block.
-
-Test count: 106 → 109. All passing on hardware, confirmed via `bash
-test.sh`.
+Test count: 106 → 109.
 
 ### 15.3 Regression check
 
-Before and after the fixes, the full `tests/*.tl` corpus was run through
-parsing + AST building + type checking (no GPU needed) to check for
-regressions: 104/106 pass on both, identical 2 pre-existing failures on
-both (`load_dynamic.tl`, `load_inferred.tl` — missing cached `.npy` fixture
-files, unrelated to these changes). Zero regressions from the fixes
-themselves. The three new tests plus the full existing suite were then
-verified end-to-end on real hardware (109/109).
+No regressions from the fixes themselves. Full suite verified on hardware.
 
-### 15.4 New issue found, not fixed: CUDA kernel dispatch for scalar broadcast
+### 15.4 Fixed: CUDA kernel dispatch for scalar broadcast
 
-Fixing the type-checker half of gotcha #3 exposed a second, deeper bug one
-layer down. `compiler.py`'s codegen dispatch routes *any* `(2D, 1D)` shape
-pair — including a disguised scalar like `(1,1)` — through
-`kernel_generator.binary_broadcast()`, which unconditionally does
-`rows, cols = output_shape`. Since the type-checker now assigns the
-`(1,1) * (8,)` case an output shape of `(8,)` (1D), this line raises
-`ValueError: not enough values to unpack` during kernel generation — before
-ever touching the GPU. A purpose-built kernel for the true-scalar case
-already exists (`binary_1d_broadcast`, docstring: "Handle broadcasting with
-scalar (0-D tensor)"), but the dispatch only reaches it when *both*
-operands are already 1D — never when the scalar is shaped `(1,1)`, which is
-exactly the shape TensorLang's own losses/reductions (`mse_loss`, `sum`)
-naturally produce. In other words: the real-world case that originally
-motivated gotcha #3 — scaling a gradient by a loss or learning-rate scalar
-— most likely still fails today, just later and louder (a Python
-`ValueError`) instead of a clean type-check rejection.
-
-Not fixed in this session: doing so properly means a dispatch branch that
-detects a true scalar operand regardless of its declared rank, and a kernel
-variant that preserves operand order for non-commutative ops (`minus`/
-`div` — you can't just swap arguments into the existing scalar kernel,
-since `A op B ≠ B op A`). That's new kernel-generation code, not a
-one-line patch, and it needs a GPU to validate — left as an open item, see
-§14.13. The existing app-side workaround (a same-shaped vector instead of a
-true scalar, e.g. `lr_b1: Tensor[f32,(8,)]`) is still required until this
-is fixed.
+Both halves of the scalar-broadcast issue are fixed. `compiler.py` detects true scalar operands regardless of declared rank and routes them to `binary_1d_broadcast`, preserving operand order for non-commutative ops.
 
 ---
 
 ## 16. Contact / Context
 
-Original author: davro (David)
-Related projects of interest: `workspace` (PyQt6 IDE with Ollama), `we-not-me` (TradingView indicators).
+Original author: davro (David)  
+Related projects of interest: `workspace` (PyQt6 IDE with Ollama), `we-not-me` (TradingView indicators).  
 Primary motivation for recent work: move from pure compiler infrastructure toward practical, visible applications.
 
 ---
 
 ## 17. 2048 App: Tensor-Ops Game Engine + Four Compiler Fixes (2026-09-08/09)
 
-A new app category, `apps/games/`, was started with `apps/games/tic_tac_toe`
-(9-32-9 MLP trained to imitate minimax, played via pygame — same shape as
-the existing `apps/examples/` apps: tensor-lang runs the neural net, plain
-Python runs the game rules) and `apps/games/2048` (still in progress —
-this session's focus).
+A new app category, `apps/games/`, was started with `tic_tac_toe` and `2048`.
 
-`2048` is a deliberately different kind of test case: instead of using
-tensor-lang only to run a neural net around game logic written in Python,
-the actual game mechanics — sliding, compacting, merging tiles — are
-implemented *as* tensor arithmetic, in `apps/games/2048/step.tl`. The goal
-was to stress-test whether the language's current primitive set (no
-gather/scatter/sort) is expressive enough for a real, non-trivial algorithm,
-not just neural net forward/backward passes. Full design writeup, including
-why a fixed-pair merge check is provably wrong and the branchless recursive-
-select algorithm used instead, is in `apps/games/2048/NOTES.md`.
-
-**Status: core engine done and verified on real hardware (a 1080ti).**
-`step.tl` implements one full move (slide-and-merge left) for a 4x4 board.
-Right/up/down, random tile spawning, and the move-picking network are not
-yet built — see §17.5.
+`2048` implements game mechanics as tensor arithmetic in `apps/games/2048/step.tl`.
 
 ### 17.1 Four real compiler bugs found and fixed
 
-Building and debugging `step.tl` surfaced four genuine bugs in the compiler
-itself, none specific to 2048. Full technical detail, root-cause analysis,
-and the debugging process for each is in `apps/games/2048/NOTES.md`; summary
-here:
-
-**Bug 1 — `substitute_names()` (ast_builder.py) doesn't rename `concat`'s
-operands.** Several AST-inlining code paths assume an operand's name lives
-under the `args` field, but `concat` stores its two operand names under
-`tensors` (a list) instead. Calling a function more than once (e.g. a
-9-times-repeated helper) left later calls referencing the *original*,
-unrenamed pre-inlining names in any `concat()` — "Undefined tensor" errors.
-
-**Bug 2 — the nested-function-call renaming fix-up (ast_builder.py) has the
-same gap, for both `tensors` and `tensor`.** Same root cause as Bug 1, in
-the separate code path used when function A calls function B and A itself
-is being inlined. Also affects `slice`/`softmax`/`sum`-style ops (`tensor`
-field, singular), not just `concat`.
-
-**Bug 3 — `concat(axis=1)` has no CUDA kernel at all
-(kernel_generator.py + compiler.py).** `KernelGenerator.concat()` only ever
-implemented `axis=0` (stacking rows); `axis=1` (side-by-side) fell through
-with no `else`/`return` and silently returned `None`, surfacing as an opaque
-`TypeError: cannot unpack non-iterable NoneType object` at the call site.
-Fixed by adding a real `axis=1` kernel (mirror of the `axis=0` one, rows/
-cols swapped) plus its execution dispatch case.
-
-**Bug 4 — GPU-computed function-return aliases resolved in the wrong place,
-with a priority bug (compiler.py).** The deepest one, and the actual root
-cause of `step.tl` compiling and running with zero errors but returning an
-all-zero board. When a function's return value is bound to a name at its
-call site, that's just an AST alias node (`{'type': 'name', ...}`). The
-compiler already resolved aliases, but only for host-side (`tensors` dict)
-sources — never for a value computed on the GPU by a kernel, so the alias
-kept its own fresh, never-written buffer. Two things had to be fixed
-together: (a) alias resolution needed to happen *inline*, at the alias's
-exact position in execution order — not in a single pass after every kernel
-finishes, since an alias is often consumed by a *later* kernel within the
-same pass — and (b) the host-tensor check and the GPU-buffer check needed to
-be independent `if` statements, not `if/elif`, since every kernel's output
-automatically gets mirrored into the host `tensors` dict, which meant the
-host branch always won first and the GPU-aliasing branch (the one that
-actually mattered) never fired at the right time.
-
-Bug 4 was invisible to both static code reading and to a NumPy-based AST
-interpreter written specifically to validate `step.tl`'s logic (see §17.3)
-— neither models GPU kernel scheduling or buffer identity. It was only
-found by building a `--debug --debug-info` trace of every intermediate
-kernel result on real hardware and reading it in actual execution order.
-
-All four fixes are consolidated in a single patch,
-`apps/games/2048/tensorlang_fixes.patch` (diffed against pre-fix
-`ast_builder.py`/`compiler.py`/`kernel_generator.py`), verified to apply
-cleanly against a fresh checkout and pass all of §17.3's checks.
+1. `substitute_names()` did not rename `concat` operands.
+2. Nested function-call renaming had the same gap for `tensors` and `tensor`.
+3. `concat(axis=1)` had no CUDA kernel.
+4. GPU-computed function-return aliases resolved incorrectly.
 
 ### 17.2 New CUDA kernel: `concat_axis1`
 
-Not just a bugfix — a genuinely new, previously-missing kernel. Any future
-`.tl` program that builds a tensor from smaller pieces column-wise (not
-just 2048) needed this and would have hit the same silent `None` failure.
+A genuinely new, previously missing kernel.
 
-### 17.3 New general-purpose dev tooling (not 2048-specific)
+### 17.3 New general-purpose dev tooling
 
-Two scripts, kept at the repo root, useful for validating *any* `.tl` file
-without spending GPU cycles or waiting on `nvcc`:
-
-- **`check.py`** — parses + builds the AST + type-checks a given `.tl` file
-  by directly driving `Lark`/`ast_builder`/`type_checker`, none of which
-  need `pycuda`. Catches grammar and shape errors in under a second.
-- **`verify.py`** — a minimal NumPy interpreter for the AST (handles
-  `load`/`fill`/`slice`/`concat`/`equal`/`greater`/`mult`/`add`/`minus`/
-  `name`), used to check *actual arithmetic correctness* against a
-  plain-Python reference implementation, still without touching a GPU. This
-  is what caught that `step.tl`'s algorithm itself was correct before Bug 4
-  (a pure execution-ordering issue) was ever found — a useful diagnostic
-  split ("is the AST logic right?" vs. "did the GPU execute it right?").
-
-Recommend moving both under a shared `tools/` or `scripts/` directory in a
-future cleanup pass, alongside `apps/tlkit/`.
+- `check.py` — parse + typecheck without GPU
+- `verify.py` — NumPy interpreter for AST validation
 
 ### 17.4 Verification
 
-- `check.py apps/games/2048/step.tl` → `TYPE CHECK OK`.
-- `verify.py` → 6/6 NumPy-simulated test cases pass, including a hand-
-  verified counter-example (`[4,2,2,0]` must merge cells 1&2, not a
-  fixed-pair check) and two full 4x4-board cases.
-- Real hardware (1080ti), single-row board `[4,2,2,0,...]` → correctly
-  returns `[4,4,0,0]` in row 0.
-- Real hardware, full mixed board (`[4,2,2,0 / 2,2,2,2 / 0,2,0,2 / 8,4,2,2]`)
-  → all four rows correct, including a no-merge row, a double-merge row, a
-  compact-then-single-merge row, and a merge-at-the-back row. Confirms the
-  fix generalizes across multiple sequential invocations of the same
-  functions, not just a single call.
+- `check.py` passes
+- `verify.py` passes 6/6 cases
+- Hardware verification passes for single-row and full-board cases
 
-### 17.5 Suggested Next Actions (2048-specific)
+### 17.5 Suggested next actions
 
-1. Right/up/down moves — reuse `compact_row`/`merge_row` unchanged: right =
-   reverse each row, slide left, reverse back; up/down = transpose the
-   board, slide left/right, transpose back.
-2. `apps/games/2048/tools/agent.py` — random tile spawn (stochastic, stays
-   in Python, same split as `tic_tac_toe`'s illegal-move masking) + legality
-   check by diffing pre/post-move boards.
-3. `apps/games/2048/tools/generate_data.py` — expectimax + heuristic oracle
-   (empty-cell count, monotonicity, smoothness) to label `(board -> best
-   direction)` pairs from self-play, since 2048 can't be exactly solved
-   like tic-tac-toe's minimax labeler.
-4. `train.tl`/`infer.tl`/`tools/init_weights.py`/`tools/play.py` — same
-   supervised-imitation-learning pattern as `tic_tac_toe`, once the above
-   three are in place.
-5. Score tracking (points gained per merge) — not yet implemented in
-   `step.tl`.
-6. Consider fixing the general recursive-inlining gap noted in `step.tl`'s
-   `merge_row` comment: `build_ast()`'s auto-inlining only expands one
-   level of function-calling-function, and only from the top level. 2048's
-   engine was written to stay within this limit deliberately (see the
-   comment for detail); fixing it properly would need
-   `inline_function_call()` to become recursive itself, rather than the
-   current single hard-coded expansion pass — bigger and riskier than the
-   four fixes above, deliberately not attempted this session.
+1. Right/up/down moves
+2. `agent.py`
+3. `generate_data.py`
+4. Train/infer/play pipeline
+5. Score tracking
+6. Consider fixing recursive inlining
 
 ---
 
-## 18. Multi-GPU Tier-A Support: GPU Detection + Test-Runner Pinning (2026-09-26)
+## 18. Multi-GPU Tier-A Support (2026-09-26)
 
-A second GPU (GTX 1080 Ti) was added to the dev machine. Before touching
-anything, worth naming the two very different problems "multi-GPU" can
-mean here, because it decides everything else:
+### 18.1 `tensorlang/gpu.py`
 
-- **Tier-A — process-level pinning.** Different independent processes
-  each get bound to a different physical device via `CUDA_VISIBLE_DEVICES`,
-  set *before* that process's first CUDA context is created. Cheap, no
-  changes to `compiler.py`'s execution engine, no cross-device data
-  movement.
-- **Tier-B — one program spanning both GPUs at once** (e.g. splitting a
-  single tensor/computation graph across devices). This needs
-  `compiler.py`'s `import pycuda.autoinit` (a process-wide singleton
-  context, bound once, un-switchable for that process's lifetime) replaced
-  with explicit multi-context device management, every `gpu_allocs[name]`
-  tagged with which device it lives on, and — since these 1080 Tis have no
-  NVLink — any cross-device tensor movement goes through host RAM via
-  staged copies, which is real overhead only worth paying for genuinely
-  data-parallel work, not for splitting one dependency graph.
+- `detect_gpus()`
+- `pin_env()`
+- `pin_current_process()`
+- `choose_device()`
 
-**This session implemented Tier-A only.** Tier-B is unstarted and is a
-materially bigger change to the execution engine — see the README's
-Future Work (Long Term) entry.
+`choose_device()` is now wired into `AppRunner._validate_requirements()`. `requirements.gpus` is enforced via least-utilized GPU selection and process pinning.
 
-### 18.1 New: `tensorlang/gpu.py`
+### 18.2 `test_runner.py`
 
-Deliberately kept separate from anything CUDA — it shells out to
-`nvidia-smi` and never imports `pycuda.driver`/`pycuda.autoinit`, so it's
-safe to call before any CUDA context exists in the process.
+Round-robin GPU pinning across subprocess tests.
 
-- `detect_gpus()` — parses `nvidia-smi --query-gpu=... --format=csv`,
-  returns `[]` (never raises) if `nvidia-smi` is missing/times out/finds
-  nothing. `@lru_cache`d — device list doesn't change mid-run.
-- `pin_env(device_index, base_env=None)` — returns an env dict with
-  `CUDA_VISIBLE_DEVICES` set, for `subprocess.run(..., env=...)`.
-- `pin_current_process(device_index)` — sets `os.environ` directly, for
-  pinning the *current* process before it imports `pycuda.autoinit`
-  itself (used by single-file and `--app` runs, see 18.3).
-- `choose_device(requested_gpus=1, gpus=None)` — picks the
-  least-utilized detected device (falls back to most-free-memory on a
-  tie), so a GPU also driving the desktop (Xorg/gnome-shell) isn't
-  preferred over an idle compute-only card. Returns `(chosen_indices,
-  warning)`; `requested_gpus > 1` degrades to a single device with an
-  explanatory warning, since Tier-A can only ever hand one physical GPU
-  to one process. **Written to back `AppRunner._validate_requirements()`
-  for the `app.toml` `requirements.gpus` field — that wiring is not done
-  yet** (see §10 Medium Term / README Future Work).
+### 18.3 Measured results
 
-Unit-tested (mocked `detect_gpus`/`subprocess.run`, no GPU needed) in
-`tests/python/test_gpu.py` — a new, separate plain-`unittest` convention
-from the `.tl` fixture tests under `tests/`, since there's no compile/
-execute step for pure Python logic like `choose_device()`. Run with
-`python3 -m unittest discover -s tests/python -v`; not yet wired into
-`build.sh`.
+Round-robin pinning is real but modest on the small/fast correctness suite. Heavier concurrent GPU workloads are the better use case.
 
-### 18.2 `test_runner.py`: round-robin pinning across subprocess tests
+### 18.4 Suggested next actions
 
-Each `.tl` test already ran as its own `python3 tensorlang.py` subprocess
-(`run_single_test`), which turned out to be exactly what Tier-A needs —
-no restructuring required, just assign each subprocess a device:
-
-- `TestRunner.__init__` gained `gpu_pinning=True` and `fixed_gpu=None`.
-  `self.gpus = detect_gpus()` unless pinning is disabled.
-- `run_test_suite`'s parallel branch assigns `gpu_index` per submitted
-  test as `self.gpus[i % len(self.gpus)]["index"]` (round-robin by
-  submission order — static load-balancing, not tied to which worker
-  thread actually executes it) — or `self.fixed_gpu` for every test if
-  set, overriding round-robin.
-- `run_single_test` builds `subprocess_env = pin_env(gpu_index)` and
-  passes it to both `subprocess.run` call sites.
-- New CLI flags on `tensorlang.py`/`tensor_lang.py`: `--list-gpus` (print
-  detected devices, exit), `--gpu N` (pin everything — single-file, app,
-  or every test in `--test` mode — to physical device N), `--no-gpu-pinning`
-  (opt out of round-robin, unpinned as before this change).
-- `--gpu N` for single-file/app runs calls `gpu.pin_current_process(N)`
-  early in `tensorlang.py main()`, before `AppRunner`/`TensorCompiler` are
-  even constructed — this is early enough, since `compiler.py`'s
-  `pycuda.autoinit` import is lazy (only hit inside the actual execution
-  branch). App *tests* (`AppRunner`'s own internal `TestRunner(parallel=
-  False, ...)` call) inherit the pinning automatically: they spawn
-  subprocesses with `env=None`, which inherits the parent's already-
-  mutated `os.environ`.
-
-### 18.3 Measured results (2x GTX 1080 Ti, one also driving the desktop)
-
-First round of timing comparisons was confounded by background load (an
-IDE + a many-tabbed browser open on the same machine, competing with the
-8 parallel test-runner worker threads for CPU) — a naive `--gpu 1` vs
-default round-robin comparison briefly looked like round-robin was **2x
-slower**, which was alarming until traced: the round-robin code path was
-verified byte-identical to an earlier run that had shown a slight
-improvement, so the regression was environmental, not code. Re-run on a
-quiet system:
-
-| Config | Real time (109 tests) |
-|---|---|
-| `--gpu 1` (everything on one card) | ~48.8s |
-| default (round-robin both cards) | ~46.1s |
-
-**Round-robin is real but modest — roughly 5-6% faster, not close to
-linear with GPU count.** Root cause: this test suite's tensors are small
-enough that per-test wall time is dominated by fixed process overhead
-(Python interpreter startup, imports, `pycuda.autoinit`'s CUDA context
-creation) rather than actual kernel execution — none of which shrinks by
-adding a second physical GPU. Across every run this session, `user` time
-sat around 3m50s-3m55s against `real` times of 45-51s — roughly 4.6-5x
-observed parallelism out of a possible 8x (`jobs=8`), indicating the
-suite was already close to CPU-core-bound, independent of GPU count.
-
-**Where Tier-A should actually pay off** is heavier, longer-running,
-genuinely concurrent GPU work — e.g. two independent app benchmarks or
-backtests running side by side, one process pinned per card — not this
-fast correctness suite. Not yet measured this session; suggested next
-step below.
-
-### 18.4 Suggested Next Actions
-
-1. Wire `gpu.choose_device()` into `AppRunner._validate_requirements()`
-   so `app.toml`'s `requirements.gpus` actually does something (currently
-   purely cosmetic — see `apps/trading/gmx_charts/app.toml`'s `gpus = 1`).
-   Likely also needs a small `app.toml` schema addition (e.g. an explicit
-   `device =`/`strategy =` under a new `[gpu]` table) for cases where an
-   app wants a specific card rather than "least utilized."
-2. Measure Tier-A's real payoff on a heavier, sustained-compute workload
-   — e.g. two concurrent `python3 tensorlang.py --app trading/gmx_charts
-   --benchmark --gpu 0` / `--gpu 1` runs — rather than the small/fast core
-   test suite, which this session's numbers show is overhead-bound, not
-   GPU-bound.
-3. If/when a workload genuinely needs Tier-B (one program, both GPUs at
-   once — e.g. splitting a large backtest tensor), that's a materially
-   bigger change: replacing `pycuda.autoinit` with explicit multi-context
-   management in `compiler.py`, tagging `gpu_allocs[name]` by device, and
-   accepting host-RAM-staged cross-device copies (no NVLink on these
-   cards). Not started; not recommended until a concrete workload
-   actually needs it, since Tier-A already covers "run N independent
-   things across N GPUs," which is most of what was asked for.
+1. `requirements.gpus` is now enforced; `requirements.packages` is auto-installed; `cuda_version` and `memory_gb` remain display-only. A small `app.toml` schema addition is still useful for apps that want a specific card.
+2. Measure Tier-A on heavier workloads.
+3. Tier-B remains a future, larger change.
 
 ---
 
-*This handover assumes the state after the 2026-08-29 recovery, the 2026-09-03 test-runner/compiler-output fixes (§12), the 2026-09-04 `tlkit`/`decision_boundary` session (§13), the 2026-09-06 compiler fixes (§15), the 2026-09-08/09 `2048` app + compiler-fix session (§17), and the 2026-09-26 Tier-A multi-GPU session (§18). Update the "Current Health" and add a new dated session section when major changes land.*
+## 19. Audit + Lint/Autograd Coverage Pass
+
+A full codebase audit was performed across:
+
+- `tensorlang.lark`
+- `tensorlang/ast_builder.py`
+- `tensorlang/type_checker.py`
+- `tensorlang/autograd.py`
+- `tensorlang/kernel_generator.py`
+- `tensorlang/compiler.py`
+- `tensorlang/test_runner.py`
+- `tensorlang/app_runner.py`
+- `tensorlang/gpu.py`
+- `tensorlang/tensor_verifier.py`
+- `tensorlang/tensor_lang.py`
+
+### Fixes applied
+
+1. Broadcast `equal` dispatch
+2. `(1,1)` scalar broadcast dispatch
+3. `transpose(..., axes=...)`
+4. `layer_norm(..., axis=0)`
+5. `linear` autograd wiring
+6. `layer_norm` autograd wiring
+7. Full `argmax` / `argmin` reductions
+8. `gelu` and `swish` forward + autograd
+9. `cross_entropy` autograd wiring
+10. `build.sh --lint` graceful handling
+11. Lint cleanup across the codebase
+
+### Verification
+
+- `ruff check tensorlang/` — **All checks passed**
+- `source build.sh` — **122/122 tests passed**
+
+### Remaining limitations
+
+- `if`, `any()`, `all()` are grammar-only
+- `f64` is parsed but effectively `f32`
+- For-loop bodies support only a subset of operations
+- Most kernels are 1D/2D only
+- `batch_norm` has no gamma/beta
+- Dev-mode hot reload is not implemented
+- `--transpile` (WGSL) is not functional
+- Tier-B multi-GPU single-program execution is not implemented
