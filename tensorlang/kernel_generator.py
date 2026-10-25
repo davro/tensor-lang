@@ -1951,30 +1951,77 @@ extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
     # ================================================================
     # Transpose, Reshape, Concat
     # ================================================================
-    def transpose(self, op_type, name, input_shape, tensor_name):
-        if len(input_shape) == 2:
-            # 2D transpose (matrix transpose)
-            rows, cols = int(input_shape[0]), int(input_shape[1])
-            
+    def transpose(self, op_type, name, input_shape, tensor_name, axes=None):
+        input_shape = tuple(int(d) for d in input_shape)
+        ndim = len(input_shape)
+
+        if axes is None:
+            axes = list(range(ndim - 1, -1, -1))
+        else:
+            axes = [int(a) for a in axes]
+
+        output_shape = tuple(input_shape[i] for i in axes)
+        total_elements = int(__import__("numpy").prod(input_shape)) if input_shape else 1
+
+        if ndim == 0:
             kernel = f"""
-__global__ void transpose_2d_kernel_{name}(float* input, float* output, int rows, int cols) {{
-    int out_row = blockIdx.y * blockDim.y + threadIdx.y;
-    int out_col = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (out_row < cols && out_col < rows) {{
-        // output[out_row, out_col] = input[out_col, out_row]
-        output[out_row * rows + out_col] = input[out_col * cols + out_row];
+__global__ void transpose_kernel_{name}(float* input, float* output, int total_elements) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {{
+        output[idx] = input[idx];
     }}
 }}
-extern "C" void launch_transpose_{name}(float* input, float* output, int rows, int cols) {{
-    dim3 block(16, 16);
-    dim3 grid((rows + block.x - 1) / block.x, (cols + block.y - 1) / block.y);
-    transpose_2d_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+extern "C" void launch_transpose_{name}(float* input, float* output, int total_elements) {{
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    transpose_kernel_{name}<<<grid, block>>>(input, output, total_elements);
     cudaDeviceSynchronize();
     {self.cuda_debug()}
 }}
 """
-            return kernel, (f"{op_type}_2d", name, tensor_name, None, rows, cols)
+            return kernel, ("transpose", name, tensor_name, None, total_elements)
+
+        in_shape_str = ", ".join(str(d) for d in input_shape)
+        out_shape_str = ", ".join(str(d) for d in output_shape)
+        axes_str = ", ".join(str(a) for a in axes)
+
+        kernel = f"""
+__global__ void transpose_kernel_{name}(float* input, float* output, int total_elements) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_elements) {{
+        const int in_shape[{ndim}] = {{{in_shape_str}}};
+        const int out_shape[{ndim}] = {{{out_shape_str}}};
+        const int axes[{ndim}] = {{{axes_str}}};
+
+        int out_coords[{ndim}];
+        int tmp = idx;
+        for (int d = {ndim - 1}; d >= 0; --d) {{
+            out_coords[d] = tmp % out_shape[d];
+            tmp /= out_shape[d];
+        }}
+
+        int in_coords[{ndim}];
+        for (int d = 0; d < {ndim}; ++d) {{
+            in_coords[axes[d]] = out_coords[d];
+        }}
+
+        int in_idx = 0;
+        for (int d = 0; d < {ndim}; ++d) {{
+            in_idx = in_idx * in_shape[d] + in_coords[d];
+        }}
+
+        output[idx] = input[in_idx];
+    }}
+}}
+extern "C" void launch_transpose_{name}(float* input, float* output, int total_elements) {{
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    transpose_kernel_{name}<<<grid, block>>>(input, output, total_elements);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        return kernel, ("transpose", name, tensor_name, None, total_elements)
 
 
     # ================================================================

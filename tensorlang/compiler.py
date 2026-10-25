@@ -622,11 +622,11 @@ class TensorCompiler:
                 c_int(total_elements)
             )
 
-        elif op_type == 'transpose_2d':
-            rows, cols = dims
+        elif op_type == 'transpose':
+            total_elements = dims[0]
             getattr(lib, f'launch_transpose_{name}')(
                 c_void_p(int(gpu_allocs[arg1])), c_void_p(int(gpu_allocs[name])),
-                c_int(rows), c_int(cols)
+                c_int(total_elements)
             )
 
         elif op_type == 'reshape':
@@ -1444,7 +1444,8 @@ class TensorCompiler:
                         elif expr['type'] == 'transpose':
                             tensor_name  = expr['tensor']
                             input_shape  = env[tensor_name]['shape']
-                            kernel, kernel_info = generator.transpose(expr['type'], name, input_shape, tensor_name)
+                            axes         = expr.get('axes')
+                            kernel, kernel_info = generator.transpose(expr['type'], name, input_shape, tensor_name, axes)
                             kernels.append(kernel_info)
                             cuda_code += kernel
 

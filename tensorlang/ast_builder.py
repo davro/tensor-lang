@@ -552,17 +552,17 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> Dict:
     # Transpose
     elif tree.data == 'transpose_call':
         tensor_name = None
-        axes = None
+        axis_values = []
         for child in tree.children:
             if isinstance(child, Token) and child.type == 'NAME':
                 tensor_name = child.value
             elif isinstance(child, Tree):
-                axis_values = []
                 for grandchild in child.children:
                     if isinstance(grandchild, Token) and grandchild.type == 'NUMBER':
                         axis_values.append(int(float(grandchild.value)))
-                if axis_values:
-                    axes = tuple(axis_values)
+            elif isinstance(child, Token) and child.type == 'NUMBER':
+                axis_values.append(int(float(child.value)))
+        axes = tuple(axis_values) if axis_values else None
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axes={axes}")
         return {'type': 'transpose', 'tensor': tensor_name, 'axes': axes}
