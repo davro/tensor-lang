@@ -126,7 +126,7 @@ if (( INSTALL )); then
     pip install tomli
     pip install plotly
     pip install dash
-
+    pip install pytest
 
     # tradingbot
     pip install dotenv
@@ -137,28 +137,38 @@ if (( INSTALL )); then
 
     echo "=== requirements.txt updated ==="
 
-    #sudo apt install python3-pytest
-    #exit 0
-fi
-
-# ─────────────────────────── lint ────────────────────────────────────────────
-if (( LINT )); then
-    echo "=== Linting tensorlang/ ==="
-    ruff check tensorlang/
     status=$?
     if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         exit "$status"
     else
         return "$status"
     fi
-    #exit 0
+fi
+
+# ─────────────────────────── lint ────────────────────────────────────────────
+if (( LINT )); then
+    echo "=== Linting tensorlang/ ==="
+    ruff check tensorlang/
+
+    status=$?
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit "$status"
+    else
+        return "$status"
+    fi
 fi
 
 # ─────────────────────────── data pipeline ───────────────────────────────────
 if (( DATA )); then
     echo "=== Running data pipeline ==="
     python3 data/bitcoin_daily.py
-    exit 0
+
+    status=$?
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit "$status"
+    else
+        return "$status"
+    fi
 fi
 
 # ─────────────────────────── cache clean ─────────────────────────────────────
@@ -167,6 +177,13 @@ fi
 if (( CLEAN )); then
     echo "=== Cleaning cache/ ==="
     rm -rf cache/
+
+    status=$?
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit "$status"
+    else
+        return "$status"
+    fi
 fi
 
 # ─────────────────────────── single file ─────────────────────────────────────
@@ -183,13 +200,39 @@ if [[ -n "$ARG" ]]; then
 
     echo "=== Compiling: $ARG ==="
     python3 tensorlang.py $CACHE_FLAG $DEBUG "$ARG"
-    exit 0
+
+    status=$?
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit "$status"
+    else
+        return "$status"
+    fi
+    #exit 0
 fi
 
 # ─────────────────────────── test suite ──────────────────────────────────────
 # Default mode when no file or special flag is given, or --test is explicit.
 # Always wipe cache before the full suite to prevent stale .npy files from
 # previous runs causing false passes or wrong @EXPECTED comparisons.
+
+# if (( RUN_TEST )) || [[ -z "$ARG" ]]; then
+    # # Wipe cache unless --no-cache was passed (useful for quick re-runs)
+    # if (( ! NO_CACHE )); then
+        # if [[ -d "cache/" ]]; then
+            # echo "=== Clearing cache/ before test run ==="
+            # rm -rf cache/
+        # fi
+    # fi
+
+    # FILTER_FLAG=""
+    # if [[ -n "$FILTER" ]]; then
+        # FILTER_FLAG="--filter $FILTER"
+    # fi
+
+    # echo "=== Running test suite ==="
+    # python3 tensorlang.py --cache-layers --verify-tensors --test $DEBUG $FILTER_FLAG
+# fi
+
 
 if (( RUN_TEST )) || [[ -z "$ARG" ]]; then
     # Wipe cache unless --no-cache was passed (useful for quick re-runs)
@@ -205,6 +248,23 @@ if (( RUN_TEST )) || [[ -z "$ARG" ]]; then
         FILTER_FLAG="--filter $FILTER"
     fi
 
-    echo "=== Running test suite ==="
+    echo "=== Running .tl test suite ==="
     python3 tensorlang.py --cache-layers --verify-tensors --test $DEBUG $FILTER_FLAG
+    tl_status=$?
+
+    echo "=== Running Python regression tests ==="
+    python -m pytest -q
+    pytest_status=$?
+
+    if (( tl_status != 0 || pytest_status != 0 )); then
+        status=1
+    else
+        status=0
+    fi
+
+    if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+        exit "$status"
+    else
+        return "$status"
+    fi
 fi
