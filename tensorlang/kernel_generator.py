@@ -1467,52 +1467,44 @@ extern "C" void launch_min_{name}(float* input, float* output, int rows, int col
             # Full argmax to scalar index
             size = int(np.prod([int(dim) for dim in input_shape]))
             kernel = f"""
+struct ArgMaxValIdx_{name} {{ float val; int idx; }};
+
 __global__ void argmax_full_kernel_{name}(float* input, float* output, int size) {{
-    extern __shared__ float sdata[];
-    extern __shared__ int indices[];
+    extern __shared__ ArgMaxValIdx_{name} sdata[];
     int tid = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // Load data and indices into shared memory
-    if (i < size) {{
-        sdata[tid] = input[i];
-        indices[tid] = i;
-    }} else {{
-        sdata[tid] = -FLT_MAX;
-        indices[tid] = -1;
+
+    sdata[tid].val = -FLT_MAX;
+    sdata[tid].idx = -1;
+
+    for (int i = tid; i < size; i += blockDim.x) {{
+        if (input[i] > sdata[tid].val) {{
+            sdata[tid].val = input[i];
+            sdata[tid].idx = i;
+        }}
     }}
     __syncthreads();
-    
-    // Reduction in shared memory - keep track of both value and index
+
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
-        if (tid < s) {{
-            if (sdata[tid + s] > sdata[tid]) {{
-                sdata[tid] = sdata[tid + s];
-                indices[tid] = indices[tid + s];
-            }}
+        if (tid < s && sdata[tid + s].val > sdata[tid].val) {{
+            sdata[tid] = sdata[tid + s];
         }}
         __syncthreads();
     }}
-    
-    // Write index result for this block
+
     if (tid == 0) {{
-        atomicMax((int*)output, indices[0]);  // This is a simplification
-        // In practice, need proper atomic argmax operation
-        output[0] = (float)indices[0];
+        output[0] = (float)sdata[0].idx;
     }}
 }}
 extern "C" void launch_argmax_{name}(float* input, float* output, int size) {{
     dim3 block(256);
-    dim3 grid(1);  // Single block for simplicity in full reduction
-    int shared_size = block.x * (sizeof(float) + sizeof(int));
+    dim3 grid(1);
+    int shared_size = block.x * sizeof(ArgMaxValIdx_{name});
     argmax_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
     cudaDeviceSynchronize();
     {self.cuda_debug()}
 }}
 """
-            # kernels.append(('argmax_full', name, tensor_name, None, size))
-            # cuda_code += kernel
-            return kernel, (f"{op_type}_axis", name, tensor_name, None, size)
+            return kernel, ("argmax_full", name, tensor_name, None, size)
 
 
         else:
@@ -1552,6 +1544,48 @@ extern "C" void launch_argmax_{name}(float* input, float* output, int rows, int 
     # argmin
     # ================================================================
     def argmin(self, op_type, name, tensor_name, axis, input_shape):
+
+        if axis is None:
+            size = int(np.prod([int(dim) for dim in input_shape]))
+            kernel = f"""
+struct ArgMinValIdx_{name} {{ float val; int idx; }};
+
+__global__ void argmin_full_kernel_{name}(float* input, float* output, int size) {{
+    extern __shared__ ArgMinValIdx_{name} sdata[];
+    int tid = threadIdx.x;
+
+    sdata[tid].val = FLT_MAX;
+    sdata[tid].idx = -1;
+
+    for (int i = tid; i < size; i += blockDim.x) {{
+        if (input[i] < sdata[tid].val) {{
+            sdata[tid].val = input[i];
+            sdata[tid].idx = i;
+        }}
+    }}
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s && sdata[tid + s].val < sdata[tid].val) {{
+            sdata[tid] = sdata[tid + s];
+        }}
+        __syncthreads();
+    }}
+
+    if (tid == 0) {{
+        output[0] = (float)sdata[0].idx;
+    }}
+}}
+extern "C" void launch_argmin_{name}(float* input, float* output, int size) {{
+    dim3 block(256);
+    dim3 grid(1);
+    int shared_size = block.x * sizeof(ArgMinValIdx_{name});
+    argmin_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            return kernel, ("argmin_full", name, tensor_name, None, size)
 
         if len(input_shape) == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])

@@ -557,13 +557,21 @@ class TensorCompiler:
                     c_int(rows), c_int(cols)
                 )
 
-        elif op_type == 'argmin_axis':
-            rows, cols, axis = dims
-            getattr(lib, f'launch_argmin_{name}')(
-                c_void_p(int(gpu_allocs[arg1])),
-                c_void_p(int(gpu_allocs[name])),
-                c_int(rows), c_int(cols)
-            )
+        elif op_type in ['argmin_full', 'argmin_axis']:
+            if len(dims) == 1:
+                size = dims[0]
+                getattr(lib, f'launch_argmin_{name}')(
+                    c_void_p(int(gpu_allocs[arg1])),
+                    c_void_p(int(gpu_allocs[name])),
+                    c_int(size)
+                )
+            else:
+                rows, cols, axis = dims
+                getattr(lib, f'launch_argmin_{name}')(
+                    c_void_p(int(gpu_allocs[arg1])),
+                    c_void_p(int(gpu_allocs[name])),
+                    c_int(rows), c_int(cols)
+                )
 
         elif op_type == 'fill':
             size, value = dims
