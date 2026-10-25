@@ -1218,7 +1218,12 @@ class TensorCompiler:
                                 cuda_code += kernel
                             else:
                                 self.tensorlang.print(
-                                    message=f"[COMPILER] Error: Cannot {expr['type']} tensors with incompatible shapes {shape1} and {shape2}."
+                                    message=(
+                                        f"[COMPILER] Error: {expr['type']}: shape mismatch computing '{name}': "
+                                        f"'{arg1}' {tuple(shape1)} vs '{arg2}' {tuple(shape2)}. "
+                                        f"Shapes must match, one operand must be a scalar, or they must "
+                                        f"broadcast (trailing dimensions equal or 1)"
+                                    )
                                 )
                                 return False
 
