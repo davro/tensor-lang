@@ -1,15 +1,16 @@
-Here is a concrete, audit-accurate `README.md` you can replace the current one with. It keeps the project’s strengths but stops claiming features that are parsed-only, type-checked-only, or not wired into codegen/autograd.
+Here is the final, audit-accurate `README.md`. It reflects the fixes made during this pass and no longer claims features that are only parsed, type-checked, or partially implemented.
 
-
+```markdown
 # TensorLang: A Native AI/ML Language
 
 TensorLang is an open-source, native machine-learning language designed to compile tensor operations into GPU-accelerated CUDA kernels.
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.3.0. Core suite: 109/109 tests passing.  
+> **Status:** v0.3.0. Core suite: 122/122 tests passing.  
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).  
 > **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
+
 ---
 
 ## Table of Contents
@@ -82,12 +83,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)).
 * **For-loop bodies support only a subset of operations** (see [Training Loops](#training-loops)).
 * **Most kernels are 1D/2D only.** Higher-rank tensors are not generally supported.
-* **Axis support is limited** for reductions and normalisations (commonly full reduction or axis `0`/`1` on 2D tensors).
-* **`transpose(..., axes=...)`** is currently ignored; only default 2D transpose is generated.
-* **`argmin` without an axis** is not supported.
-* **Scalar `(1,1)` broadcasting** type-checks but currently fails during CUDA code generation.
-* **Broadcast `equal`** has a code-generation dispatch bug.
-* **`cross_entropy`** expects probability tensors, not logits, despite the name.
+* **Axis support is limited** for several reductions and normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
@@ -192,7 +188,7 @@ let w_updated = minus(w, __tmp_0)
 | `fill(value, shape)` | Supported | Scalar fill value only |
 | Slicing | Supported | 1D/2D, NumPy-style ranges and indices |
 | `reshape(tensor, shape)` | Supported | Element count must match |
-| `transpose(tensor)` | Partial | 2D only; `axes=` is currently ignored |
+| `transpose(tensor, axes=...)` | Supported | General N-dimensional; axes are validated |
 | `concat(a, b, axis=...)` | Partial | 2 tensors, 2D, axis `0` or `1` |
 
 ### Linear Algebra
@@ -211,8 +207,8 @@ let w_updated = minus(w, __tmp_0)
 | `sigmoid` | Supported | Yes |
 | `tanh` | Supported | Yes |
 | `softmax` | Supported | Yes (1D or 2D axis `1`) |
-| `gelu` | Supported | No |
-| `swish` | Supported | No |
+| `gelu` | Supported | Yes |
+| `swish` | Supported | Yes |
 
 ### Reductions
 
@@ -221,14 +217,14 @@ let w_updated = minus(w, __tmp_0)
 | `sum` | Supported | Full or 2D axis `0`/`1` |
 | `mean` | Supported | Full or 2D axis `0`/`1` |
 | `min`, `max` | Supported | Full or 2D axis `0`/`1` |
-| `argmin` | Partial | 2D axis `1` only |
-| `argmax` | Partial | Full reduction is unreliable; 2D axis `1` supported |
+| `argmin` | Supported | Full reduction or 2D axis `1` |
+| `argmax` | Supported | Full reduction or 2D axis `1` |
 
 ### Normalisations
 
 | Operation | Status | Notes |
 |---|---|---|
-| `layer_norm` | Partial | 1D or 2D axis `0`/`1`; `axis=0` has a known bug |
+| `layer_norm` | Supported | 1D or 2D, axis `0` or `1` |
 | `batch_norm` | Partial | 2D; uses running mean/variance; no gamma/beta |
 | `instance_norm` | Partial | 2D only |
 
@@ -237,13 +233,13 @@ let w_updated = minus(w, __tmp_0)
 | Operation | Status | Notes |
 |---|---|---|
 | `mse_loss` | Supported | Predictions and targets must have the same shape |
-| `cross_entropy` | Partial | Expects probability tensors and class indices; not wired into autograd |
+| `cross_entropy` | Supported | Probability inputs and class-index targets |
 
 ### Comparisons
 
 | Operation | Status | Notes |
 |---|---|---|
-| `greater`, `less`, `equal` | Partial | Equal shapes or limited 2D/1D broadcast; broadcast `equal` has a dispatch bug |
+| `greater`, `less`, `equal` | Partial | Equal shapes or limited 2D/1D broadcast |
 
 ---
 
@@ -269,7 +265,7 @@ let w_grad = ...   // synthesised
 let w_updated = minus(w, mult(lr, w_grad))
 ```
 
-Gradients are also saved as `*.grad.npy` when `--cache-layers` is used.
+Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers` is used.
 
 ### Supported Gradient Operations
 
@@ -287,16 +283,16 @@ Gradients are also saved as `*.grad.npy` when `--cache-layers` is used.
 | `sum` | Yes |
 | `mean` | Yes |
 | `mse_loss` | Yes |
+| `linear` | Yes (1D or 2D) |
+| `layer_norm` | Yes (1D or 2D, axis `0` or `1`) |
+| `cross_entropy` | Yes (probability inputs, class-index targets) |
+| `gelu` | Yes |
+| `swish` | Yes |
 
 ### Not Currently Wired into Autograd
 
 The following operations may be present in the language but are **not currently recorded for gradient computation**:
 
-* `linear`
-* `layer_norm`
-* `cross_entropy`
-* `gelu`
-* `swish`
 * `batch_norm`
 * `instance_norm`
 * `concat`
@@ -311,7 +307,7 @@ The following operations may be present in the language but are **not currently 
 
 * `matmul` gradients assume 2D operands.
 * Broadcast-aware gradient reduction is implemented via `_unbroadcast()`.
-* `cross_entropy` autograd is implemented in the NumPy reference but not wired into the compiler path.
+* `cross_entropy` expects probability tensors, not logits.
 
 ---
 
@@ -378,6 +374,21 @@ w = w_updated
 
 This swaps GPU buffer pointers rather than copying memory.
 
+### Operations Supported in Loop Bodies
+
+Loop bodies currently support:
+
+* `add`, `minus`, `mult`, `div`
+* `matmul`
+* `relu`, `sigmoid`, `tanh`, `gelu`, `swish`
+* `softmax`
+* `mse_loss`
+* `cross_entropy`
+* `linear`
+* `sum`, `mean`
+
+They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O, or user-defined functions.
+
 ---
 
 ## File I/O
@@ -420,6 +431,7 @@ Contents include:
 * `kernel.so` — compiled shared library
 * `tensor_name.npy` — computed tensor results
 * `tensor_name.grad.npy` — gradients, when `--cache-layers` is used
+* `tensor_name_grad.npy` — synthesised gradient variables, when `--cache-layers` is used
 
 The full test suite clears `cache/` before running. For isolated runs after modifying a test, clear its cache entry manually:
 
@@ -565,13 +577,10 @@ App tests run sequentially.
 
 * Scope kernel names to remove post-loop naming constraints
 * Improve shape-mismatch error messages
-* Fix scalar `(1,1)` broadcast code generation
-* Fix broadcast `equal` dispatch
-* Fix `transpose` axes support
-* Fix `layer_norm` axis `0`
-* Expand autograd coverage
 * Expand for-loop body operation coverage
-* Fix rebind GPU memory leak
+* Add alias resolution inside loop bodies
+* Support `save()` inside loops
+* Implement or remove `if`, `any()`, and `all()`
 
 ### Medium Term
 
@@ -608,4 +617,3 @@ When adding tests, copy expected values from a real run. Do not manually round o
 ## License
 
 Licensed under the GNU Lesser General Public License v3 (LGPL-3.0). See `LICENSE` for details.
----
