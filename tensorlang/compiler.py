@@ -877,6 +877,7 @@ class TensorCompiler:
             input_shape  = env[input_name]['shape']
             weight_shape = env[weight_name]['shape']
             output_shape = env[name]['shape']
+            self._record_operation('linear', name, [input_name, weight_name, bias_name])
             return generator.linear(
                 expr['type'], name, input_name, weight_name, bias_name,
                 input_shape, weight_shape, output_shape
@@ -1390,6 +1391,7 @@ class TensorCompiler:
                             input_shape  = env[input_name]['shape']
                             weight_shape = env[weight_name]['shape']
                             output_shape = env[name]['shape']
+                            self._record_operation('linear', name, [input_name, weight_name, bias_name])
                             kernel, kernel_info = generator.linear(
                                 expr['type'], name, input_name, weight_name, bias_name,
                                 input_shape, weight_shape, output_shape
@@ -1405,6 +1407,15 @@ class TensorCompiler:
                             axis        = expr.get('axis')
                             eps         = expr.get('eps', 1e-5)
                             input_shape = env[tensor_name]['shape']
+
+                            if axis is None:
+                                axis = len(input_shape) - 1
+
+                            self._record_operation(
+                                'layer_norm', name, [tensor_name],
+                                metadata={'axis': axis, 'eps': eps}
+                            )
+
                             kernel, kernel_info = generator.layer_norm(
                                 expr['type'], name, tensor_name, axis, eps, input_shape
                             )
@@ -1728,6 +1739,13 @@ class TensorCompiler:
                                             }
                                             if self.debug_mode:
                                                 self.tensorlang.print(message=f"[COMPILER] [Autograd] Made gradient accessible: {grad_tensor_name}")
+
+                                            # Keep the documented Python-interop cache file (x.grad.npy)
+                                            # and also save the synthesised variable name (x_grad.npy)
+                                            # so test @EXPECTED entries can reference gradients directly.
+                                            if self.cache_layers:
+                                                grad_var_cache_path = cache_file_dir / f"{grad_tensor_name}.npy"
+                                                np.save(grad_var_cache_path, grad_tensor)
                                 except Exception as e:
                                     self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
                                     if self.debug_mode:
