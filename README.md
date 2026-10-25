@@ -609,13 +609,3 @@ When adding tests, copy expected values from a real run. Do not manually round o
 
 Licensed under the GNU Lesser General Public License v3 (LGPL-3.0). See `LICENSE` for details.
 ---
-
-## Suggested next implementation order
-
-1. Fix `broadcast equal` dispatch.
-2. Fix `(1,1)` scalar broadcast dispatch.
-3. Fix `transpose` axes.
-4. Fix `layer_norm` axis `0`.
-5. Wire `linear` into autograd recording.
-6. Add exact tests for each fixed behavior.
-7. Update this README again as features become genuinely supported.
