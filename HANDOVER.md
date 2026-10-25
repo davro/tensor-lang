@@ -467,3 +467,18 @@ A full codebase audit was performed across:
 - Dev-mode hot reload is not implemented
 - `--transpile` (WGSL) is not functional
 - Tier-B multi-GPU single-program execution is not implemented
+
+
+### 20. Scoped kernel names
+
+Implemented in `tensorlang/compiler.py`.
+
+- Added `_loop_scope_counter` and `_kernel_name_map`.
+- `_generate_kernels_for_nodes(..., scope_prefix=...)` scopes generated kernel
+  symbols for loop bodies.
+- `_kernel_for_expr(..., kernel_name=...)` passes the scoped name to
+  `KernelGenerator`.
+- `_execute_single_kernel` resolves a scoped kernel symbol back to the original
+  tensor name before GPU allocation, execution, and result saving.
+- Top-level kernel names are unchanged for backward compatibility.
+- New regression tests: `tests/test_scoped_kernel_names.py`.
