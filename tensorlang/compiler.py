@@ -1582,12 +1582,14 @@ class TensorCompiler:
                     # EXECUTION
                     # =========================================================
                     try:
+                        import os
                         from ctypes import cdll
 
                         import pycuda.autoinit  # noqa: F401
                         import pycuda.driver as cuda
 
-                        lib = cdll.LoadLibrary(str(kernel_so_path))
+                        # lib = cdll.LoadLibrary(str(kernel_so_path))
+                        lib = cdll.LoadLibrary(os.path.abspath(str(kernel_so_path)))
 
                         # =====================================================
                         # PHASE 0: Find top-level backward index

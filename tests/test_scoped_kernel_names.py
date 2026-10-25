@@ -49,6 +49,7 @@ def test_multiple_loops_get_distinct_scoped_names(tmp_path, monkeypatch):
         save(x, "out.npy")
     """)
     ok, cache_dir = _run(tmp_path, monkeypatch, source)
+    print("GENERATED KERNEL.CU:\n" + (cache_dir / "kernel.cu").read_text())
     assert ok is True
     text = (cache_dir / "kernel.cu").read_text()
     assert "loop0_" in text

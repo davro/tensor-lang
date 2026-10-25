@@ -32,6 +32,8 @@ YELLOW = "33"
 CYAN = "36"
 
 class TestRunner:
+    __test__ = False  # not a pytest test class; stops PytestCollectionWarning
+
     def __init__(self, parallel=True, jobs=None, verify_tensors=False, debug_mode=False,
                  tests_dir=None, gpu_pinning=True, fixed_gpu=None):
         self.parallel = parallel
