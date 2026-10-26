@@ -20,6 +20,7 @@ import pycuda.driver as cuda
 
 from tensorlang.ast_builder import build_ast
 from tensorlang.autograd import AutogradContext, ComputationGraph
+from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.type_checker import _is_scalar_shape, type_checker
@@ -417,6 +418,15 @@ class TensorCompiler:
             return
 
         op_type = kernel_info[0]
+
+        if op_type == "fused_elementwise":
+            _, kernel_func_name, chain, external_inputs, outputs, size = kernel_info
+            launch_args = [c_void_p(int(gpu_allocs[n])) for n in external_inputs] + \
+                          [c_void_p(int(gpu_allocs[n])) for n in outputs] + [c_int(size)]
+            getattr(lib, f"launch_fused_elementwise_{kernel_func_name}")(*launch_args)
+            for out_name in outputs:
+                self._save_kernel_result(out_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
 
         if op_type in ("sgd_update", "adam_update"):
             kernel_func_name = kernel_info[1]
@@ -862,6 +872,7 @@ class TensorCompiler:
     # =========================================================================
 
     def _generate_kernels_for_nodes(self, nodes, env, generator, scope_prefix=None):
+        nodes = fuse_elementwise_chains(nodes, env)
         kernels = []
         cuda_code = ""
         flat_items = []
@@ -954,8 +965,34 @@ class TensorCompiler:
         self._kernel_name_map[kernel_name] = param_name
         return kernel_str, kernel_info
 
+    def _kernel_for_fused_expr(self, name, expr, env, generator, kernel_name=None):
+        kernel_name = kernel_name or name
+        chain = expr["chain"]
+        for op_type, out_name, args in chain:
+            self._record_operation(op_type, out_name, list(args))
+        final_name = chain[-1][1]
+        shape = env[final_name]["shape"]
+        size = int(np.prod([int(d) for d in shape])) if shape else 1
+        outputs = [op[1] for op in chain]
+        output_set = set(outputs)
+        external_inputs = []
+        seen = set()
+        for op in chain:
+            for a in op[2]:
+                if a not in output_set and a not in seen:
+                    seen.add(a)
+                    external_inputs.append(a)
+        kernel_str, kernel_info = generator.fused_elementwise(
+            "fused_elementwise", kernel_name, chain, env, external_inputs, outputs, size
+        )
+        self._kernel_name_map[kernel_name] = final_name
+        return kernel_str, kernel_info
+
     def _kernel_for_expr(self, name, expr, env, generator, kernel_name=None):
         kernel_name = kernel_name or name
+
+        if expr.get("type") == "fused_elementwise":
+            return self._kernel_for_fused_expr(name, expr, env, generator, kernel_name=kernel_name)
 
         if expr.get("type") in OPTIMIZER_NAMES:
             node_like = {"type": expr.get("type"), "args": expr.get("args", expr.get("arguments", []))}
@@ -1053,10 +1090,7 @@ class TensorCompiler:
     # COMPILE AND EXECUTE
     # =========================================================================
 
-    # WORKING WITHOUT GPU → CPU copy for all tensors after execution
     def compile_and_execute(self, tensorlang_file):
-        """Compile and execute a single .tl file."""
-
         if self.debug_mode:
             self.tensorlang.print_header(f"[COMPILER] TensorLang {self.version}")
 
@@ -1159,6 +1193,8 @@ class TensorCompiler:
                 self.tensorlang.print(message=f"[COMPILER] TYPE CHECKER ENV:\n{env}")
 
             if success:
+                ast = fuse_elementwise_chains(ast, env)
+
                 tensors = {}
                 gpu_allocs = {}
 
@@ -1342,6 +1378,11 @@ class TensorCompiler:
                                     )
                                 )
                                 return False
+
+                        elif expr.get("type") == "fused_elementwise":
+                            kernel, kernel_info = self._kernel_for_fused_expr(name, expr, env, generator, kernel_name=name)
+                            kernels.append(kernel_info)
+                            cuda_code += kernel
 
                         elif expr.get("type") == "fill":
                             size = int(np.prod([int(dim) for dim in expr["shape"]]))
@@ -1849,4 +1890,6 @@ class TensorCompiler:
             sys.exit(1)
 
         except Exception as e:
-            self.tensor
+            self.tensorlang.print(message=f"[COMPILER] Unexpected error: {e}")
+            traceback.print_exc()
+            sys.exit(1)

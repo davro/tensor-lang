@@ -4,8 +4,8 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.3.0. Core suite: 125/125 tests passing.  
-> **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).  
+> **Status:** v0.4.0. Core suite: 129/129 tests passing.
+> **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
 > **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
 
 ---
@@ -20,6 +20,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [Operations](#operations)
 * [Automatic Differentiation](#automatic-differentiation)
 * [Training Loops](#training-loops)
+* [Optimizers](#optimizers)
 * [File I/O](#file-io)
 * [Cache](#cache)
 * [Architecture](#architecture)
@@ -39,10 +40,13 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 **Key Benefits:**
 
 * **Native GPU acceleration** — tensor operations compile to CUDA kernels
+* **cuBLAS-accelerated matmul** — matrix multiplication dispatches to cuBLAS for performance
 * **Type safety** — compile-time tensor shape and broadcasting checks
 * **ML-first design** — built specifically for neural network operations
 * **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
 * **Training loops** — `for` loops with `backward()` and pointer-swap weight rebinding
+* **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state
+* **Elementwise kernel fusion** — fuses simple elementwise chains (e.g. `add → relu`) into a single CUDA kernel
 * **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
 * **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
 * **Extensible architecture** — clean separation of parsing, type checking, and code generation
@@ -59,7 +63,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 
 * Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]`
 * Element-wise arithmetic with broadcasting
-* Matrix multiplication (`matmul`)
+* Matrix multiplication (`matmul`) — cuBLAS-backed
 * Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish`
 * Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax`
 * Comparisons: `greater`, `less`, `equal`
@@ -69,6 +73,8 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Linear layers: `linear`
 * Reverse-mode autograd for a defined subset of operations
 * Training loops with weight rebinding
+* Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
+* Elementwise kernel fusion for non-broadcast elementwise chains (e.g. `add → relu`, `add → sigmoid`, `add → tanh`)
 * Scoped kernel names for loop bodies
 * User-defined functions
 * File I/O: `load()`, `save()`
@@ -194,7 +200,7 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `matmul(A, B)` | Supported | 2D×2D or 2D×1D |
+| `matmul(A, B)` | Supported | 2D×2D or 2D×1D; cuBLAS-backed |
 | `add`, `minus`, `mult`, `div` | Supported | Broadcasting supported |
 | `linear(input, weight, bias)` | Supported | 1D or 2D input |
 
@@ -390,6 +396,47 @@ They do not currently support normalisations, comparisons, slicing, reshape, tra
 
 ---
 
+## Optimizers
+
+TensorLang provides first-class built-in optimizers (`sgd`, `adam`) with compiler-managed state. Instead of hand-writing `w = w - lr * grad` for every parameter, declare an optimizer over a list of parameters and call `opt.step()`.
+
+### Syntax
+
+```text
+let opt = adam([w1, w2], lr=0.01, beta1=0.9, beta2=0.999, eps=1e-8)
+
+for epoch in range(100) {
+    let y_pred = matmul(x, w1)
+    let loss = mse_loss(y_pred, y_true)
+    backward(loss)
+    opt.step()
+}
+```
+
+SGD is used the same way:
+
+```text
+let opt = sgd([w], lr=0.01)
+```
+
+### Features
+
+* **Compiler-managed state** — Adam allocates and persists `m` and `v` buffers across iterations
+* **Multi-parameter** — a single optimizer can update several parameters at once
+* **Reuses pointer-swap rebinding** — parameter updates swap GPU buffer pointers (no copy)
+* **Gradient zeroing / accumulation semantics** supported
+
+### Optimizer Names
+
+The following built-in optimizer constructs are recognised by the compiler:
+
+* `sgd`
+* `adam`
+* `sgd_update`
+* `adam_update`
+
+---
+
 ## File I/O
 
 ### Load
@@ -469,7 +516,8 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 Current performance characteristics:
 
-* Matrix multiplication uses a straightforward CUDA kernel, not cuBLAS or a tiled/shared-memory implementation.
+* Matrix multiplication is backed by cuBLAS (replacing the earlier shared-memory tiled kernel).
+* Elementwise chains such as `add → relu` are fused into a single CUDA kernel (non-broadcast cases).
 * Training-loop weight updates use pointer swaps (no GPU memory copy between iterations).
 * Generated CUDA source is cached and reused when unchanged.
 * 4096×4096 matrix multiplication runs, but has not been benchmarked against cuBLAS or PyTorch.
@@ -582,8 +630,7 @@ App tests run sequentially.
 
 ### Medium Term
 
-* Built-in optimisers (SGD, Adam)
-* Kernel fusion
+* Kernel fusion for broadcasting elementwise chains (follow-up)
 * Buffer pooling for long training runs
 * Nested loops
 * Hot reload in dev mode

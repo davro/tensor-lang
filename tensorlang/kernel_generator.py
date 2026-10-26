@@ -1,3 +1,5 @@
+# File: tensorlang/kernel_generator.py
+
 import inspect
 from datetime import datetime, timezone
 
@@ -2531,3 +2533,71 @@ extern "C" void launch_adam_update_{name}(
 }}
 """
         return kernel, ('adam_update', name, param_name, grad_name, size)
+
+
+    # ================================================================
+    # Fused elementwise chain
+    # ================================================================
+    def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size):
+        """Generate a single kernel for an elementwise op chain.
+
+        chain: list of (op_type, out_name, [arg_names...])
+        """
+        value_map = {}
+        for idx, a in enumerate(external_inputs):
+            value_map[a] = ("in", idx)
+        for idx, o in enumerate(outputs):
+            value_map[o] = ("out", idx)
+
+        def resolve(arg):
+            kind, i = value_map[arg]
+            if kind == "in":
+                return f"in{i}[idx]"
+            return f"r{i}"
+
+        param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
+        param_parts += [f"float* out{i}" for i in range(len(outputs))]
+        param_parts.append("int size")
+        param_str = ", ".join(param_parts)
+
+        body_lines = ["int idx = blockIdx.x * blockDim.x + threadIdx.x;", "if (idx < size) {"]
+        for oi, (op, _out, args) in enumerate(chain):
+            if op in ("add", "minus", "mult", "div"):
+                sym = {"add": "+", "minus": "-", "mult": "*", "div": "/"}[op]
+                expr = f"{resolve(args[0])} {sym} {resolve(args[1])}"
+            elif op == "relu":
+                expr = f"fmaxf(0.0f, {resolve(args[0])})"
+            elif op == "sigmoid":
+                expr = f"1.0f / (1.0f + expf(-{resolve(args[0])}))"
+            elif op == "tanh":
+                expr = f"tanhf({resolve(args[0])})"
+            elif op == "gelu":
+                expr = f"0.5f * {resolve(args[0])} * (1.0f + erff({resolve(args[0])} * 0.70710678f))"
+            elif op == "swish":
+                expr = f"{resolve(args[0])} / (1.0f + expf(-{resolve(args[0])}))"
+            else:
+                expr = resolve(args[0])
+            body_lines.append(f"    float r{oi} = {expr};")
+        for oi in range(len(outputs)):
+            body_lines.append(f"    out{oi}[idx] = r{oi};")
+        body_lines.append("}")
+
+        launch_args = ", ".join(
+            [f"in{i}" for i in range(len(external_inputs))]
+            + [f"out{i}" for i in range(len(outputs))]
+            + ["size"]
+        )
+        kernel = f"""
+__global__ void fused_elementwise_kernel_{name}({param_str}) {{
+    {chr(10).join(body_lines)}
+}}
+extern "C" void launch_fused_elementwise_{name}({param_str}) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    fused_elementwise_kernel_{name}<<<grid, block>>>({launch_args});
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size)
+        return kernel, kernel_info

@@ -61,42 +61,6 @@ class ComputationGraph:
         """Reset all gradients to zero."""
         for name in self.requires_grad:
             self.gradients[name] = np.zeros_like(self.tensors[name])
-            
-    # def backward(self, loss_name: str):
-    #     """
-    #     Compute gradients via backpropagation.
-        
-    #     Args:
-    #         loss_name: Name of the scalar loss tensor to backpropagate from
-    #     """
-    #     if loss_name not in self.tensors:
-    #         raise ValueError(f"Loss tensor '{loss_name}' not found in graph")
-            
-    #     # Initialize gradient of loss to 1.0
-    #     loss_shape = self.tensors[loss_name].shape
-    #     if loss_shape not in [(), (1,)]:
-    #         print(f"Warning: Loss should be scalar, got shape {loss_shape}")
-            
-    #     self.gradients[loss_name] = np.ones_like(self.tensors[loss_name])
-        
-    #     if self.debug_mode:
-    #         print(f"\n[AUTOGRAD] Starting backward pass from '{loss_name}'")
-    #         print(f"[AUTOGRAD] Graph has {len(self.nodes)} operations")
-        
-    #     # Traverse graph in reverse order
-    #     for node in reversed(self.nodes):
-    #         if self.debug_mode:
-    #             print(f"\n[AUTOGRAD] Processing: {node}")
-                
-    #         self._backward_node(node)
-            
-    #     if self.debug_mode:
-    #         print("\n[AUTOGRAD] Backward pass complete")
-    #         for name in self.requires_grad:
-    #             if name in self.gradients:
-    #                 grad_norm = np.linalg.norm(self.gradients[name])
-    #                 print(f"  {name}.grad: shape={self.gradients[name].shape}, norm={grad_norm:.6f}")
-
 
     def backward(self, loss_name: str):
         """
@@ -770,61 +734,3 @@ class AutogradContext:
             
         def __exit__(self, *args):
             AutogradContext._enabled = True
-
-
-
-
-
-# def test_autograd():
-#     """Simple test of autograd system."""
-#     print("Testing Autograd System\n" + "="*50)
-    
-#     # Create computation graph
-#     graph = ComputationGraph(debug_mode=True)
-    
-#     # Simple example: y = x @ w, loss = sum(y)
-#     x = np.array([[1.0, 2.0], [3.0, 4.0]])
-#     w = np.array([[0.5, 0.5], [0.5, 0.5]])
-    
-#     # Register input tensors
-#     graph.register_tensor('x', x, requires_grad=False)
-#     graph.register_tensor('w', w, requires_grad=True)
-    
-#     # Forward pass: compute y = x @ w
-#     y = x @ w
-#     graph.register_tensor('y', y)
-#     graph.add_operation('matmul', 'y', ['x', 'w'])
-    
-#     # Forward pass: compute loss = sum(y)
-#     loss = y.sum()
-#     graph.register_tensor('loss', np.array([loss]))
-#     graph.add_operation('sum', 'loss', ['y'], {'axis': None})
-    
-#     # Backward pass
-#     print("\n" + "="*50)
-#     print("Starting backward pass...")
-#     print("="*50)
-#     graph.backward('loss')
-    
-#     print(f"\nGradient of w:\n{graph.gradients['w']}")
-#     print(f"\nExpected: [[4, 4], [6, 6]]")
-    
-#     # Verify
-#     expected = np.array([[4.0, 4.0], [6.0, 6.0]])
-#     if np.allclose(graph.gradients['w'], expected):
-#         print("\n✅ Test PASSED!")
-#         return True
-#     else:
-#         print("\n❌ Test FAILED!")
-#         print(f"Expected:\n{expected}")
-#         print(f"Got:\n{graph.gradients['w']}")
-        
-#         # Debug info
-#         print("\nDebug Info:")
-#         print(f"y gradient: {graph.gradients.get('y', 'NOT SET')}")
-#         print(f"loss gradient: {graph.gradients.get('loss', 'NOT SET')}")
-#         return False
-    
-
-# if __name__ == '__main__':
-#     test_autograd()
