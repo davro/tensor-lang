@@ -504,26 +504,189 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
     # ================================================================
     # MatMul
     # ================================================================
+    # def matmul(self, op_type, name, arg1, arg2, m, n, p):
+
+        # self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        # kernel = f"""
+# __global__ void matmul_kernel_{name}(float* A, float* B, float* C, int M, int N, int P) {{
+    # int i = blockIdx.y * blockDim.y + threadIdx.y;
+    # int j = blockIdx.x * blockDim.x + threadIdx.x;
+    # if (i < M && j < P) {{
+        # float sum = 0.0;
+        # for (int k = 0; k < N; k++) {{
+            # sum += A[i * N + k] * B[k * P + j];
+        # }}
+        # C[i * P + j] = sum;
+    # }}
+# }}
+# extern "C" void launch_matmul_{name}(float* A, float* B, float* C, int M, int N, int P) {{
+    # dim3 block(16, 16);
+    # dim3 grid((P + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    # matmul_kernel_{name}<<<grid, block>>>(A, B, C, M, N, P);
+    # cudaDeviceSynchronize();
+    # {self.cuda_debug()}
+# }}
+# """
+        # return kernel, (op_type, name, arg1, arg2, m, n, p)
+
+
+    # # ================================================================
+    # # MatMul (tiled shared-memory)
+    # # ================================================================
+    # def matmul(self, op_type, name, arg1, arg2, m, n, p):
+
+        # self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        # kernel = f"""
+# __global__ void matmul_kernel_{name}(const float* A, const float* B, float* C,
+                                    # int M, int N, int P) {{
+    # __shared__ float As[16][16];
+    # __shared__ float Bs[16][16];
+
+    # int tx = threadIdx.x;
+    # int ty = threadIdx.y;
+
+    # int row = blockIdx.y * 16 + ty;
+    # int col = blockIdx.x * 16 + tx;
+
+    # float acc = 0.0f;
+    # int numTiles = (N + 15) / 16;
+
+    # for (int t = 0; t < numTiles; ++t) {{
+        # int aCol = t * 16 + tx;
+        # As[ty][tx] = (row < M && aCol < N)
+            # ? A[row * N + aCol]
+            # : 0.0f;
+
+        # int bRow = t * 16 + ty;
+        # Bs[ty][tx] = (bRow < N && col < P)
+            # ? B[bRow * P + col]
+            # : 0.0f;
+
+        # __syncthreads();
+
+        # #pragma unroll
+        # for (int k = 0; k < 16; ++k) {{
+            # acc += As[ty][k] * Bs[k][tx];
+        # }}
+
+        # __syncthreads();
+    # }}
+
+    # if (row < M && col < P) {{
+        # C[row * P + col] = acc;
+    # }}
+# }}
+# extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
+                                    # int M, int N, int P) {{
+    # dim3 block(16, 16);
+    # dim3 grid((P + 15) / 16, (M + 15) / 16);
+    # matmul_kernel_{name}<<<grid, block>>>(A, B, C, M, N, P);
+    # cudaDeviceSynchronize();
+    # {self.cuda_debug()}
+# }}
+# """
+        # return kernel, (op_type, name, arg1, arg2, m, n, p)
+
+
+    # # ================================================================
+    # # MatMul (cuBLAS-backed)
+    # # ================================================================
+    # def matmul(self, op_type, name, arg1, arg2, m, n, p):
+
+        # self._validate(inspect.currentframe().f_code.co_name, op_type)
+
+        # kernel = f"""
+# #include <stdio.h>
+# #include <cublas_v2.h>
+
+# static cublasHandle_t __tl_cublas_handle = nullptr;
+# static bool __tl_cublas_handle_created = false;
+
+# extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
+                                    # int M, int N, int P) {{
+    # if (!__tl_cublas_handle_created) {{
+        # cublasStatus_t create_status = cublasCreate(&__tl_cublas_handle);
+        # if (create_status != CUBLAS_STATUS_SUCCESS) {{
+            # fprintf(stderr, "TensorLang: cublasCreate failed: %d\\n", (int)create_status);
+            # return;
+        # }}
+        # __tl_cublas_handle_created = true;
+    # }}
+
+    # const float alpha = 1.0f;
+    # const float beta = 0.0f;
+
+    # // TensorLang stores row-major arrays. cuBLAS is column-major, so
+    # // compute C^T = B^T * A^T.
+    # cublasStatus_t status = cublasSgemm(
+        # __tl_cublas_handle,
+        # CUBLAS_OP_N, CUBLAS_OP_N,
+        # P, M, N,
+        # &alpha,
+        # B, P,
+        # A, N,
+        # &beta,
+        # C, P
+    # );
+
+    # if (status != CUBLAS_STATUS_SUCCESS) {{
+        # fprintf(stderr, "TensorLang: cublasSgemm failed: %d\\n", (int)status);
+    # }}
+
+    # cudaDeviceSynchronize();
+    # {self.cuda_debug()}
+# }}
+# """
+        # return kernel, (op_type, name, arg1, arg2, m, n, p)
+
+
+    # ================================================================
+    # MatMul (cuBLAS-backed)
+    # ================================================================
     def matmul(self, op_type, name, arg1, arg2, m, n, p):
 
         self._validate(inspect.currentframe().f_code.co_name, op_type)
 
         kernel = f"""
-__global__ void matmul_kernel_{name}(float* A, float* B, float* C, int M, int N, int P) {{
-    int i = blockIdx.y * blockDim.y + threadIdx.y;
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < M && j < P) {{
-        float sum = 0.0;
-        for (int k = 0; k < N; k++) {{
-            sum += A[i * N + k] * B[k * P + j];
+#include <stdio.h>
+#include <cublas_v2.h>
+
+extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
+                                    int M, int N, int P) {{
+    static cublasHandle_t handle = nullptr;
+    static bool handle_created = false;
+
+    if (!handle_created) {{
+        cublasStatus_t create_status = cublasCreate(&handle);
+        if (create_status != CUBLAS_STATUS_SUCCESS) {{
+            fprintf(stderr, "TensorLang: cublasCreate failed: %d\\n", (int)create_status);
+            return;
         }}
-        C[i * P + j] = sum;
+        handle_created = true;
     }}
-}}
-extern "C" void launch_matmul_{name}(float* A, float* B, float* C, int M, int N, int P) {{
-    dim3 block(16, 16);
-    dim3 grid((P + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    matmul_kernel_{name}<<<grid, block>>>(A, B, C, M, N, P);
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    // TensorLang stores row-major arrays. cuBLAS is column-major, so
+    // compute C^T = B^T * A^T.
+    cublasStatus_t status = cublasSgemm(
+        handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        P, M, N,
+        &alpha,
+        B, P,
+        A, N,
+        &beta,
+        C, P
+    );
+
+    if (status != CUBLAS_STATUS_SUCCESS) {{
+        fprintf(stderr, "TensorLang: cublasSgemm failed: %d\\n", (int)status);
+    }}
+
     cudaDeviceSynchronize();
     {self.cuda_debug()}
 }}

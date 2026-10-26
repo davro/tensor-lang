@@ -1556,10 +1556,22 @@ class TensorCompiler:
                             if self.debug_mode:
                                 self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_cu_path} written!")
 
+                        # try:
+                            # subprocess.run([
+                                # 'nvcc', '-o', str(kernel_so_path),
+                                # '--shared', '-Xcompiler', '-fPIC', '-lcudart',
+                                # str(kernel_cu_path)
+                            # ], check=True)
+                            # if self.debug_mode:
+                                # self.tensorlang.print(message=f"[COMPILER] CUDA Compile: {kernel_so_path} compiled!")
+                        # except subprocess.CalledProcessError as e:
+                            # self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
+                            # sys.exit(1)
+
                         try:
                             subprocess.run([
                                 'nvcc', '-o', str(kernel_so_path),
-                                '--shared', '-Xcompiler', '-fPIC', '-lcudart',
+                                '--shared', '-Xcompiler', '-fPIC', '-lcudart', '-lcublas',
                                 str(kernel_cu_path)
                             ], check=True)
                             if self.debug_mode:
@@ -1567,6 +1579,7 @@ class TensorCompiler:
                         except subprocess.CalledProcessError as e:
                             self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
                             sys.exit(1)
+
 
                     if self.transpile:
                         try:
