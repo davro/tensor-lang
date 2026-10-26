@@ -1,10 +1,9 @@
 # File: tensorlang/ast_builder.py
 """AST building - extracted from main()"""
 
-
 from lark import Token, Tree
-
 from tensorlang.tensor_lang import TensorLang
+from tensorlang.constants import OPTIMIZER_NAMES
 
 tensorlang = TensorLang()
 
@@ -102,12 +101,12 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
     ast = []
     output_tensor = None
     call_counter = 0
-    
+
     if tree.data == 'program':
         for child in tree.children:
             if isinstance(child, Tree) and child.data == 'statement':
                 stmt = child.children[0]
-                
+
                 # Function definition
                 if stmt.data == 'function_def':
                     func_def = build_function_def(stmt, DEBUG_MODE, DEBUG_INFO)
@@ -115,13 +114,14 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
                         functions[func_def['name']] = func_def
                         if DEBUG_MODE:
                             tensorlang.print(message=f"[AST] Registered function: {func_def['name']}")
-                
-                # Add this elif block after the function_def handling:
+
+                # Backward statement
                 elif stmt.data == 'backward_statement':
                     backward_node = build_backward_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if backward_node:
                         ast.append(backward_node)
-                
+
+                # Save statement
                 elif stmt.data == 'save_statement':
                     save_node = build_save_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if save_node:
@@ -145,40 +145,40 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
                         # Emit synthetic bindings first so they are defined
                         # before the parent expression references them.
                         ast.extend(synthetic_nodes)
-                        
+
                         # Check if expression is a user function call
                         if let_node['expr']['type'] == 'user_function_call':
                             func_call = let_node['expr']
                             func_name = func_call['func_name']
-                            
+
                             if func_name in functions:
                                 func_def = functions[func_name]
                                 call_counter += 1
-                                
+
                                 inlined_stmts, return_name = inline_function_call(
-                                    func_def, func_call['args'], {}, 
+                                    func_def, func_call['args'], {},
                                     f"{func_name}_{call_counter}"
                                 )
-                                
+
                                 expanded_stmts = []
                                 local_mappings = {}
-                                
+
                                 for stmt in inlined_stmts:
                                     if stmt['type'] == 'let' and stmt['expr']['type'] == 'user_function_call':
                                         nested_call = stmt['expr']
                                         nested_func_name = nested_call['func_name']
-                                        
+
                                         if nested_func_name in functions:
                                             call_counter += 1
                                             nested_inlined, nested_return = inline_function_call(
                                                 functions[nested_func_name],
-                                                nested_call['args'], 
+                                                nested_call['args'],
                                                 {},
                                                 f"{nested_func_name}_{call_counter}"
                                             )
-                                            
+
                                             expanded_stmts.extend(nested_inlined)
-                                            
+
                                             if nested_return:
                                                 local_mappings[stmt['name']] = nested_return
                                         else:
@@ -208,9 +208,9 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
                                             t = stmt['expr']['tensor']
                                             stmt['expr']['tensor'] = local_mappings.get(t, t)
                                         expanded_stmts.append(stmt)
-                                
+
                                 ast.extend(expanded_stmts)
-                                
+
                                 if return_name:
                                     ast.append({
                                         'type': 'let',
@@ -224,11 +224,27 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
                                 return None, None, None
                         else:
                             ast.append(let_node)
-                
-                # Expression (output tensor)
+
+                # Expression statement
                 elif stmt.data == 'expr':
                     expr_node = build_expression(stmt, DEBUG_MODE, DEBUG_INFO)
-                    if expr_node and expr_node['type'] == 'name':
+
+                    if expr_node and expr_node.get('type') in OPTIMIZER_NAMES:
+                        ast.append({
+                            'type': expr_node['type'],
+                            'args': expr_node.get('args', []),
+                            'tree': None,
+                        })
+
+                    elif expr_node and expr_node.get('type') == 'user_function_call' \
+                            and expr_node.get('func_name') in OPTIMIZER_NAMES:
+                        ast.append({
+                            'type': expr_node['func_name'],
+                            'args': expr_node.get('args', []),
+                            'tree': None,
+                        })
+
+                    elif expr_node and expr_node.get('type') == 'name':
                         output_tensor = expr_node['name']
 
                 elif stmt.data == 'rebind_statement':
@@ -240,10 +256,7 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
                     for_node = build_for_statement(stmt, DEBUG_MODE, DEBUG_INFO)
                     if for_node:
                         ast.append(for_node)
-    
-    # Default to last tensor if no explicit output
-    # if not output_tensor and ast:
-    #     output_tensor = ast[-1]['name']
+
     # Default to last tensor if no explicit output
     if not output_tensor and ast:
         # Find the last 'let' statement (skip backward statements)
@@ -252,8 +265,8 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
                 output_tensor = node['name']
                 break
 
-    
     return ast, output_tensor, functions
+
 
 def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """Parse: let name: Type = expr [with grad]"""
@@ -264,26 +277,26 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | 
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] Invalid let_binding node: {tree.data}")
         return None
-    
+
     children = tree.children
     requires_grad = False
-    
+
     # Check for 'with grad' marker
     for child in children:
         if isinstance(child, Tree) and child.data == 'grad_marker':
             requires_grad = True
             if DEBUG_MODE:
                 tensorlang.print(message="[AST] Found grad_marker - tensor will track gradients")
-    
+
     # Parse based on structure (name, [type], expr, [grad_marker])
     name_idx = 0
     type_idx = None
     expr_idx = None
-    
+
     name = children[name_idx].value
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] Processing let binding for {name}, requires_grad={requires_grad}")
-    
+
     # Find type and expression indices
     for i in range(1, len(children)):
         child = children[i]
@@ -294,17 +307,17 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | 
                 expr_idx = i
             elif child.data == 'grad_marker':
                 pass  # Already handled
-    
+
     # Build type if present
     ty = None
     if type_idx is not None:
         ty = build_type(children[type_idx], DEBUG_MODE, DEBUG_INFO)
-    
+
     # Build expression
     expr = None
     if expr_idx is not None:
         expr = build_expression(children[expr_idx], DEBUG_MODE, DEBUG_INFO)
-    
+
     return {
         'type': 'let',
         'name': name,
@@ -319,7 +332,7 @@ def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     """Parse type annotation"""
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] Building type from {tree.data}")
-    
+
     if tree.data == 'concrete_type':
         children = tree.children
         dtype_value = 'f32'
@@ -328,7 +341,7 @@ def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         shape_tree = children[1] if len(children) > 1 and isinstance(children[1], Tree) else None
         shape = build_shape(shape_tree, DEBUG_MODE, DEBUG_INFO) if shape_tree else (0, 0)
         return {'dtype': dtype_value, 'shape': shape}
-    
+
     elif tree.data == 'generic_type':
         generic_shape_tree = tree.children[0]
         generic_dims = []
@@ -339,7 +352,7 @@ def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
                 elif child.type == 'NUMBER':
                     generic_dims.append(int(float(child.value)))
         return {'dtype': 'f32', 'shape': tuple(generic_dims)}
-    
+
     if tree.data == 'type':
         return build_type(tree.children[0], DEBUG_MODE, DEBUG_INFO)
 
@@ -379,15 +392,15 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         elif tree.type == 'NUMBER':
             return {'type': 'number', 'value': float(tree.value)}
         return {'type': 'name', 'name': str(tree.value)}
-    
+
     if isinstance(tree, Token) and tree.type == 'NAME':
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] Expression: {tree.type}: {tree.value}")
         return {'type': 'name', 'name': tree.value}
-    
+
     elif tree.data == 'user_function_call':
         return build_user_function_call(tree, DEBUG_MODE, DEBUG_INFO)
-    
+
     # Unary activations — argument is now an inline_expr subtree (not just a
     # NAME token), so it can be a nested call like tanh(matmul(x, w1)).
     # Mirrors the binary-op handling below.
@@ -411,7 +424,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
                 # Directly nested op tree (no wrapping inline_expr)
                 args.append(build_expression(child, DEBUG_MODE, DEBUG_INFO))
         return {'type': expr_name, 'args': args}
-    
+
     # Binary operations — arguments are now inline_expr subtrees (not just NAME tokens)
     elif tree.data in ['matmul_call', 'add_call', 'minus_call', 'mult_call', 'div_call']:
         expr_name = tree.data.replace("_call", "")
@@ -448,24 +461,24 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         expr_name = tree.data.replace("_call", "")
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         return {'type': expr_name, 'args': args}
-    
+
     elif tree.data == 'less_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         return {'type': 'less', 'args': args}
-    
+
     # Loss functions
     elif tree.data == 'cross_entropy_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
         return {'type': 'cross_entropy', 'args': args}
-    
+
     elif tree.data == 'mse_loss_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
         return {'type': 'mse_loss', 'args': args}
-    
+
     # Axis operations
     elif tree.data in ['softmax_call', 'sum_call', 'mean_call', 'max_call', 'min_call', 'argmax_call', 'argmin_call']:
         tensor_name = None
@@ -479,7 +492,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} tensor={tensor_name}, axis={axis}")
         return {'type': expr_name, 'tensor': tensor_name, 'axis': axis}
-    
+
     # Concat
     elif tree.data == 'concat_call':
         tensor_names = []
@@ -492,7 +505,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] Expression: {tree.data} args: tensors={tensor_names}, axis={axis}")
         return {'type': 'concat', 'tensors': tensor_names, 'axis': axis}
-    
+
     # Tensor literal
     elif tree.data == 'tensor_literal':
         data = []
@@ -507,7 +520,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] Tensor literal data: {data}, is_1d: {is_1d}")
         return {'type': 'tensor_literal', 'data': data, 'is_1d': is_1d, 'tree': tree}
-    
+
     # Fill
     elif tree.data == 'fill_call':
         value = float(tree.children[0].value) if isinstance(tree.children[0], Token) and tree.children[0].type == 'NUMBER' else 0.0
@@ -516,7 +529,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] {tree.data} value: {value}, shape: {shape}")
         return {'type': 'fill', 'value': value, 'shape': shape}
-    
+
     # Layer norm
     elif tree.data == 'layer_norm_call':
         tensor_name = None
@@ -538,7 +551,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axis={axis}, eps={eps}")
         return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}
-    
+
     # Slice
     elif tree.data == 'slice_expr':
         tensor_name = None
@@ -552,7 +565,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, specs={slice_specs}")
         return {'type': 'slice', 'tensor': tensor_name, 'specs': slice_specs}
-    
+
     # Transpose
     elif tree.data == 'transpose_call':
         tensor_name = None
@@ -570,7 +583,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axes={axes}")
         return {'type': 'transpose', 'tensor': tensor_name, 'axes': axes}
-    
+
     # Reshape
     elif tree.data == 'reshape_call':
         tensor_name = None
@@ -583,7 +596,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, new_shape={new_shape}")
         return {'type': 'reshape', 'tensor': tensor_name, 'new_shape': new_shape}
-    
+
     # Batch norm
     elif tree.data == 'batch_norm_call':
         tensor_name = None
@@ -604,9 +617,9 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
                 eps = float(child.value)
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] Expression: {tree.data} args: tensor={tensor_name}, mean={running_mean_name}, var={running_var_name}, eps={eps}")
-        return {'type': 'batch_norm', 'tensor': tensor_name, 'running_mean': running_mean_name, 
+        return {'type': 'batch_norm', 'tensor': tensor_name, 'running_mean': running_mean_name,
                 'running_var': running_var_name, 'eps': eps}
-    
+
     # Instance norm
     elif tree.data == 'instance_norm_call':
         tensor_name = None
@@ -619,7 +632,7 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] {tree.data} args: tensor={tensor_name}, eps={eps}")
         return {'type': 'instance_norm', 'tensor': tensor_name, 'eps': eps}
-    
+
     # Load from file
     elif tree.data == 'load_call':
         file_path = None
@@ -632,43 +645,13 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
             tensorlang.print(message=f"[AST] {tree.data} file_path: {file_path}")
         return {'type': 'load', 'file_path': file_path}
 
-
+    # User-defined function call
+    elif tree.data == 'user_function_call':
+        return build_user_function_call(tree, DEBUG_MODE, DEBUG_INFO)
 
     print(f"[AST] Unrecognized expr type: {tree.data}")
     return None
 
-# def build_save_node(tree, debug_mode=False):
-#     """
-#     Parse save(tensor, "path.npy") statements
-    
-#     Args:
-#         tree: Lark parse tree for save_call
-        
-#     Returns:
-#         dict: AST node for save operation
-#     """
-#     # Extract tensor name (could be a name or expression)
-#     tensor_arg = tree.children[0]
-    
-#     if isinstance(tensor_arg, Token) and tensor_arg.type == 'NAME':
-#         tensor_name = str(tensor_arg.value)
-#     elif isinstance(tensor_arg, Tree) and tensor_arg.data == 'name':
-#         tensor_name = str(tensor_arg.children[0].value)
-#     else:
-#         raise ValueError(f"save() requires a tensor name, got {tensor_arg}")
-    
-#     # Extract file path
-#     file_path_token = tree.children[1]
-#     file_path = file_path_token.value.strip('"')
-    
-#     if debug_mode:
-#         print(f"[AST] save: {tensor_name} -> {file_path}")
-    
-#     return {
-#         'type': 'save',
-#         'tensor': tensor_name,
-#         'file_path': file_path
-#     }
 
 def build_slice_spec(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     """Parse slice specification like 0:2, :, 1:, etc."""
@@ -685,17 +668,17 @@ def build_slice_spec(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     elif tree.data == 'slice_range' and len(tree.children) == 2:
         left, right = tree.children
         if isinstance(left, Token) and isinstance(right, Token):
-                if left.value == ':':
-                    end = int(float(right.value))
-                    return {'type': 'slice', 'start': None, 'end': end}
-                elif right.value == ':':
-                    start = int(float(left.value))
-                    return {'type': 'slice', 'start': start, 'end': None}
-                elif left.type == 'NUMBER' and right.type == 'NUMBER':
-                    start = int(float(left.value))
-                    end = int(float(right.value))
-                    return {'type': 'slice', 'start': start, 'end': end}
-    
+            if left.value == ':':
+                end = int(float(right.value))
+                return {'type': 'slice', 'start': None, 'end': end}
+            elif right.value == ':':
+                start = int(float(left.value))
+                return {'type': 'slice', 'start': start, 'end': None}
+            elif left.type == 'NUMBER' and right.type == 'NUMBER':
+                start = int(float(left.value))
+                end = int(float(right.value))
+                return {'type': 'slice', 'start': start, 'end': end}
+
     return {'type': 'full_slice'}
 
 
@@ -703,10 +686,10 @@ def build_function_def(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict |
     """Parse function definition: fn name(params) -> return_type { body }"""
     if tree.data != 'function_def':
         return None
-    
+
     children = tree.children
     name = children[0].value
-    
+
     params = []
     param_list_idx = 1
     if len(children) > 1 and isinstance(children[1], Tree) and children[1].data == 'param_list':
@@ -716,28 +699,28 @@ def build_function_def(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict |
                 param_type = build_type(param_tree.children[1], DEBUG_MODE, DEBUG_INFO)
                 params.append({'name': param_name, 'type': param_type})
         param_list_idx = 2
-    
+
     return_type = None
     body_idx = param_list_idx
-    
+
     if param_list_idx < len(children) and isinstance(children[param_list_idx], Tree):
         child_data = children[param_list_idx].data
         if child_data in ['type', 'concrete_type', 'generic_type']:
             return_type = build_type(children[param_list_idx], DEBUG_MODE, DEBUG_INFO)
             body_idx = param_list_idx + 1
-    
+
     if body_idx >= len(children):
         tensorlang.print(message=f"[AST] ERROR: No function body found for function {name}")
         return None
-    
+
     body_tree = children[body_idx]
     if body_tree.data != 'function_body':
         tensorlang.print(message=f"[AST] ERROR: Expected function_body, got {body_tree.data}")
         return None
-    
+
     body_statements = []
     return_expr = None
-    
+
     for stmt in body_tree.children:
         if isinstance(stmt, Tree):
             if stmt.data == 'function_statement':
@@ -745,10 +728,25 @@ def build_function_def(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict |
                 if inner_stmt.data == 'let_binding':
                     body_statements.append(build_let_binding(inner_stmt, DEBUG_MODE, DEBUG_INFO))
                 elif inner_stmt.data == 'expr_statement':
-                    body_statements.append(build_expression(inner_stmt.children[0], DEBUG_MODE, DEBUG_INFO))
+                    expr_node = build_expression(inner_stmt.children[0], DEBUG_MODE, DEBUG_INFO)
+                    if expr_node and expr_node.get('type') in OPTIMIZER_NAMES:
+                        body_statements.append({
+                            'type': expr_node['type'],
+                            'args': expr_node.get('args', []),
+                            'tree': None,
+                        })
+                    elif expr_node and expr_node.get('type') == 'user_function_call' \
+                            and expr_node.get('func_name') in OPTIMIZER_NAMES:
+                        body_statements.append({
+                            'type': expr_node['func_name'],
+                            'args': expr_node.get('args', []),
+                            'tree': None,
+                        })
+                    else:
+                        body_statements.append(expr_node)
             elif stmt.data == 'return_statement':
                 return_expr = build_expression(stmt.children[0], DEBUG_MODE, DEBUG_INFO)
-    
+
     return {
         'type': 'function_def',
         'name': name,
@@ -763,16 +761,16 @@ def build_user_function_call(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
     """Parse user function call: func_name(arg1, arg2, ...)"""
     if tree.data != 'user_function_call':
         return None
-    
+
     func_name = tree.children[0].value
     args = []
-    
+
     if len(tree.children) > 1 and isinstance(tree.children[1], Tree):
         arg_list = tree.children[1]
         if arg_list.data == 'arg_list':
             for arg in arg_list.children:
                 args.append(build_expression(arg, DEBUG_MODE, DEBUG_INFO))
-    
+
     return {
         'type': 'user_function_call',
         'func_name': func_name,
@@ -792,18 +790,18 @@ def inline_function_call(func_def: dict, args: list, env: dict, unique_suffix: s
             param_map[param['name']] = arg
         else:
             param_map[param['name']] = arg
-    
+
     inlined_statements = []
     name_mapping = {}
-    
+
     for stmt in func_def['body']:
         if stmt['type'] == 'let':
             old_name = stmt['name']
             new_name = f"{old_name}_{unique_suffix}"
             name_mapping[old_name] = new_name
-            
+
             new_expr = substitute_names(stmt['expr'], param_map, name_mapping)
-            
+
             inlined_statements.append({
                 'type': 'let',
                 'name': new_name,
@@ -811,12 +809,12 @@ def inline_function_call(func_def: dict, args: list, env: dict, unique_suffix: s
                 'expr': new_expr,
                 'tree': stmt.get('tree')
             })
-    
+
     return_expr = func_def['return_expr']
     if return_expr:
         return_value_name = f"__return_{unique_suffix}"
         final_expr = substitute_names(return_expr, param_map, name_mapping)
-        
+
         inlined_statements.append({
             'type': 'let',
             'name': return_value_name,
@@ -824,9 +822,9 @@ def inline_function_call(func_def: dict, args: list, env: dict, unique_suffix: s
             'expr': final_expr,
             'tree': None
         })
-        
+
         return inlined_statements, return_value_name
-    
+
     return inlined_statements, None
 
 
@@ -927,7 +925,7 @@ def build_rebind_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> di
     if tree.data != 'rebind_statement':
         return None
     name_token = tree.children[0]
-    expr_tree   = tree.children[1]
+    expr_tree = tree.children[1]
     name = name_token.value
     expr = build_expression(expr_tree, DEBUG_MODE, DEBUG_INFO)
     if DEBUG_MODE:
@@ -940,7 +938,7 @@ def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict 
     if tree.data != 'for_statement':
         return None
 
-    loop_var   = tree.children[0].value
+    loop_var = tree.children[0].value
     iterations = int(float(tree.children[1].value))
     body_nodes = []
 
@@ -972,6 +970,20 @@ def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict 
                 if node:
                     body_nodes.append(node)
 
+            elif inner.data == 'expr':
+                expr_node = build_expression(inner, DEBUG_MODE, DEBUG_INFO)
+                if expr_node and expr_node.get('type') in OPTIMIZER_NAMES:
+                    body_nodes.append({
+                        'type': expr_node['type'],
+                        'args': expr_node.get('args', []),
+                    })
+                elif expr_node and expr_node.get('type') == 'user_function_call' \
+                        and expr_node.get('func_name') in OPTIMIZER_NAMES:
+                    body_nodes.append({
+                        'type': expr_node['func_name'],
+                        'args': expr_node.get('args', []),
+                    })
+
     if DEBUG_MODE:
         tensorlang.print(
             message=f"[AST] for {loop_var} in range({iterations}): {len(body_nodes)} body nodes"
@@ -989,7 +1001,7 @@ def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
     """Parse: backward(loss_name)"""
     if tree.data != 'backward_statement':
         return None
-    
+
     if len(tree.children) > 0:
         loss_tensor = tree.children[0].value
         if DEBUG_MODE:
@@ -1004,20 +1016,20 @@ def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
 def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """
     Parse: save(tensor_name, "path.npy")
-    
+
     Args:
         tree: Lark parse tree for save_statement
-        
+
     Returns:
         dict: AST node for save operation
     """
     if tree.data != 'save_statement':
         return None
-    
+
     # Extract tensor name
     tensor_name = None
     file_path = None
-    
+
     for child in tree.children:
         if isinstance(child, Token):
             if child.type == 'NAME':
@@ -1025,13 +1037,13 @@ def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict
             elif child.type == 'STRING':
                 # Remove quotes
                 file_path = child.value.strip('"').strip("'")
-    
+
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] save: {tensor_name} -> {file_path}")
-    
+
     if not tensor_name or not file_path:
         raise ValueError("save() requires tensor name and file path")
-    
+
     return {
         'type': 'save',
         'tensor': tensor_name,

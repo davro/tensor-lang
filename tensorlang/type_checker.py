@@ -1,34 +1,17 @@
 # File: tensorlang/type_checker.py
-# NEW FILE - Complete extraction from tensorlang.py main()
-# Type checker with backward statement support
-# Complete type checker with backward statement support
 
 import numpy as np
 
 from tensorlang.tensor_lang import TensorLang
+from tensorlang.constants import OPTIMIZER_NAMES
 
 tensorlang = TensorLang()
 
-
 def _is_scalar_shape(shape):
-    """
-    A tensor is a scalar for elementwise-broadcast purposes if it has no
-    dims, or every dim is size 1 — this covers both a bare () scalar and
-    the (1,1) shape TensorLang's own losses/reductions (e.g. mse_loss)
-    actually produce.
-    """
     return len(shape) == 0 or all(d == 1 for d in shape)
 
 
 def _shape_error(op, name, shape1, shape2, arg_names=None, hint=None):
-    """
-    Build a readable shape-mismatch message that names the operation, the
-    tensor being defined, both operand shapes and (when known) the operand
-    names, e.g.
-
-      [TYPE CHECKER] error: add: shape mismatch computing 'c':
-      'a' (2, 3) vs 'b' (3, 2). <hint>
-    """
     if arg_names and len(arg_names) == 2:
         operands = f"'{arg_names[0]}' {tuple(shape1)} vs '{arg_names[1]}' {tuple(shape2)}"
     else:
@@ -50,25 +33,10 @@ _MATRIX_VECTOR_HINT = (
 
 
 def _resolve_tensor_type(env, tensor_name):
-    """
-    Look up a tensor's type in env, falling back to inferring gradient
-    tensor types (NAME_grad) from their base tensor NAME when the gradient
-    itself hasn't been registered yet (e.g. it's produced later by
-    `backward()` but referenced earlier in program order, such as inside
-    reshape/transpose/max/min/argmax/argmin/instance_norm/batch_norm).
-
-    This mirrors the fallback already used by the add/minus/mult/div/matmul
-    arg-list checks below, so every single-tensor-field op gets the same
-    gradient-tensor support instead of only the ops that happen to read
-    from expr['args'].
-
-    Returns the type dict (never the live env entry — callers may mutate
-    it), or None if the tensor cannot be resolved at all.
-    """
     t = env.get(tensor_name)
     if t is not None:
         return t
-    if tensor_name.endswith('_grad'):
+    if tensor_name.endswith("_grad"):
         base_name = tensor_name[:-5]
         base_t = env.get(base_name)
         if base_t is not None:
@@ -76,863 +44,745 @@ def _resolve_tensor_type(env, tensor_name):
     return None
 
 
+def _optimizer_arg_name(arg):
+    if isinstance(arg, str):
+        return arg
+    if isinstance(arg, dict):
+        if "name" in arg:
+            return arg["name"]
+        if arg.get("type") == "name":
+            return arg["name"]
+    return None
+
+
+def _validate_optimizer_call(node_or_expr, env):
+    args = node_or_expr.get("args", node_or_expr.get("arguments", []))
+    label = node_or_expr.get("name", node_or_expr.get("type", "optimizer"))
+
+    if len(args) < 3:
+        tensorlang.print(message=f"[TYPE CHECKER] error: {label} requires param, grad, and lr")
+        return False
+
+    param_name = _optimizer_arg_name(args[0])
+    grad_name = _optimizer_arg_name(args[1])
+
+    if param_name is None or grad_name is None:
+        tensorlang.print(message="[TYPE CHECKER] error: optimizer arguments must be tensor names")
+        return False
+
+    if param_name not in env:
+        tensorlang.print(message=f"[TYPE CHECKER] error: undefined param '{param_name}'")
+        return False
+
+    if grad_name not in env and grad_name.endswith("_grad"):
+        base_name = grad_name[:-5]
+        if base_name in env:
+            env[grad_name] = {
+                "dtype": env[base_name]["dtype"],
+                "shape": env[base_name]["shape"],
+            }
+
+    if grad_name not in env:
+        tensorlang.print(message=f"[TYPE CHECKER] error: undefined grad '{grad_name}'")
+        return False
+
+    if env[param_name]["shape"] != env[grad_name]["shape"]:
+        tensorlang.print(message=(
+            f"[TYPE CHECKER] error: optimizer shape mismatch: "
+            f"'{param_name}' {tuple(env[param_name]['shape'])} vs "
+            f"'{grad_name}' {tuple(env[grad_name]['shape'])}"
+        ))
+        return False
+
+    return True
+
+
 def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
-    """
-    Type check AST and build environment of tensor types.
-    
-    Two-pass algorithm:
-    1. First pass: Type check all let bindings
-    2. Second pass: Register gradient types for backward statements
-    
-    Args:
-        ast: List of AST nodes from build_ast()
-        env: Empty dict to populate with tensor types
-        DEBUG_INFO: Print info messages
-        DEBUG_MODE: Print debug messages
-    
-    Returns:
-        (success: bool, env: dict with tensor types)
-    """
-    
     # ================================================================
-    # PASS 1: Type check all let bindings
+    # PASS 1: Type check all statements
     # ================================================================
     for node in ast:
-
-        # ----------------------------------------------------------------
-        # Skip rebind nodes — they reassign an existing name, so the shape
-        # is already in env from when it was first declared with 'let'.
-        # ----------------------------------------------------------------
-        if node['type'] == 'rebind':
+        if node.get("type") == "rebind":
             continue
 
-        # ----------------------------------------------------------------
-        # For loops: run type inference over the body once (shapes are
-        # static — the loop doesn't change dimensionality, only values).
-        # All body let_bindings are added to the SAME env so the compiler
-        # can allocate GPU memory for them.
-        # ----------------------------------------------------------------
-        if node['type'] == 'for':
-            success, env = type_checker(node['body'], env, DEBUG_INFO, DEBUG_MODE)
+        if node.get("type") == "for":
+            success, env = type_checker(node["body"], env, DEBUG_INFO, DEBUG_MODE)
             if not success:
                 return False, env
             continue
 
+        if node.get("type") in OPTIMIZER_NAMES or (
+            node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES
+        ):
+            if not _validate_optimizer_call(node, env):
+                return False, env
+            continue
 
-        if node['type'] == 'let':
-            name = node['name']
-            expr = node['expr']
-            ty = node['ty']
+        if node.get("type") == "save":
+            tensor_name = node.get("tensor")
+            if tensor_name not in env:
+                tensorlang.print(message=f"[TYPE CHECKER] Error: Cannot save undefined tensor '{tensor_name}'")
+                return False, env
+            if DEBUG_INFO:
+                print(f"[INFO] Save statement validated for {tensor_name}")
+            continue
 
-            arg_names = expr.get('args', [])
-            args = [env.get(a) for a in arg_names if a in env]
+        if node.get("type") == "backward":
+            continue
 
+        if node.get("type") != "let":
             if DEBUG_MODE:
-                tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
-                tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
+                tensorlang.print(message=f"[TYPE CHECKER] Skipping node type: {node.get('type')}")
+            continue
 
-            if ty and isinstance(ty, dict) and 'dtype' in ty:
-                shape = ty['shape']
-                if any(isinstance(dim, str) for dim in shape):
-                    if DEBUG_INFO:
-                        tensorlang.print(message=f"[TYPE CHECKER] Generic type for {name}: {ty}")
-                    # continue
-                else:
-                    env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
-                    if DEBUG_INFO:
-                        tensorlang.print(message=f"[TYPE CHECKER] Tensor {name} {env[name]}")
+        name = node["name"]
+        expr = node["expr"]
+        ty = node.get("ty")
 
-            elif isinstance(expr, dict) and expr['type'] == 'tensor_literal':
-                data = expr['data']
-                num_elements = len(data)
-                if expr['is_1d']:
-                    shape = (num_elements,)
-                else:
-                    rows = sum(1 for child in expr['tree'].children if child.data == 'inner_array')
-                    cols = num_elements // rows if rows > 0 else num_elements
-                    shape = (rows, cols)
-                env[name] = {'dtype': 'f32', 'shape': shape}
-                
-                if DEBUG_MODE:
-                    tensorlang.print(message=f"[TYPE CHECKER] Inferred shape for {name}: {env[name]['shape']}")
+        arg_names = expr.get("args", []) if isinstance(expr, dict) else []
+        args = [env.get(a) for a in arg_names if a in env]
 
-            elif isinstance(expr, dict) and expr['type'] == 'name':
-                ref_name = expr['name']
-                if ref_name not in env:
-                    tensorlang.print(message=f"[TYPE CHECKER] Type error: Undefined tensor {ref_name} referenced by {name}")
-                    return False, env
-                
-                env[name] = {'dtype': env[ref_name]['dtype'], 'shape': env[ref_name]['shape']}
+        if DEBUG_MODE:
+            tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
+            tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
+
+        # Annotated type: trust the declared type.
+        if ty and isinstance(ty, dict) and "dtype" in ty:
+            shape = ty["shape"]
+            if any(isinstance(dim, str) for dim in shape):
                 if DEBUG_INFO:
-                    print(f"[INFO] Type {name} assigned from {ref_name}: {env[name]}")
+                    tensorlang.print(message=f"[TYPE CHECKER] Generic type for {name}: {ty}")
+            else:
+                env[name] = {"dtype": ty["dtype"], "shape": ty["shape"]}
+                if DEBUG_INFO:
+                    tensorlang.print(message=f"[TYPE CHECKER] Tensor {name} {env[name]}")
+            continue
 
-            elif isinstance(expr, dict) and expr['type'] in [
-                    'matmul', 'add', 'minus', 'mult', 'div', 
-                    'relu', 'sigmoid', 'tanh', 'gelu', 'swish', 'softmax', 
-                    'fill', 'load', 'save',
-                    'sum', 'mean', 'max', 'min', 'argmax', 'argmin', 
-                    'greater', 'less', 'equal', 
-                    'linear', 'layer_norm', 'batch_norm', 'instance_norm', 'cross_entropy', 'mse_loss', 
-                    'transpose', 'reshape', 'concat', 'slice'
-                ]:
+        # Tensor literal.
+        if isinstance(expr, dict) and expr.get("type") == "tensor_literal":
+            data = expr["data"]
+            num_elements = len(data)
+            if expr.get("is_1d"):
+                shape = (num_elements,)
+            else:
+                rows = sum(1 for child in expr["tree"].children if child.data == "inner_array")
+                cols = num_elements // rows if rows > 0 else num_elements
+                shape = (rows, cols)
+            env[name] = {"dtype": "f32", "shape": shape}
+            if DEBUG_MODE:
+                tensorlang.print(message=f"[TYPE CHECKER] Inferred shape for {name}: {env[name]['shape']}")
+            continue
 
-                if expr['type'] == 'fill':
-                    env[name] = {'dtype': 'f32', 'shape': expr['shape']}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned from fill: {env[name]}")
-                
-                # elif expr['type'] == 'load':
-                #     file_path = expr['file_path']
-                    
-                #     # Check If type was explicitly declared, use it
-                #     if ty:
-                #         env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
-                #         if DEBUG_MODE:
-                #             tensorlang.print(message=f"[TYPE CHECKER] {name}: explicit shape from declaration: {env[name]}")
-                #     else:
-                #         # INFER: Load file and infer shape
-                #         if DEBUG_MODE:
-                #             tensorlang.print(message=f"[TYPE CHECKER] {name}: inferring shape from {file_path}")
-                        
-                #         try:
-                #             # Load file to infer shape
-                #             loaded_data = np.load(file_path)
-                #             inferred_shape = tuple(loaded_data.shape)
-                            
-                #             env[name] = {
-                #                 'dtype': 'f32',
-                #                 'shape': inferred_shape
-                #             }
-                            
-                #             if DEBUG_MODE:
-                #                 tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from file")
-                            
-                #         except FileNotFoundError:
-                #             tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
-                #             return False, env
-                #         except Exception as e:
-                #             tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
-                #             return False, env
+        # Name alias.
+        if isinstance(expr, dict) and expr.get("type") == "name":
+            ref_name = expr["name"]
+            if ref_name not in env:
+                tensorlang.print(message=f"[TYPE CHECKER] Type error: Undefined tensor {ref_name} referenced by {name}")
+                return False, env
+            env[name] = {"dtype": env[ref_name]["dtype"], "shape": env[ref_name]["shape"]}
+            if DEBUG_INFO:
+                print(f"[INFO] Type {name} assigned from {ref_name}: {env[name]}")
+            continue
 
-                elif expr['type'] == 'load':
-                    file_path = expr['file_path']
-                    
-                    # Check If type was explicitly declared, use it
-                    if ty:
-                        env[name] = {'dtype': ty['dtype'], 'shape': ty['shape']}
-                        if DEBUG_MODE:
-                            tensorlang.print(message=f"[TYPE CHECKER] {name}: explicit shape from declaration: {env[name]}")
-                    else:
-                        # INFER: Load file and infer shape
-                        if DEBUG_MODE:
-                            tensorlang.print(message=f"[TYPE CHECKER] {name}: inferring shape from {file_path}")
-                        
-                        try:
-                            from pathlib import Path
-                            path = Path(file_path)
-                            suffix = path.suffix.lower()
-                            
-                            # ================================================================
-                            # Handle different file formats
-                            # ================================================================
-                            if suffix == '.npy':
-                                # NPY: Simple array load
-                                loaded_data = np.load(file_path)
-                                inferred_shape = tuple(loaded_data.shape)
-                            
-                            elif suffix == '.npz':
-                                # NPZ: Multiple arrays - need to open and extract
-                                npz_file = np.load(file_path)
-                                #npz_file = np.load(file_path, allow_pickle=True) 
-                                
-                                # Get 'data' array or first available array
-                                if 'data' in npz_file.files:
-                                    data_array = npz_file['data']
-                                elif len(npz_file.files) > 0:
-                                    data_array = npz_file[npz_file.files[0]]
-                                    if DEBUG_MODE:
-                                        tensorlang.print(message=f"[TYPE CHECKER] NPZ: Using array '{npz_file.files[0]}' (no 'data' array found)")
-                                else:
-                                    npz_file.close()
-                                    tensorlang.print(message=f"[TYPE CHECKER] error: NPZ file has no arrays: {file_path}")
-                                    return False, env
-                                
-                                inferred_shape = tuple(data_array.shape)
-                                npz_file.close()  # Important: close the file!
-                            
-                            elif suffix == '.csv':
-                                # CSV: Use pandas to infer shape
-                                try:
-                                    import pandas as pd
-                                    df = pd.read_csv(file_path)
-                                    
-                                    # Check if first column is index
-                                    first_col = df.columns[0]
-                                    if first_col.lower() in ['date', 'time', 'datetime', 'index', 'id']:
-                                        df = df.drop(columns=[first_col])
-                                    
-                                    inferred_shape = tuple(df.shape)
-                                except ImportError:
-                                    tensorlang.print(message="[TYPE CHECKER] error: pandas required for CSV loading")
-                                    return False, env
-                            
-                            else:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported file format: {suffix}")
-                                return False, env
-                            
-                            # Register inferred type
-                            env[name] = {
-                                'dtype': 'f32',
-                                'shape': inferred_shape
-                            }
-                            
+        # Optimizer call used as a let-binding.
+        if isinstance(expr, dict) and expr.get("type") in OPTIMIZER_NAMES:
+            if not _validate_optimizer_call(expr, env):
+                return False, env
+            continue
+
+        # Operation expressions.
+        if isinstance(expr, dict) and expr.get("type") in [
+            "matmul", "add", "minus", "mult", "div",
+            "relu", "sigmoid", "tanh", "gelu", "swish", "softmax",
+            "fill", "load", "save",
+            "sum", "mean", "max", "min", "argmax", "argmin",
+            "greater", "less", "equal",
+            "linear", "layer_norm", "batch_norm", "instance_norm",
+            "cross_entropy", "mse_loss",
+            "transpose", "reshape", "concat", "slice",
+            "sgd", "adam", "sgd_update", "adam_update",
+        ]:
+            if expr["type"] == "fill":
+                env[name] = {"dtype": "f32", "shape": expr["shape"]}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned from fill: {env[name]}")
+                continue
+
+            if expr["type"] == "load":
+                file_path = expr["file_path"]
+
+                if ty:
+                    env[name] = {"dtype": ty["dtype"], "shape": ty["shape"]}
+                    if DEBUG_MODE:
+                        tensorlang.print(message=f"[TYPE CHECKER] {name}: explicit shape from declaration: {env[name]}")
+                    continue
+
+                try:
+                    from pathlib import Path
+
+                    path = Path(file_path)
+                    suffix = path.suffix.lower()
+
+                    if suffix == ".npy":
+                        loaded_data = np.load(file_path)
+                        inferred_shape = tuple(loaded_data.shape)
+
+                    elif suffix == ".npz":
+                        npz_file = np.load(file_path)
+                        if "data" in npz_file.files:
+                            data_array = npz_file["data"]
+                        elif len(npz_file.files) > 0:
+                            data_array = npz_file[npz_file.files[0]]
                             if DEBUG_MODE:
-                                tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from {suffix.upper()} file")
-                            
-                        except FileNotFoundError:
-                            tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
-                            return False, env
-                        except (OSError, UnicodeError, ValueError) as e:
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
+                                tensorlang.print(message=f"[TYPE CHECKER] NPZ: Using array '{npz_file.files[0]}' (no 'data' array found)")
+                        else:
+                            npz_file.close()
+                            tensorlang.print(message=f"[TYPE CHECKER] error: NPZ file has no arrays: {file_path}")
                             return False, env
 
+                        inferred_shape = tuple(data_array.shape)
+                        npz_file.close()
 
-                elif node['type'] == 'save':
-                    tensor_name = node['tensor']
-                    
-                    # Verify tensor exists
-                    if tensor_name not in env:
-                        tensorlang.print(message=f"[TYPE CHECKER] Error: Cannot save undefined tensor '{tensor_name}'")
-                        return False, env
-                    
-                    if DEBUG_INFO:
-                        print(f"[INFO] Save statement validated for {tensor_name}")
+                    elif suffix == ".csv":
+                        try:
+                            import pandas as pd
+                        except ImportError:
+                            tensorlang.print(message="[TYPE CHECKER] error: pandas required for CSV loading")
+                            return False, env
 
-                elif expr['type'] in ['sum', 'mean']:
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
-                        return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    axis = expr.get('axis')
-                    if axis is None:
-                        output_shape = ()
+                        df = pd.read_csv(file_path)
+                        first_col = df.columns[0]
+                        if first_col.lower() in ["date", "time", "datetime", "index", "id"]:
+                            df = df.drop(columns=[first_col])
+                        inferred_shape = tuple(df.shape)
+
                     else:
-                        if axis < 0 or axis >= len(input_shape):
-                            print(f"Type error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
-                            return False, env
-                        output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
-                        if not output_shape:
-                            output_shape = ()
-                    
-                    env[name] = {'dtype': 'f32', 'shape': output_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
-
-                elif expr['type'] == 'softmax':
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported file format: {suffix}")
                         return False, env
-                    
-                    env[name] = {'dtype': 'f32', 'shape': tensor_type['shape']}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Tensor {tensor_name} {name}:({expr['type']}):{env[name]}")
 
-                elif expr['type'] in ['relu', 'sigmoid', 'tanh', 'gelu', 'swish']:
-                    arg_name = expr['args'][0]
-                    arg_type = _resolve_tensor_type(env, arg_name)
-                    if arg_type is None:
-                        print(f"Type error: Undefined tensor {arg_name} for {expr['type']}")
-                        return False, env
-                    
-                    env[name] = {'dtype': 'f32', 'shape': arg_type['shape']}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} for {name}: {env[name]}")
+                    env[name] = {"dtype": "f32", "shape": inferred_shape}
+                    if DEBUG_MODE:
+                        tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from {suffix.upper()} file")
 
-                elif expr['type'] == 'slice':
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
+                except FileNotFoundError:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: File not found during type inference: {file_path}")
+                    return False, env
+                except (OSError, UnicodeError, ValueError) as e:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
+                    return False, env
+                continue
+
+            if expr["type"] in ("sum", "mean"):
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    print(f"Type error: Undefined tensor {tensor_name} for {expr['type']}")
+                    return False, env
+
+                input_shape = tensor_type["shape"]
+                axis = expr.get("axis")
+                if axis is None:
+                    output_shape = ()
+                else:
+                    if axis < 0 or axis >= len(input_shape):
+                        print(f"Type error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                         return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    slice_specs = expr['specs']
-                    
-                    output_shape = []
-                    for i, spec in enumerate(slice_specs):
-                        if i >= len(input_shape):
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Slice dimension {i} exceeds tensor dimensions {len(input_shape)}")
-                            return False, env
-                            
-                        dim_size = input_shape[i]
-                        
-                        if spec['type'] == 'index':
-                            continue
-                        elif spec['type'] == 'full_slice':
-                            output_shape.append(dim_size)
-                        elif spec['type'] == 'slice':
-                            start = spec.get('start', 0)
-                            end = spec.get('end', dim_size)
-                            
-                            if start is None:
-                                start = 0
-                            if end is None:
-                                end = dim_size
-                            if start < 0:
-                                start = max(0, dim_size + start)
-                            if end < 0:
-                                end = max(0, dim_size + end)
-                                
-                            start = min(start, dim_size)
-                            end = min(end, dim_size)
-                            
-                            slice_length = max(0, end - start)
-                            output_shape.append(slice_length)
-                    
-                    for i in range(len(slice_specs), len(input_shape)):
-                        output_shape.append(input_shape[i])
-                    
+                    output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
                     if not output_shape:
                         output_shape = ()
-                    else:
-                        output_shape = tuple(output_shape)
-                    
-                    env[name] = {'dtype': 'f32', 'shape': output_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
 
-                elif expr['type'] == 'layer_norm':
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for layer_norm")
+                env[name] = {"dtype": "f32", "shape": output_shape}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
+
+            if expr["type"] == "softmax":
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
+                    return False, env
+                env[name] = {"dtype": "f32", "shape": tensor_type["shape"]}
+                if DEBUG_INFO:
+                    print(f"[INFO] Tensor {tensor_name} {name}:({expr['type']}):{env[name]}")
+                continue
+
+            if expr["type"] in ("relu", "sigmoid", "tanh", "gelu", "swish"):
+                arg_name = expr["args"][0]
+                arg_type = _resolve_tensor_type(env, arg_name)
+                if arg_type is None:
+                    print(f"Type error: Undefined tensor {arg_name} for {expr['type']}")
+                    return False, env
+                env[name] = {"dtype": "f32", "shape": arg_type["shape"]}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} for {name}: {env[name]}")
+                continue
+
+            if expr["type"] == "slice":
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
+                    return False, env
+
+                input_shape = tensor_type["shape"]
+                slice_specs = expr["specs"]
+
+                output_shape = []
+                for i, spec in enumerate(slice_specs):
+                    if i >= len(input_shape):
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Slice dimension {i} exceeds tensor dimensions {len(input_shape)}")
                         return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    axis = expr.get('axis')
-                    
-                    if axis is None:
-                        axis = len(input_shape) - 1
-                    
+
+                    dim_size = input_shape[i]
+
+                    if spec["type"] == "index":
+                        continue
+                    if spec["type"] == "full_slice":
+                        output_shape.append(dim_size)
+                    elif spec["type"] == "slice":
+                        start = spec.get("start", 0)
+                        end = spec.get("end", dim_size)
+                        if start is None:
+                            start = 0
+                        if end is None:
+                            end = dim_size
+                        if start < 0:
+                            start = max(0, dim_size + start)
+                        if end < 0:
+                            end = max(0, dim_size + end)
+                        start = min(start, dim_size)
+                        end = min(end, dim_size)
+                        output_shape.append(max(0, end - start))
+
+                for i in range(len(slice_specs), len(input_shape)):
+                    output_shape.append(input_shape[i])
+
+                env[name] = {"dtype": "f32", "shape": tuple(output_shape) if output_shape else ()}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
+
+            if expr["type"] == "layer_norm":
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for layer_norm")
+                    return False, env
+
+                input_shape = tensor_type["shape"]
+                axis = expr.get("axis")
+                if axis is None:
+                    axis = len(input_shape) - 1
+                if axis < 0 or axis >= len(input_shape):
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
+                    return False, env
+
+                env[name] = {"dtype": "f32", "shape": input_shape}
+                if DEBUG_MODE:
+                    print(f"Type {expr['type']} Assigned for {name}: {env[name]}")
+                continue
+
+            if expr["type"] == "batch_norm":
+                tensor_name = expr["tensor"]
+                running_mean_name = expr["running_mean"]
+                running_var_name = expr["running_var"]
+
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                mean_type = _resolve_tensor_type(env, running_mean_name)
+                var_type = _resolve_tensor_type(env, running_var_name)
+
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for batch_norm")
+                    return False, env
+                if mean_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_mean {running_mean_name} for batch_norm")
+                    return False, env
+                if var_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_var {running_var_name} for batch_norm")
+                    return False, env
+
+                input_shape = tensor_type["shape"]
+                mean_shape = mean_type["shape"]
+                var_shape = var_type["shape"]
+
+                if len(input_shape) < 2:
+                    tensorlang.print(message="[TYPE CHECKER] error: BatchNorm input must be at least 2D")
+                    return False, env
+
+                num_features = input_shape[1]
+                expected_stats_shape = (num_features,)
+
+                if mean_shape != expected_stats_shape:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_mean shape {mean_shape} != expected {expected_stats_shape}")
+                    return False, env
+                if var_shape != expected_stats_shape:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_var shape {var_shape} != expected {expected_stats_shape}")
+                    return False, env
+
+                env[name] = {"dtype": "f32", "shape": input_shape}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
+
+            if expr["type"] == "instance_norm":
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for instance_norm")
+                    return False, env
+                env[name] = {"dtype": "f32", "shape": tensor_type["shape"]}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
+
+            if expr["type"] in ("max", "min", "argmax", "argmin"):
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
+                    return False, env
+
+                input_shape = tensor_type["shape"]
+                axis = expr.get("axis")
+                if axis is None:
+                    output_shape = ()
+                else:
                     if axis < 0 or axis >= len(input_shape):
                         tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                         return False, env
-                    
-                    env[name] = {'dtype': 'f32', 'shape': input_shape}
-
-                    if DEBUG_MODE:
-                        print(f"Type {expr['type']} Assigned for {name}: {env[name]}")
-
-                elif expr['type'] == 'batch_norm':
-                    tensor_name = expr['tensor']
-                    running_mean_name = expr['running_mean']
-                    running_var_name = expr['running_var']
-                    
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    mean_type = _resolve_tensor_type(env, running_mean_name)
-                    var_type = _resolve_tensor_type(env, running_var_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for batch_norm")
-                        return False, env
-                    if mean_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_mean {running_mean_name} for batch_norm")
-                        return False, env
-                    if var_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_var {running_var_name} for batch_norm")
-                        return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    mean_shape = mean_type['shape']
-                    var_shape = var_type['shape']
-                    
-                    if len(input_shape) < 2:
-                        tensorlang.print(message="[TYPE CHECKER] error: BatchNorm input must be at least 2D")
-                        return False, env
-                    
-                    num_features = input_shape[1]
-                    expected_stats_shape = (num_features,)
-                    
-                    if mean_shape != expected_stats_shape:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_mean shape {mean_shape} != expected {expected_stats_shape}")
-                        return False, env
-                    if var_shape != expected_stats_shape:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_var shape {var_shape} != expected {expected_stats_shape}")
-                        return False, env
-                    
-                    env[name] = {'dtype': 'f32', 'shape': input_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
-
-                elif expr['type'] == 'instance_norm':
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for instance_norm")
-                        return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    env[name] = {'dtype': 'f32', 'shape': input_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
-
-                elif expr['type'] in ['max', 'min', 'argmax', 'argmin']:
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
-                        return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    axis = expr.get('axis')
-                    
-                    if axis is None:
+                    output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
+                    if not output_shape:
                         output_shape = ()
-                    else:
-                        if axis < 0 or axis >= len(input_shape):
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
-                            return False, env
-                        output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
-                        if not output_shape:
-                            output_shape = ()
-                    
-                    env[name] = {'dtype': 'f32', 'shape': output_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
 
-                elif expr['type'] == 'transpose':
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for transpose")
-                        return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    axes = expr.get('axes')
-                    
-                    if axes is None:
-                        output_shape = tuple(reversed(input_shape))
-                    else:
-                        if len(axes) != len(input_shape):
-                            tensorlang.print(message="[TYPE CHECKER] error: Transpose axes length mismatch")
-                            return False, env
-                        if set(axes) != set(range(len(input_shape))):
-                            tensorlang.print(message="[TYPE CHECKER] error: Transpose axes must be permutation")
-                            return False, env
-                        output_shape = tuple(input_shape[i] for i in axes)
-                    
-                    env[name] = {'dtype': 'f32', 'shape': output_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                env[name] = {"dtype": "f32", "shape": output_shape}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
 
-                elif expr['type'] == 'reshape':
-                    tensor_name = expr['tensor']
-                    tensor_type = _resolve_tensor_type(env, tensor_name)
-                    if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for reshape")
-                        return False, env
-                    
-                    input_shape = tensor_type['shape']
-                    new_shape = expr['new_shape']
-                    
-                    input_elements = int(np.prod([int(dim) for dim in input_shape]))
-                    new_elements = int(np.prod([int(dim) for dim in new_shape]))
-                    
-                    if input_elements != new_elements:
-                        tensorlang.print(message="[TYPE CHECKER] error: Reshape element count mismatch")
-                        return False, env
-                    
-                    env[name] = {'dtype': 'f32', 'shape': new_shape}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+            if expr["type"] == "transpose":
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for transpose")
+                    return False, env
 
-                elif expr['type'] == 'concat':
-                    tensor_names = expr['tensors']
-                    axis = expr['axis']
-                    
-                    tensor_types = []
-                    for tensor_name in tensor_names:
-                        tensor_type = _resolve_tensor_type(env, tensor_name)
-                        if tensor_type is None:
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for concat")
-                            return False, env
-                        tensor_types.append(tensor_type)
-                    
-                    first_shape = tensor_types[0]['shape']
-                    if axis < 0 or axis >= len(first_shape):
-                        tensorlang.print(message="[TYPE CHECKER] error: Concat axis out of bounds")
-                        return False, env
-                    
-                    concat_dim_size = 0
-                    for i, tensor_type in enumerate(tensor_types):
-                        shape = tensor_type['shape']
-                        if len(shape) != len(first_shape):
-                            tensorlang.print(message="[TYPE CHECKER] error: Concat tensor dimension count mismatch")
-                            return False, env
-                        
-                        for dim_idx, (dim1, dim2) in enumerate(zip(first_shape, shape)):
-                            if dim_idx != axis and dim1 != dim2:
-                                tensorlang.print(message="[TYPE CHECKER] error: Concat tensor shape mismatch")
-                                return False, env
-                        
-                        concat_dim_size += shape[axis]
-                    
-                    output_shape = list(first_shape)
-                    output_shape[axis] = concat_dim_size
-                    env[name] = {'dtype': 'f32', 'shape': tuple(output_shape)}
-                    if DEBUG_INFO:
-                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
-
+                input_shape = tensor_type["shape"]
+                axes = expr.get("axes")
+                if axes is None:
+                    output_shape = tuple(reversed(input_shape))
                 else:
-                    # arg_names = expr.get('args', [])
-                    # if arg_names:
-                    #     args = [env.get(arg_name) for arg_name in arg_names]
-                    #     if DEBUG_INFO:
-                    #         print(f"[INFO] Checking args for {name}: {args}")
-                    #     if not all(args):
-                    #         print(f"Type error: Undefined args for {name}")
-                    #         return False, env
+                    if len(axes) != len(input_shape):
+                        tensorlang.print(message="[TYPE CHECKER] error: Transpose axes length mismatch")
+                        return False, env
+                    if set(axes) != set(range(len(input_shape))):
+                        tensorlang.print(message="[TYPE CHECKER] error: Transpose axes must be permutation")
+                        return False, env
+                    output_shape = tuple(input_shape[i] for i in axes)
 
-                    # arg_names = expr.get('args', [])
-                    # if arg_names:
-                    #     args = [env.get(arg_name) for arg_name in arg_names]
-                    #     if DEBUG_INFO:
-                    #         print(f"[INFO] Checking args for {name}: {args}")
-                        
-                    #     # Check if any missing args are gradient tensors (will be added in PASS 2)
-                    #     missing_args = []
-                    #     for i, (arg_name, arg_type) in enumerate(zip(arg_names, args)):
-                    #         if arg_type is None:
-                    #             # Check if this is a gradient tensor (ends with _grad)
-                    #             if arg_name.endswith('_grad'):
-                    #                 # This will be added in PASS 2, skip for now
-                    #                 if DEBUG_INFO:
-                    #                     print(f"[INFO] Skipping gradient tensor check: {arg_name}")
-                    #                 continue
-                    #             else:
-                    #                 missing_args.append(arg_name)
-                        
-                    #     if missing_args:
-                    #         print(f"Type error: Undefined args for {name}: {missing_args}")
-                    #         return False, env
+                env[name] = {"dtype": "f32", "shape": output_shape}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
 
-                    arg_names = expr.get('args', [])
-                    if arg_names:
-                        args = []
-                        missing_args = []
-                        
-                        # Collect args and check for missing ones
-                        for arg_name in arg_names:
-                            arg_type = env.get(arg_name)
-                            if arg_type is None:
-                                # Check if this is a gradient tensor (will be added in PASS 2)
-                                if arg_name.endswith('_grad'):
-                                    # Infer gradient type from base tensor
-                                    base_name = arg_name[:-5]  # Remove '_grad' suffix
-                                    if base_name in env:
-                                        # Gradient has same type as base tensor
-                                        arg_type = env[base_name].copy()
-                                        if DEBUG_INFO:
-                                            print(f"[INFO] Inferred type for {arg_name} from {base_name}: {arg_type}")
-                                    else:
-                                        missing_args.append(arg_name)
-                                else:
-                                    missing_args.append(arg_name)
-                            
-                            args.append(arg_type)
-                        
-                        if DEBUG_INFO:
-                            print(f"[INFO] Checking args for {name}: {args}")
-                        
-                        if missing_args:
-                            tensorlang.print(message=f"[TYPE CHECKER] error: Undefined args for {name}: {missing_args}")
+            if expr["type"] == "reshape":
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for reshape")
+                    return False, env
+
+                input_shape = tensor_type["shape"]
+                new_shape = expr["new_shape"]
+
+                input_elements = int(np.prod([int(dim) for dim in input_shape])) if input_shape else 1
+                new_elements = int(np.prod([int(dim) for dim in new_shape])) if new_shape else 1
+
+                if input_elements != new_elements:
+                    tensorlang.print(message="[TYPE CHECKER] error: Reshape element count mismatch")
+                    return False, env
+
+                env[name] = {"dtype": "f32", "shape": tuple(new_shape)}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
+
+            if expr["type"] == "concat":
+                tensor_names = expr["tensors"]
+                axis = expr["axis"]
+
+                tensor_types = []
+                for tensor_name in tensor_names:
+                    tensor_type = _resolve_tensor_type(env, tensor_name)
+                    if tensor_type is None:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for concat")
+                        return False, env
+                    tensor_types.append(tensor_type)
+
+                first_shape = tensor_types[0]["shape"]
+                if axis < 0 or axis >= len(first_shape):
+                    tensorlang.print(message="[TYPE CHECKER] error: Concat axis out of bounds")
+                    return False, env
+
+                concat_dim_size = 0
+                for tensor_type in tensor_types:
+                    shape = tensor_type["shape"]
+                    if len(shape) != len(first_shape):
+                        tensorlang.print(message="[TYPE CHECKER] error: Concat tensor dimension count mismatch")
+                        return False, env
+                    for dim_idx, (dim1, dim2) in enumerate(zip(first_shape, shape)):
+                        if dim_idx != axis and dim1 != dim2:
+                            tensorlang.print(message="[TYPE CHECKER] error: Concat tensor shape mismatch")
                             return False, env
+                    concat_dim_size += shape[axis]
 
-                            
-                        if expr['type'] == 'matmul':
-                            if args[0]['shape'][1] != args[1]['shape'][0]:
+                output_shape = list(first_shape)
+                output_shape[axis] = concat_dim_size
+                env[name] = {"dtype": "f32", "shape": tuple(output_shape)}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                continue
+
+            # Generic argument-based operations.
+            arg_names = expr.get("args", [])
+            if arg_names:
+                args = []
+                missing_args = []
+
+                for arg_name in arg_names:
+                    arg_type = env.get(arg_name)
+                    if arg_type is None and arg_name.endswith("_grad"):
+                        base_name = arg_name[:-5]
+                        if base_name in env:
+                            arg_type = env[base_name].copy()
+                            if DEBUG_INFO:
+                                print(f"[INFO] Inferred type for {arg_name} from {base_name}: {arg_type}")
+                    if arg_type is None:
+                        missing_args.append(arg_name)
+                    args.append(arg_type)
+
+                if DEBUG_INFO:
+                    print(f"[INFO] Checking args for {name}: {args}")
+
+                if missing_args:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined args for {name}: {missing_args}")
+                    return False, env
+
+                if expr["type"] == "matmul":
+                    if args[0]["shape"][1] != args[1]["shape"][0]:
+                        tensorlang.print(message=_shape_error(
+                            "matmul", name, args[0]["shape"], args[1]["shape"],
+                            arg_names,
+                            hint=(f"Inner dimensions must match: left has {args[0]['shape'][1]} "
+                                  f"columns but right has {args[1]['shape'][0]} rows")))
+                        return False, env
+                    env[name] = {"dtype": "f32", "shape": (args[0]["shape"][0], args[1]["shape"][1])}
+                    if DEBUG_INFO:
+                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
+
+                if expr["type"] in ("add", "minus", "mult", "div"):
+                    shape1, shape2 = args[0]["shape"], args[1]["shape"]
+
+                    if shape1 == shape2:
+                        output_shape = shape1
+                    elif _is_scalar_shape(shape1):
+                        output_shape = shape2
+                    elif _is_scalar_shape(shape2):
+                        output_shape = shape1
+                    elif len(shape1) == 2 and len(shape2) == 1:
+                        if shape1[0] == shape2[0] or shape1[1] == shape2[0]:
+                            output_shape = shape1
+                        else:
+                            tensorlang.print(message=_shape_error(
+                                expr["type"], name, shape1, shape2, arg_names,
+                                hint=_MATRIX_VECTOR_HINT))
+                            return False, env
+                    elif len(shape2) == 2 and len(shape1) == 1:
+                        if shape2[0] == shape1[0] or shape2[1] == shape1[0]:
+                            output_shape = shape2
+                        else:
+                            tensorlang.print(message=_shape_error(
+                                expr["type"], name, shape1, shape2, arg_names,
+                                hint=_MATRIX_VECTOR_HINT))
+                            return False, env
+                    else:
+                        ndim = max(len(shape1), len(shape2))
+                        padded_shape1 = (1,) * (ndim - len(shape1)) + shape1
+                        padded_shape2 = (1,) * (ndim - len(shape2)) + shape2
+
+                        output_shape = []
+                        for d1, d2 in zip(padded_shape1, padded_shape2):
+                            if d1 == d2:
+                                output_shape.append(d1)
+                            elif d1 == 1:
+                                output_shape.append(d2)
+                            elif d2 == 1:
+                                output_shape.append(d1)
+                            else:
                                 tensorlang.print(message=_shape_error(
-                                    'matmul', name, args[0]['shape'], args[1]['shape'],
-                                    arg_names,
-                                    hint=(f"Inner dimensions must match: left has {args[0]['shape'][1]} "
-                                          f"columns but right has {args[1]['shape'][0]} rows")))
+                                    expr["type"], name, shape1, shape2, arg_names,
+                                    hint=_ELEMENTWISE_HINT))
                                 return False, env
-                            env[name] = {'dtype': 'f32', 'shape': (args[0]['shape'][0], args[1]['shape'][1])}
-                            if DEBUG_INFO:
-                                print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                        output_shape = tuple(output_shape)
 
+                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    if DEBUG_INFO:
+                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
 
-                        # if expr['type'] == 'matmul':
-                        #     if len(args) != 2:
-                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul needs 2 args for {name}, got {len(args)}")
-                        #         return False, env
+                if expr["type"] in ("greater", "less", "equal"):
+                    shape1, shape2 = args[0]["shape"], args[1]["shape"]
+                    orig_shape1, orig_shape2 = shape1, shape2
+                    if len(shape1) < len(shape2):
+                        shape1, shape2 = shape2, shape1
 
-                        #     a, b = args
-                        #     if len(a['shape']) != 2 or len(b['shape']) != 2:
-                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul expects 2D tensors, got {a['shape']} and {b['shape']}")
-                        #         return False, env
-
-                        #     if a['shape'][1] != b['shape'][0]:
-                        #         tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
-                        #         return False, env
-
-                        #     env[name] = {'dtype': 'f32', 'shape': (a['shape'][0], b['shape'][1])}
-
-
-                        # if expr['type'] == 'matmul':
-                        #     if len(args) != 2:
-                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul needs 2 args for {name}, got {len(args)}")
-                        #         return False, env
-
-                        #     a, b = args
-                        #     a_shape, b_shape = a['shape'], b['shape']
-
-                        #     # Matrix @ Matrix
-                        #     if len(a_shape) == 2 and len(b_shape) == 2:
-                        #         if a_shape[1] != b_shape[0]:
-                        #             tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
-                        #             return False, env
-                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0], b_shape[1])}
-
-                        #     # Matrix @ Vector
-                        #     elif len(a_shape) == 2 and len(b_shape) == 1:
-                        #         if a_shape[1] != b_shape[0]:
-                        #             tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
-                        #             return False, env
-                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0],)}
-
-                        #     # Vector @ Matrix
-                        #     elif len(a_shape) == 1 and len(b_shape) == 2:
-                        #         if a_shape[0] != b_shape[0]:
-                        #             tensorlang.print(message=f"[TYPE CHECKER] error: Matmul shape mismatch for {name}")
-                        #             return False, env
-                        #         env[name] = {'dtype': 'f32', 'shape': (b_shape[1],)}
-
-                        #     else:
-                        #         tensorlang.print(message=f"[TYPE CHECKER] error: matmul expects 1D or 2D tensors, got {a_shape} and {b_shape}")
-                        #         return False, env
-
-
-                        # if node['type'] == 'matmul':
-                        #     a_shape = args[0]['shape']
-                        #     b_shape = args[1]['shape']
-
-                        #     if len(a_shape) == 2 and len(b_shape) == 2:
-                        #         # Matrix-Matrix multiply
-                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0], b_shape[1])}
-                        #     elif len(a_shape) == 2 and len(b_shape) == 1:
-                        #         # Matrix-Vector multiply
-                        #         env[name] = {'dtype': 'f32', 'shape': (a_shape[0],)}
-                        #     elif len(a_shape) == 1 and len(b_shape) == 2:
-                        #         # Vector-Matrix multiply
-                        #         env[name] = {'dtype': 'f32', 'shape': (b_shape[1],)}
-                        #     else:
-                        #         raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
-
-
-                        elif expr['type'] in ['add', 'minus', 'mult', 'div']:
-                            shape1, shape2 = args[0]['shape'], args[1]['shape']
-
-                            if shape1 == shape2:
-                                output_shape = shape1
-                            elif _is_scalar_shape(shape1):
-                                # A true scalar (of any rank, e.g. (1,1))
-                                # broadcasts against anything — this is the
-                                # case the old "len==2/len==1" special case
-                                # missed: a (1,1) scalar times an (8,) vector
-                                # (e.g. scaling a bias gradient by a learning
-                                # rate) used to hit neither branch below and
-                                # fail with a false shape mismatch.
-                                output_shape = shape2
-                            elif _is_scalar_shape(shape2):
-                                output_shape = shape1
-                            elif len(shape1) == 2 and len(shape2) == 1:
-                                if shape1[0] == shape2[0] or shape1[1] == shape2[0]:
-                                    output_shape = shape1
-                                else:
-                                    tensorlang.print(message=_shape_error(
-                                        expr['type'], name, shape1, shape2, arg_names,
-                                        hint=_MATRIX_VECTOR_HINT))
-                                    return False, env
-                            elif len(shape2) == 2 and len(shape1) == 1:
-                                if shape2[0] == shape1[0] or shape2[1] == shape1[0]:
-                                    output_shape = shape2
-                                else:
-                                    tensorlang.print(message=_shape_error(
-                                        expr['type'], name, shape1, shape2, arg_names,
-                                        hint=_MATRIX_VECTOR_HINT))
-                                    return False, env
+                    if len(shape2) == 0:
+                        output_shape = shape1
+                    else:
+                        output_shape = []
+                        for d1, d2 in zip(shape1[-len(shape2):], shape2):
+                            if d1 == d2 or d2 == 1:
+                                output_shape.append(d1)
                             else:
-                                ndim = max(len(shape1), len(shape2))
-                                padded_shape1 = (1,) * (ndim - len(shape1)) + shape1
-                                padded_shape2 = (1,) * (ndim - len(shape2)) + shape2
-                                
-                                output_shape = []
-                                for d1, d2 in zip(padded_shape1, padded_shape2):
-                                    if d1 == d2:
-                                        output_shape.append(d1)
-                                    elif d1 == 1:
-                                        output_shape.append(d2)
-                                    elif d2 == 1:
-                                        output_shape.append(d1)
-                                    else:
-                                        tensorlang.print(message=_shape_error(
-                                            expr['type'], name, shape1, shape2, arg_names,
-                                            hint=_ELEMENTWISE_HINT))
-                                        return False, env
-                                
-                                output_shape = tuple(output_shape)
-                            
-                            env[name] = {'dtype': 'f32', 'shape': output_shape}
-                            if DEBUG_INFO:
-                                print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
-
-                        elif expr['type'] in ['greater', 'less', 'equal']:
-                            shape1, shape2 = args[0]['shape'], args[1]['shape']
-                            orig_shape1, orig_shape2 = shape1, shape2  # for error messages
-                            if len(shape1) < len(shape2):
-                                shape1, shape2 = shape2, shape1
-                            if len(shape2) == 0:
-                                output_shape = shape1
-                            else:
-                                output_shape = []
-                                for d1, d2 in zip(shape1[-len(shape2):], shape2):
-                                    if d1 == d2 or d2 == 1:
-                                        output_shape.append(d1)
-                                    else:
-                                        tensorlang.print(message=_shape_error(
-                                            expr['type'], name, orig_shape1, orig_shape2, arg_names,
-                                            hint=_ELEMENTWISE_HINT))
-                                        return False, env
-                                output_shape = shape1[:-len(shape2)] + tuple(output_shape)
-                            env[name] = {'dtype': 'f32', 'shape': output_shape}
-                            if DEBUG_INFO:
-                                tensorlang.print(message=f"[TYPE CHECKER] Type {expr['type']} assigned for {name}: {env[name]}")
-
-                        elif expr['type'] == 'linear':
-                            if len(args) != 3:
-                                tensorlang.print(message="[TYPE CHECKER] error: Linear requires exactly 3 arguments")
+                                tensorlang.print(message=_shape_error(
+                                    expr["type"], name, orig_shape1, orig_shape2, arg_names,
+                                    hint=_ELEMENTWISE_HINT))
                                 return False, env
-                            
-                            input_tensor, weight_tensor, bias_tensor = args
-                            input_shape = input_tensor['shape']
-                            weight_shape = weight_tensor['shape']
-                            bias_shape = bias_tensor['shape']
-                            
-                            if len(input_shape) == 1:
-                                in_features = input_shape[0]
-                                if len(weight_shape) != 2 or weight_shape[0] != in_features:
-                                    tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
-                                    return False, env
-                                out_features = weight_shape[1]
-                                if len(bias_shape) != 1 or bias_shape[0] != out_features:
-                                    tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
-                                    return False, env
-                                output_shape = (out_features,)
-                                
-                            elif len(input_shape) == 2:
-                                batch_size, in_features = input_shape
-                                if len(weight_shape) != 2 or weight_shape[0] != in_features:
-                                    tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
-                                    return False, env
-                                out_features = weight_shape[1]
-                                if len(bias_shape) != 1 or bias_shape[0] != out_features:
-                                    tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
-                                    return False, env
-                                output_shape = (batch_size, out_features)
-                            else:
-                                tensorlang.print(message="[TYPE CHECKER] error: Linear input must be 1D or 2D tensor")
-                                return False, env
-                            
-                            env[name] = {'dtype': 'f32', 'shape': output_shape}
-                            if DEBUG_INFO:
-                                print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                        output_shape = shape1[:-len(shape2)] + tuple(output_shape)
 
-                        elif expr['type'] in ['cross_entropy', 'mse_loss']:
-                            if len(args) != 2:
-                                tensorlang.print(message=f"[TYPE CHECKER] error: {expr['type']} requires exactly 2 arguments")
-                                return False, env
-                            
-                            predictions_tensor, targets_tensor = args
-                            pred_shape = predictions_tensor['shape']
-                            target_shape = targets_tensor['shape']
-                            
-                            if expr['type'] == 'cross_entropy':
-                                if len(pred_shape) == 2:
-                                    batch_size, _num_classes = pred_shape
-                                    
-                                    if len(target_shape) == 1 and target_shape[0] == batch_size or len(target_shape) == 2 and target_shape == pred_shape:
-                                        output_shape = ()
-                                    else:
-                                        tensorlang.print(message="[TYPE CHECKER] error: Cross entropy target shape incompatible")
-                                        return False, env
-                                else:
-                                    tensorlang.print(message="[TYPE CHECKER] error: Cross entropy predictions must be 2D")
-                                    return False, env
-                                    
-                            elif expr['type'] == 'mse_loss':
-                                if pred_shape != target_shape:
-                                    tensorlang.print(message="[TYPE CHECKER] error: MSE loss shape mismatch")
-                                    return False, env
-                                output_shape = ()
-                            
-                            env[name] = {'dtype': 'f32', 'shape': output_shape}
-                            if DEBUG_INFO:
-                                print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    if DEBUG_INFO:
+                        tensorlang.print(message=f"[TYPE CHECKER] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
 
-            else:
-                tensorlang.print(message=f"[TYPE CHECKER] error: Unrecognized expr type for {name}: {expr['type']}")
+                if expr["type"] == "linear":
+                    if len(args) != 3:
+                        tensorlang.print(message="[TYPE CHECKER] error: Linear requires exactly 3 arguments")
+                        return False, env
+
+                    input_tensor, weight_tensor, bias_tensor = args
+                    input_shape = input_tensor["shape"]
+                    weight_shape = weight_tensor["shape"]
+                    bias_shape = bias_tensor["shape"]
+
+                    if len(input_shape) == 1:
+                        in_features = input_shape[0]
+                        if len(weight_shape) != 2 or weight_shape[0] != in_features:
+                            tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
+                            return False, env
+                        out_features = weight_shape[1]
+                        if len(bias_shape) != 1 or bias_shape[0] != out_features:
+                            tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
+                            return False, env
+                        output_shape = (out_features,)
+
+                    elif len(input_shape) == 2:
+                        batch_size, in_features = input_shape
+                        if len(weight_shape) != 2 or weight_shape[0] != in_features:
+                            tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
+                            return False, env
+                        out_features = weight_shape[1]
+                        if len(bias_shape) != 1 or bias_shape[0] != out_features:
+                            tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
+                            return False, env
+                        output_shape = (batch_size, out_features)
+
+                    else:
+                        tensorlang.print(message="[TYPE CHECKER] error: Linear input must be 1D or 2D tensor")
+                        return False, env
+
+                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    if DEBUG_INFO:
+                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
+
+                if expr["type"] in ("cross_entropy", "mse_loss"):
+                    if len(args) != 2:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: {expr['type']} requires exactly 2 arguments")
+                        return False, env
+
+                    predictions_tensor, targets_tensor = args
+                    pred_shape = predictions_tensor["shape"]
+                    target_shape = targets_tensor["shape"]
+
+                    if expr["type"] == "cross_entropy":
+                        if len(pred_shape) != 2:
+                            tensorlang.print(message="[TYPE CHECKER] error: Cross entropy predictions must be 2D")
+                            return False, env
+                        batch_size, _num_classes = pred_shape
+                        if not (
+                            (len(target_shape) == 1 and target_shape[0] == batch_size)
+                            or (len(target_shape) == 2 and target_shape == pred_shape)
+                        ):
+                            tensorlang.print(message="[TYPE CHECKER] error: Cross entropy target shape incompatible")
+                            return False, env
+                        output_shape = ()
+
+                    else:
+                        if pred_shape != target_shape:
+                            tensorlang.print(message="[TYPE CHECKER] error: MSE loss shape mismatch")
+                            return False, env
+                        output_shape = ()
+
+                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    if DEBUG_INFO:
+                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
+
+                tensorlang.print(message=f"[TYPE CHECKER] error: Unhandled operation '{expr['type']}' for {name}")
                 return False, env
+
+            tensorlang.print(message=f"[TYPE CHECKER] error: Unrecognized expr type for {name}: {expr.get('type') if isinstance(expr, dict) else expr}")
+            return False, env
 
     # ================================================================
     # PASS 2: Register gradient types for backward statements
     # ================================================================
     if DEBUG_MODE:
         tensorlang.print(message=f"[TYPE CHECKER] Starting PASS 2, AST has {len(ast)} nodes")
+
     backward_count = 0
     for node in ast:
-        if node['type'] == 'backward':
-            backward_count += 1
-            loss_name = node['loss_tensor']
-            
-            if DEBUG_MODE:
-                tensorlang.print(message=f"[TYPE CHECKER] Found backward statement for '{loss_name}'")
-                tensorlang.print(message=f"[TYPE CHECKER] Processing backward({loss_name})")
-            
-            # Add gradient types for all requires_grad tensors
-            requires_grad_count = 0
-            for prev_node in ast:
-                if prev_node['type'] == 'let':
-                    requires_grad = prev_node.get('requires_grad', False)
-                    
-                    if requires_grad:
-                        requires_grad_count += 1
-                        tensor_name = prev_node['name']
+        if node.get("type") != "backward":
+            continue
 
-                        if DEBUG_MODE:
-                            tensorlang.print(message=f"[TYPE CHECKER] Found requires_grad tensor: '{tensor_name}'")
-                        
-                        if tensor_name in env:
-                            grad_name = f"{tensor_name}_grad"
-                            env[grad_name] = {
-                                'dtype': env[tensor_name]['dtype'],
-                                'shape': env[tensor_name]['shape']
-                            }
-                            
-                            if DEBUG_MODE:
-                                tensorlang.print(message=f"[TYPE CHECKER] Added gradient type: {grad_name} = {env[grad_name]}")
-                                tensorlang.print(message=f"[TYPE CHECKER] Registered gradient type: {grad_name}: {env[grad_name]}")
-                        else:
-                            tensorlang.print(message=f"[TYPE CHECKER] ERROR: '{tensor_name}' not in env!")
-            if DEBUG_MODE:
-                tensorlang.print(message=f"[TYPE CHECKER] Found {requires_grad_count} requires_grad tensors")
+        backward_count += 1
+        loss_name = node.get("loss_tensor")
 
+        if DEBUG_MODE:
+            tensorlang.print(message=f"[TYPE CHECKER] Found backward statement for '{loss_name}'")
+
+        requires_grad_count = 0
+        for prev_node in ast:
+            if prev_node.get("type") != "let":
+                continue
+
+            if not prev_node.get("requires_grad", False):
+                continue
+
+            requires_grad_count += 1
+            tensor_name = prev_node["name"]
+
+            if DEBUG_MODE:
+                tensorlang.print(message=f"[TYPE CHECKER] Found requires_grad tensor: '{tensor_name}'")
+
+            if tensor_name in env:
+                grad_name = f"{tensor_name}_grad"
+                env[grad_name] = {
+                    "dtype": env[tensor_name]["dtype"],
+                    "shape": env[tensor_name]["shape"],
+                }
+                if DEBUG_MODE:
+                    tensorlang.print(message=f"[TYPE CHECKER] Registered gradient type: {grad_name}: {env[grad_name]}")
+            else:
+                tensorlang.print(message=f"[TYPE CHECKER] ERROR: '{tensor_name}' not in env!")
+
+        if DEBUG_MODE:
+            tensorlang.print(message=f"[TYPE CHECKER] Found {requires_grad_count} requires_grad tensors")
 
     if DEBUG_MODE:
         tensorlang.print(message=f"[TYPE CHECKER] Found {backward_count} backward statements")
         tensorlang.print(message=f"[TYPE CHECKER] Final environment keys: {list(env.keys())}")
+
     return True, env
