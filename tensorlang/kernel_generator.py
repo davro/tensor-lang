@@ -2535,59 +2535,131 @@ extern "C" void launch_adam_update_{name}(
         return kernel, ('adam_update', name, param_name, grad_name, size)
 
 
-    # ================================================================
-    # Fused elementwise chain
-    # ================================================================
-    def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size):
-        """Generate a single kernel for an elementwise op chain.
+    # # ================================================================
+    # # Fused elementwise chain
+    # # ================================================================
+    # def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size):
+        # """Generate a single kernel for an elementwise op chain.
 
-        chain: list of (op_type, out_name, [arg_names...])
-        """
+        # chain: list of (op_type, out_name, [arg_names...])
+        # """
+        # value_map = {}
+        # for idx, a in enumerate(external_inputs):
+            # value_map[a] = ("in", idx)
+        # for idx, o in enumerate(outputs):
+            # value_map[o] = ("out", idx)
+
+        # def resolve(arg):
+            # kind, i = value_map[arg]
+            # if kind == "in":
+                # return f"in{i}[idx]"
+            # return f"r{i}"
+
+        # param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
+        # param_parts += [f"float* out{i}" for i in range(len(outputs))]
+        # param_parts.append("int size")
+        # param_str = ", ".join(param_parts)
+
+        # body_lines = ["int idx = blockIdx.x * blockDim.x + threadIdx.x;", "if (idx < size) {"]
+        # for oi, (op, _out, args) in enumerate(chain):
+            # if op in ("add", "minus", "mult", "div"):
+                # sym = {"add": "+", "minus": "-", "mult": "*", "div": "/"}[op]
+                # expr = f"{resolve(args[0])} {sym} {resolve(args[1])}"
+            # elif op == "relu":
+                # expr = f"fmaxf(0.0f, {resolve(args[0])})"
+            # elif op == "sigmoid":
+                # expr = f"1.0f / (1.0f + expf(-{resolve(args[0])}))"
+            # elif op == "tanh":
+                # expr = f"tanhf({resolve(args[0])})"
+            # elif op == "gelu":
+                # expr = f"0.5f * {resolve(args[0])} * (1.0f + erff({resolve(args[0])} * 0.70710678f))"
+            # elif op == "swish":
+                # expr = f"{resolve(args[0])} / (1.0f + expf(-{resolve(args[0])}))"
+            # else:
+                # expr = resolve(args[0])
+            # body_lines.append(f"    float r{oi} = {expr};")
+        # for oi in range(len(outputs)):
+            # body_lines.append(f"    out{oi}[idx] = r{oi};")
+        # body_lines.append("}")
+
+        # launch_args = ", ".join(
+            # [f"in{i}" for i in range(len(external_inputs))]
+            # + [f"out{i}" for i in range(len(outputs))]
+            # + ["size"]
+        # )
+        # kernel = f"""
+# __global__ void fused_elementwise_kernel_{name}({param_str}) {{
+    # {chr(10).join(body_lines)}
+# }}
+# extern "C" void launch_fused_elementwise_{name}({param_str}) {{
+    # dim3 block(256);
+    # dim3 grid((size + block.x - 1) / block.x);
+    # fused_elementwise_kernel_{name}<<<grid, block>>>({launch_args});
+    # cudaDeviceSynchronize();
+    # {self.cuda_debug()}
+# }}
+# """
+        # kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size)
+        # return kernel, kernel_info
+
+
+    # ================================================================
+    # Fused elementwise chain (broadcast-aware)
+    # ================================================================
+    def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size,
+                          broadcast=False, input_shapes=None, output_shape=None):
         value_map = {}
         for idx, a in enumerate(external_inputs):
             value_map[a] = ("in", idx)
         for idx, o in enumerate(outputs):
             value_map[o] = ("out", idx)
 
-        def resolve(arg):
+        def resolve_fast(arg):
             kind, i = value_map[arg]
             if kind == "in":
                 return f"in{i}[idx]"
             return f"r{i}"
 
-        param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
-        param_parts += [f"float* out{i}" for i in range(len(outputs))]
-        param_parts.append("int size")
-        param_str = ", ".join(param_parts)
+        def resolve_bc(arg):
+            kind, i = value_map[arg]
+            if kind == "in":
+                return f"in{i}[in{i}_idx]"
+            return f"r{i}"
 
-        body_lines = ["int idx = blockIdx.x * blockDim.x + threadIdx.x;", "if (idx < size) {"]
-        for oi, (op, _out, args) in enumerate(chain):
-            if op in ("add", "minus", "mult", "div"):
-                sym = {"add": "+", "minus": "-", "mult": "*", "div": "/"}[op]
-                expr = f"{resolve(args[0])} {sym} {resolve(args[1])}"
-            elif op == "relu":
-                expr = f"fmaxf(0.0f, {resolve(args[0])})"
-            elif op == "sigmoid":
-                expr = f"1.0f / (1.0f + expf(-{resolve(args[0])}))"
-            elif op == "tanh":
-                expr = f"tanhf({resolve(args[0])})"
-            elif op == "gelu":
-                expr = f"0.5f * {resolve(args[0])} * (1.0f + erff({resolve(args[0])} * 0.70710678f))"
-            elif op == "swish":
-                expr = f"{resolve(args[0])} / (1.0f + expf(-{resolve(args[0])}))"
-            else:
-                expr = resolve(args[0])
-            body_lines.append(f"    float r{oi} = {expr};")
-        for oi in range(len(outputs)):
-            body_lines.append(f"    out{oi}[idx] = r{oi};")
-        body_lines.append("}")
+        _OP_EXPR = {
+            "add": lambda a, b: f"{a} + {b}",
+            "minus": lambda a, b: f"{a} - {b}",
+            "mult": lambda a, b: f"{a} * {b}",
+            "div": lambda a, b: f"{a} / {b}",
+            "relu": lambda a, _b: f"fmaxf(0.0f, {a})",
+            "sigmoid": lambda a, _b: f"1.0f / (1.0f + expf(-{a}))",
+            "tanh": lambda a, _b: f"tanhf({a})",
+            "gelu": lambda a, _b: f"0.5f * {a} * (1.0f + erff({a} * 0.70710678f))",
+            "swish": lambda a, _b: f"{a} / (1.0f + expf(-{a}))",
+        }
 
-        launch_args = ", ".join(
-            [f"in{i}" for i in range(len(external_inputs))]
-            + [f"out{i}" for i in range(len(outputs))]
-            + ["size"]
-        )
-        kernel = f"""
+        if not broadcast:
+            param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
+            param_parts += [f"float* out{i}" for i in range(len(outputs))]
+            param_parts.append("int size")
+            param_str = ", ".join(param_parts)
+
+            body_lines = ["int idx = blockIdx.x * blockDim.x + threadIdx.x;", "if (idx < size) {"]
+            for oi, (op, _out, args) in enumerate(chain):
+                a0 = resolve_fast(args[0])
+                a1 = resolve_fast(args[1]) if len(args) > 1 else a0
+                expr = _OP_EXPR.get(op, lambda x, _y: x)(a0, a1)
+                body_lines.append(f"    float r{oi} = {expr};")
+            for oi in range(len(outputs)):
+                body_lines.append(f"    out{oi}[idx] = r{oi};")
+            body_lines.append("}")
+
+            launch_args = ", ".join(
+                [f"in{i}" for i in range(len(external_inputs))]
+                + [f"out{i}" for i in range(len(outputs))]
+                + ["size"]
+            )
+            kernel = f"""
 __global__ void fused_elementwise_kernel_{name}({param_str}) {{
     {chr(10).join(body_lines)}
 }}
@@ -2599,5 +2671,98 @@ extern "C" void launch_fused_elementwise_{name}({param_str}) {{
     {self.cuda_debug()}
 }}
 """
-        kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size)
+            kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size, False, None, None)
+            return kernel, kernel_info
+
+        # ---------- broadcast path ----------
+        ndim = len(output_shape)
+        padded_in_shapes = [(1,) * (ndim - len(s)) + tuple(s) for s in input_shapes]
+
+        # Per-input index mode: mirror the unfused binary_broadcast heuristic
+        # (row broadcast when first dims match) and fall back to general
+        # NumPy broadcast otherwise.
+        def _input_mode(inp_shape):
+            if tuple(inp_shape) == tuple(output_shape):
+                return "identity"
+            if len(output_shape) == 2 and len(inp_shape) == 1:
+                if inp_shape[0] == output_shape[0]:
+                    return "row"
+                if inp_shape[0] == output_shape[1]:
+                    return "col"
+            return "general"
+
+        modes = [_input_mode(s) for s in input_shapes]
+        need_helper = any(m == "general" for m in modes)
+
+        if need_helper and not self._broadcast_helper_emitted:
+            broadcast_helper = """
+__device__ int compute_broadcast_index(int linear_idx, const int* out_shape, const int* in_shape, int ndim) {
+    int in_idx = 0;
+    int temp_idx = linear_idx;
+    int out_stride = 1;
+    for (int i = ndim - 1; i >= 0; i--) {
+        int out_coord = temp_idx % out_shape[i];
+        temp_idx /= out_shape[i];
+        int in_coord = (in_shape[i] == 1) ? 0 : out_coord;
+        in_idx += in_coord * out_stride;
+        if (i > 0) {
+            out_stride *= in_shape[i];
+        }
+    }
+    return in_idx;
+}
+"""
+            self._broadcast_helper_emitted = True
+        else:
+            broadcast_helper = ""
+
+        param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
+        param_parts += [f"float* out{i}" for i in range(len(outputs))]
+        for i in range(len(external_inputs)):
+            param_parts.append(f"int* in{i}_shape")
+        param_parts.append("int* out_shape")
+        param_parts.append("int ndim")
+        param_parts.append("int size")
+        param_str = ", ".join(param_parts)
+
+        body_lines = ["int idx = blockIdx.x * blockDim.x + threadIdx.x;", "if (idx < size) {"]
+        for i, mode in enumerate(modes):
+            if mode == "identity":
+                body_lines.append(f"    int in{i}_idx = idx;")
+            elif mode == "row":
+                body_lines.append(f"    int in{i}_idx = idx / out_shape[1];")
+            elif mode == "col":
+                body_lines.append(f"    int in{i}_idx = idx % out_shape[1];")
+            else:
+                body_lines.append(f"    int in{i}_idx = compute_broadcast_index(idx, out_shape, in{i}_shape, ndim);")
+        for oi, (op, _out, args) in enumerate(chain):
+            a0 = resolve_bc(args[0])
+            a1 = resolve_bc(args[1]) if len(args) > 1 else a0
+            expr = _OP_EXPR.get(op, lambda x, _y: x)(a0, a1)
+            body_lines.append(f"    float r{oi} = {expr};")
+        for oi in range(len(outputs)):
+            body_lines.append(f"    out{oi}[idx] = r{oi};")
+        body_lines.append("}")
+
+        launch_args = ", ".join(
+            [f"in{i}" for i in range(len(external_inputs))]
+            + [f"out{i}" for i in range(len(outputs))]
+            + [f"in{i}_shape" for i in range(len(external_inputs))]
+            + ["out_shape", "ndim", "size"]
+        )
+
+        kernel = broadcast_helper + f"""
+__global__ void fused_elementwise_kernel_{name}({param_str}) {{
+    {chr(10).join(body_lines)}
+}}
+extern "C" void launch_fused_elementwise_{name}({param_str}) {{
+    dim3 block(256);
+    dim3 grid((size + block.x - 1) / block.x);
+    fused_elementwise_kernel_{name}<<<grid, block>>>({launch_args});
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size, True,
+                       [list(s) for s in padded_in_shapes], list(output_shape))
         return kernel, kernel_info

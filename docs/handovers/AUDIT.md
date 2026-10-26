@@ -1,6 +1,9 @@
+Here is the complete updated `AUDIT.md` with broadcasting-aware fusion reflected.
+
+```markdown
 # TensorLang audit: updated
 
-The audit's critical correctness items are now resolved. The codebase has **129/129 `.tl` tests** and **25/25 Python regression tests** passing (including the scoped-kernel tests), and `ruff check tensorlang/` is clean.
+The audit's critical correctness items are now resolved. The codebase has **133/133 `.tl` tests** and **25/25 Python regression tests** passing (including the scoped-kernel tests), and `ruff check tensorlang/` is clean.
 
 ## Completed from the original audit
 
@@ -23,7 +26,7 @@ The audit's critical correctness items are now resolved. The codebase has **129/
 * Scoped kernel names implemented for loop bodies
 * `matmul` replaced with a cuBLAS-backed implementation (preserves API, shapes, autograd, scoped kernel names)
 * Built-in optimizers `sgd` and `adam` with compiler-managed state (multi-parameter, gradient zeroing/accumulation, pointer-swap rebinding)
-* Elementwise kernel fusion for non-broadcast elementwise chains (add→relu, minus→relu, add→sigmoid, add→tanh, gelu, swish); fused vs. unfused outputs and gradients verified identical
+* Elementwise kernel fusion for elementwise chains (add→relu, minus→relu, add→sigmoid, add→tanh, gelu, swish); supports non-broadcast and broadcasting modes (row/column/general broadcast); fused vs. unfused outputs and gradients verified bit-identical
 
 ## Remaining limitations / future work
 
@@ -47,7 +50,7 @@ The audit's critical correctness items are now resolved. The codebase has **129/
 
 ### Performance and architecture
 
-* Kernel fusion is limited to non-broadcast elementwise chains (broadcasting fusion is a follow-up)
+* Kernel fusion is limited to elementwise chains; reductions and matmul are not fused
 * No zero-copy Python/PyTorch interop yet
 * Tier-B multi-GPU single-program execution is not implemented
 * Mixed precision is not implemented or validated
@@ -68,10 +71,19 @@ The audit's critical correctness items are now resolved. The codebase has **129/
 
 1. Finish shape-mismatch messages (`linear`, `cross_entropy`, `mse_loss`, `reshape`, `concat`) and validate annotated lets in the type checker
 2. Expand for-loop body coverage
-3. Kernel fusion for broadcasting elementwise chains
-4. Zero-copy Python/PyTorch interop
-5. Mixed precision (FP16/BF16) with cuBLAS tensor cores
+3. Refactor `compiler.py` into codegen/execution/io mixins
+4. For-loop limitations: `save()` in loops, alias resolution, nested loops
+5. Zero-copy Python/PyTorch interop
+6. Mixed precision (FP16/BF16) with cuBLAS tensor cores
 
 ## Bottom line
 
-TensorLang is now in a much more consistent state: grammar, type checker, kernel generator, compiler, autograd, tests, lint, documentation, and scoped kernel names are aligned for the supported feature set. cuBLAS-backed matmul and first-class SGD/Adam optimizers make it usable for real training loops. Elementwise kernel fusion now removes per-op launch overhead for common activation chains, with fused and unfused results verified bit-identical. The next milestone should be **performance (broadcasting fusion) and usability (interop)**, not breadth.
+TensorLang is now in a much more consistent state: grammar, type checker, kernel generator, compiler, autograd, tests, lint, documentation, and scoped kernel names are aligned for the supported feature set. cuBLAS-backed matmul and first-class SGD/Adam optimizers make it usable for real training loops. Elementwise kernel fusion — including broadcasting chains (row/column/general modes) — now removes per-op launch overhead for common activation patterns, with fused and unfused results verified bit-identical. The next milestone should be **compiler maintainability (refactor) and training-loop completeness**, then interop and mixed precision.
+```
+
+### Key changes from the previous version
+- Test count bumped to **133/133** (added `fusion_broadcast.tl`).
+- Completed list: fusion now explicitly mentions broadcasting support (row/column/general modes) and bit-identical verification.
+- Performance/architecture: replaced the stale "limited to non-broadcast" note with "limited to elementwise chains; reductions and matmul are not fused".
+- Recommended next focus: added the `compiler.py` refactor and for-loop limitations (`save()`, aliases, nested loops) ahead of interop/mixed precision.
+- Bottom line: updated to reflect broadcasting fusion and the new priority order.

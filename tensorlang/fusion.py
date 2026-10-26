@@ -2,9 +2,11 @@
 """Conservative elementwise kernel fusion pass.
 
 Fuses consecutive elementwise unary/binary let-bindings into a single
-``fused_elementwise`` node.  The pass is purely a codegen optimization:
-autograd still records each original op, and the fused kernel writes every
-intermediate output so the backward pass keeps working.
+``fused_elementwise`` node.  Supports both non-broadcast and broadcasting
+chains (broadcasting fusion uses per-element index remapping).  The pass is
+purely a codegen optimization: autograd still records each original op, and
+the fused kernel writes every intermediate output so the backward pass
+keeps working.
 """
 
 import os
@@ -28,7 +30,6 @@ def _is_let_expr(node):
 
 
 def _expr_args(expr):
-    """Return the arg-name list for an elementwise expr, or None."""
     if not isinstance(expr, dict):
         return None
     if expr.get("type") in _FUSIBLE and isinstance(expr.get("args"), list):
@@ -44,8 +45,18 @@ def _first_arg_name(arg):
     return None
 
 
-def _no_broadcast(node, env):
-    """True only if every input arg has the same shape as the output."""
+def _can_broadcast(shape1, shape2):
+    ndim = max(len(shape1), len(shape2))
+    s1 = (1,) * (ndim - len(shape1)) + tuple(shape1)
+    s2 = (1,) * (ndim - len(shape2)) + tuple(shape2)
+    for d1, d2 in zip(s1, s2):
+        if d1 != d2 and d1 != 1 and d2 != 1:
+            return False
+    return True
+
+
+def _broadcast_ok(node, env):
+    """True if every input can broadcast to the output shape."""
     expr = node.get("expr", {})
     out_shape = tuple(env[node["name"]]["shape"])
     args = expr.get("args", [])
@@ -53,7 +64,7 @@ def _no_broadcast(node, env):
         name = a if isinstance(a, str) else (a.get("name") if isinstance(a, dict) else None)
         if name is None or name not in env:
             return False
-        if tuple(env[name]["shape"]) != out_shape:
+        if not _can_broadcast(env[name]["shape"], out_shape):
             return False
     return True
 
@@ -73,7 +84,7 @@ def fuse_elementwise_chains(nodes, env):
             continue
 
         expr0 = nodes[i]["expr"]
-        if expr0.get("type") not in _FUSIBLE or not _no_broadcast(nodes[i], env):
+        if expr0.get("type") not in _FUSIBLE or not _broadcast_ok(nodes[i], env):
             result.append(nodes[i])
             i += 1
             continue
@@ -87,7 +98,7 @@ def fuse_elementwise_chains(nodes, env):
             nxt_expr = nxt["expr"]
             if nxt_expr.get("type") not in _FUSIBLE:
                 break
-            if not _no_broadcast(nxt, env):
+            if not _broadcast_ok(nxt, env):
                 break
             args = _expr_args(nxt_expr)
             if not args:
@@ -109,11 +120,22 @@ def fuse_elementwise_chains(nodes, env):
                 e = node["expr"]
                 args = [a if isinstance(a, str) else a.get("name") for a in e["args"]]
                 ops.append((e["type"], node["name"], args))
+
+            final_name = chain[-1]["name"]
+            final_shape = tuple(env[final_name]["shape"])
+            broadcast = False
+            for node in chain:
+                e = node["expr"]
+                for a in e["args"]:
+                    name = a if isinstance(a, str) else a.get("name")
+                    if tuple(env[name]["shape"]) != final_shape:
+                        broadcast = True
+
             fused_node = {
                 "type": "let",
-                "name": chain[-1]["name"],
+                "name": final_name,
                 "ty": chain[-1].get("ty"),
-                "expr": {"type": "fused_elementwise", "chain": ops},
+                "expr": {"type": "fused_elementwise", "chain": ops, "broadcast": broadcast},
                 "requires_grad": chain[-1].get("requires_grad", False),
                 "tree": None,
             }
@@ -124,5 +146,3 @@ def fuse_elementwise_chains(nodes, env):
             i += 1
 
     return result
-
-

@@ -419,11 +419,40 @@ class TensorCompiler:
 
         op_type = kernel_info[0]
 
+        # if op_type == "fused_elementwise":
+            # _, kernel_func_name, chain, external_inputs, outputs, size = kernel_info
+            # launch_args = [c_void_p(int(gpu_allocs[n])) for n in external_inputs] + \
+                          # [c_void_p(int(gpu_allocs[n])) for n in outputs] + [c_int(size)]
+            # getattr(lib, f"launch_fused_elementwise_{kernel_func_name}")(*launch_args)
+            # for out_name in outputs:
+                # self._save_kernel_result(out_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            # return
+
         if op_type == "fused_elementwise":
-            _, kernel_func_name, chain, external_inputs, outputs, size = kernel_info
+            (_, kernel_func_name, chain, external_inputs, outputs, size,
+             broadcast, input_shapes, output_shape) = kernel_info
             launch_args = [c_void_p(int(gpu_allocs[n])) for n in external_inputs] + \
-                          [c_void_p(int(gpu_allocs[n])) for n in outputs] + [c_int(size)]
+                          [c_void_p(int(gpu_allocs[n])) for n in outputs]
+            shape_bufs = []
+            if broadcast:
+                ndim = len(output_shape)
+                padded_in = [(1,) * (ndim - len(s)) + tuple(s) for s in input_shapes]
+                for s in padded_in:
+                    arr = np.array(s, dtype=np.int32)
+                    buf = cuda.mem_alloc(ndim * np.int32().nbytes)
+                    cuda.memcpy_htod(buf, arr)
+                    shape_bufs.append(buf)
+                    launch_args.append(c_void_p(int(buf)))
+                out_arr = np.array(output_shape, dtype=np.int32)
+                out_buf = cuda.mem_alloc(ndim * np.int32().nbytes)
+                cuda.memcpy_htod(out_buf, out_arr)
+                shape_bufs.append(out_buf)
+                launch_args.append(c_void_p(int(out_buf)))
+                launch_args.append(c_int(ndim))
+            launch_args.append(c_int(size))
             getattr(lib, f"launch_fused_elementwise_{kernel_func_name}")(*launch_args)
+            for buf in shape_bufs:
+                buf.free()
             for out_name in outputs:
                 self._save_kernel_result(out_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
             return
@@ -965,6 +994,29 @@ class TensorCompiler:
         self._kernel_name_map[kernel_name] = param_name
         return kernel_str, kernel_info
 
+    # def _kernel_for_fused_expr(self, name, expr, env, generator, kernel_name=None):
+        # kernel_name = kernel_name or name
+        # chain = expr["chain"]
+        # for op_type, out_name, args in chain:
+            # self._record_operation(op_type, out_name, list(args))
+        # final_name = chain[-1][1]
+        # shape = env[final_name]["shape"]
+        # size = int(np.prod([int(d) for d in shape])) if shape else 1
+        # outputs = [op[1] for op in chain]
+        # output_set = set(outputs)
+        # external_inputs = []
+        # seen = set()
+        # for op in chain:
+            # for a in op[2]:
+                # if a not in output_set and a not in seen:
+                    # seen.add(a)
+                    # external_inputs.append(a)
+        # kernel_str, kernel_info = generator.fused_elementwise(
+            # "fused_elementwise", kernel_name, chain, env, external_inputs, outputs, size
+        # )
+        # self._kernel_name_map[kernel_name] = final_name
+        # return kernel_str, kernel_info
+
     def _kernel_for_fused_expr(self, name, expr, env, generator, kernel_name=None):
         kernel_name = kernel_name or name
         chain = expr["chain"]
@@ -982,8 +1034,12 @@ class TensorCompiler:
                 if a not in output_set and a not in seen:
                     seen.add(a)
                     external_inputs.append(a)
+        broadcast = bool(expr.get("broadcast", False))
+        input_shapes = [list(env[a]["shape"]) for a in external_inputs] if broadcast else None
+        output_shape = list(shape) if broadcast else None
         kernel_str, kernel_info = generator.fused_elementwise(
-            "fused_elementwise", kernel_name, chain, env, external_inputs, outputs, size
+            "fused_elementwise", kernel_name, chain, env, external_inputs, outputs, size,
+            broadcast=broadcast, input_shapes=input_shapes, output_shape=output_shape,
         )
         self._kernel_name_map[kernel_name] = final_name
         return kernel_str, kernel_info

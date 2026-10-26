@@ -4,7 +4,7 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.4.0. Core suite: 129/129 tests passing.
+> **Status:** v0.4.0. Core suite: 133/133 tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
 > **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
 
@@ -46,7 +46,7 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
 * **Training loops** — `for` loops with `backward()` and pointer-swap weight rebinding
 * **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state
-* **Elementwise kernel fusion** — fuses simple elementwise chains (e.g. `add → relu`) into a single CUDA kernel
+* **Elementwise kernel fusion** — fuses elementwise chains (e.g. `add → relu`), including broadcasting cases, into a single CUDA kernel
 * **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
 * **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
 * **Extensible architecture** — clean separation of parsing, type checking, and code generation
@@ -74,7 +74,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Reverse-mode autograd for a defined subset of operations
 * Training loops with weight rebinding
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
-* Elementwise kernel fusion for non-broadcast elementwise chains (e.g. `add → relu`, `add → sigmoid`, `add → tanh`)
+* Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes)
 * Scoped kernel names for loop bodies
 * User-defined functions
 * File I/O: `load()`, `save()`
@@ -517,7 +517,7 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 Current performance characteristics:
 
 * Matrix multiplication is backed by cuBLAS (replacing the earlier shared-memory tiled kernel).
-* Elementwise chains such as `add → relu` are fused into a single CUDA kernel (non-broadcast cases).
+* Elementwise chains such as `add → relu` are fused into a single CUDA kernel, including broadcasting cases (row/column/general broadcast modes).
 * Training-loop weight updates use pointer swaps (no GPU memory copy between iterations).
 * Generated CUDA source is cached and reused when unchanged.
 * 4096×4096 matrix multiplication runs, but has not been benchmarked against cuBLAS or PyTorch.
@@ -630,9 +630,9 @@ App tests run sequentially.
 
 ### Medium Term
 
-* Kernel fusion for broadcasting elementwise chains (follow-up)
+* Refactor `compiler.py` into codegen/execution/io mixins
+* For-loop limitations: `save()` in loops, alias resolution, nested loops
 * Buffer pooling for long training runs
-* Nested loops
 * Hot reload in dev mode
 * Zero-copy Python/PyTorch interop
 
