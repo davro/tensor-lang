@@ -1,10 +1,11 @@
 # TensorLang audit: updated
 
-The audit's critical correctness items are now resolved. The codebase has **122/122 `.tl` tests** and **13/13 Python regression tests** passing (including the scoped-kernel tests), and `ruff check tensorlang/` is clean.
+The audit's critical correctness items are now resolved. The codebase has **122/122 `.tl` tests** and **25/25 Python regression tests** passing (including the scoped-kernel tests), and `ruff check tensorlang/` is clean.
 
 ## Completed from the original audit
 
 * Kernel library loaded by absolute path (fixes dlopen name collision across same-process compiles)
+* Regression tests assert shape-mismatch wording for the type checker and compiler (operation, tensor, operands, shapes)
 * Shape-mismatch messages name the op, the tensor being defined, both operands and their shapes (elementwise, comparison, matmul; type checker and compiler)
 * `TestRunner` marked `__test__ = False` so pytest no longer warns about collecting it
 * Broadcast `equal` dispatch fixed
@@ -53,7 +54,6 @@ The audit's critical correctness items are now resolved. The codebase has **122/
 
 * Hash-named `.so` per build, so recompiling edited source in one long-lived process can't pick up a stale library
 * Configurable cache directory (`cache_dir` argument or `TENSORLANG_CACHE`) so tests don't depend on `chdir`
-* Regression test for shape-error wording (compile an unannotated bad `add` and assert the message contains both shapes)
 * Regression test that compiles two different programs from different directories in one process and checks each exports its own symbols
 * `@EXPECT_FAILURE` checks exit code only
 * No subprocess timeout
