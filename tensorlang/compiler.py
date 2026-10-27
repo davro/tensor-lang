@@ -23,6 +23,8 @@ from tensorlang.constants import OPTIMIZER_NAMES
 from tensorlang.execution import ExecutionMixin
 from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.io import IOMixin
+from tensorlang.interop import InteropMixin
+from tensorlang.interop import InteropMixin
 from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.type_checker import _is_scalar_shape, type_checker
@@ -30,7 +32,7 @@ from tensorlang.type_checker import _is_scalar_shape, type_checker
 OPTIMIZER_NAMES = {"sgd", "adam", "sgd_update", "adam_update"}
 
 
-class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin):
+class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
     def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False):
         self.debug_mode = debug_mode
         self.debug_info = debug_info
@@ -144,6 +146,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin):
                 self.tensorlang.print(message=f"[COMPILER] Output Tensor: {output_tensor}")
 
             success, env = type_checker(ast, {}, self.debug_info, self.debug_mode)
+            self.env = env
+            self.env = env
 
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] TYPE CHECKER ENV:\n{env}")
@@ -153,6 +157,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin):
 
                 tensors = {}
                 gpu_allocs = {}
+                self.tensors = tensors
+                self.gpu_allocs = gpu_allocs
+                self.tensors = tensors
+                self.gpu_allocs = gpu_allocs
 
                 for node in ast:
                     if node.get("type") == "let" and node.get("requires_grad", False):

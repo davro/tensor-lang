@@ -630,6 +630,15 @@ class ExecutionMixin:
 
                 src_name = src_expr["name"]
 
+                # Guard 1: shape stability
+                if target in env and src_name in env:
+                    if tuple(env[target]["shape"]) != tuple(env[src_name]["shape"]):
+                        self.tensorlang.print(
+                            message=f"[COMPILER] for loop rebind: shape mismatch for '{target}': "
+                                    f"{env[target]['shape']} vs {env[src_name]['shape']}"
+                        )
+                        continue
+
                 if src_name not in gpu_allocs:
                     self.tensorlang.print(
                         message=f"[COMPILER] for loop rebind: '{src_name}' not in gpu_allocs"
