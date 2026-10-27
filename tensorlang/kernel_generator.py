@@ -20,7 +20,6 @@ class KernelGenerator:
         # multiple broadcast ops appear in the same program.
         self._broadcast_helper_emitted = False
 
-
     def _validate(self, kernel_type, op_type):
         """Validate the operation type and required parameters.
 
@@ -31,9 +30,6 @@ class KernelGenerator:
         Raises:
             ValueError: If kernel_type is not supported.
         """
-
-        # self.op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}
-        # self.supported_dtypes = {'float': 'float', 'double': 'double', 'int': 'int'}
 
         self.operation_signatures = {
             'elementwise': {
@@ -204,16 +200,12 @@ class KernelGenerator:
 """
         return cuda_code
 
-
-
-
     def cuda_debug(self):
         if self.DEBUG_MODE:
             cuda_debug = "CUDA_CHECK_ERROR();"            
         else:
             cuda_debug = "// DEBUG DISABLED"
         return cuda_debug
-
 
     # ================================================================
     # Generate Unary Operations Kernel
@@ -250,7 +242,6 @@ class KernelGenerator:
     }}
     """
         return kernel_template, (op_type, name, arg1, None, size)
-
 
     # ================================================================
     # Elementwise
@@ -359,7 +350,6 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, 
         """
             return kernel, (f'{op_type}_broadcast', name, arg1, arg2, rows, cols)
 
-
     # ================================================================
     # Binary 1D Broadcast (add, minus, mult, div)
     # ================================================================
@@ -392,7 +382,6 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) 
 }}
         """
         return kernel, (f'{op_type}_scalar', name, arg1, arg2, size)
-
 
     # ================================================================
     # Binary General Broadcast (add, minus, mult, div)
@@ -476,7 +465,6 @@ extern "C" void launch_{op_type}_{name}(
         return kernel, ('general_broadcast', op_type, name, arg1, arg2, 
                         padded_shape1, padded_shape2, output_shape, total_elements)
 
-
     # ================================================================
     # Fill 
     # ================================================================
@@ -507,148 +495,6 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
     #         operation=f"{op_value}",  # Use the constant value directly
     #         has_input=False
     #     )
-
-
-    # ================================================================
-    # MatMul
-    # ================================================================
-    # def matmul(self, op_type, name, arg1, arg2, m, n, p):
-
-        # self._validate(inspect.currentframe().f_code.co_name, op_type)
-
-        # kernel = f"""
-# __global__ void matmul_kernel_{name}(float* A, float* B, float* C, int M, int N, int P) {{
-    # int i = blockIdx.y * blockDim.y + threadIdx.y;
-    # int j = blockIdx.x * blockDim.x + threadIdx.x;
-    # if (i < M && j < P) {{
-        # float sum = 0.0;
-        # for (int k = 0; k < N; k++) {{
-            # sum += A[i * N + k] * B[k * P + j];
-        # }}
-        # C[i * P + j] = sum;
-    # }}
-# }}
-# extern "C" void launch_matmul_{name}(float* A, float* B, float* C, int M, int N, int P) {{
-    # dim3 block(16, 16);
-    # dim3 grid((P + block.x - 1) / block.x, (M + block.y - 1) / block.y);
-    # matmul_kernel_{name}<<<grid, block>>>(A, B, C, M, N, P);
-    # cudaDeviceSynchronize();
-    # {self.cuda_debug()}
-# }}
-# """
-        # return kernel, (op_type, name, arg1, arg2, m, n, p)
-
-
-    # # ================================================================
-    # # MatMul (tiled shared-memory)
-    # # ================================================================
-    # def matmul(self, op_type, name, arg1, arg2, m, n, p):
-
-        # self._validate(inspect.currentframe().f_code.co_name, op_type)
-
-        # kernel = f"""
-# __global__ void matmul_kernel_{name}(const float* A, const float* B, float* C,
-                                    # int M, int N, int P) {{
-    # __shared__ float As[16][16];
-    # __shared__ float Bs[16][16];
-
-    # int tx = threadIdx.x;
-    # int ty = threadIdx.y;
-
-    # int row = blockIdx.y * 16 + ty;
-    # int col = blockIdx.x * 16 + tx;
-
-    # float acc = 0.0f;
-    # int numTiles = (N + 15) / 16;
-
-    # for (int t = 0; t < numTiles; ++t) {{
-        # int aCol = t * 16 + tx;
-        # As[ty][tx] = (row < M && aCol < N)
-            # ? A[row * N + aCol]
-            # : 0.0f;
-
-        # int bRow = t * 16 + ty;
-        # Bs[ty][tx] = (bRow < N && col < P)
-            # ? B[bRow * P + col]
-            # : 0.0f;
-
-        # __syncthreads();
-
-        # #pragma unroll
-        # for (int k = 0; k < 16; ++k) {{
-            # acc += As[ty][k] * Bs[k][tx];
-        # }}
-
-        # __syncthreads();
-    # }}
-
-    # if (row < M && col < P) {{
-        # C[row * P + col] = acc;
-    # }}
-# }}
-# extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
-                                    # int M, int N, int P) {{
-    # dim3 block(16, 16);
-    # dim3 grid((P + 15) / 16, (M + 15) / 16);
-    # matmul_kernel_{name}<<<grid, block>>>(A, B, C, M, N, P);
-    # cudaDeviceSynchronize();
-    # {self.cuda_debug()}
-# }}
-# """
-        # return kernel, (op_type, name, arg1, arg2, m, n, p)
-
-
-    # # ================================================================
-    # # MatMul (cuBLAS-backed)
-    # # ================================================================
-    # def matmul(self, op_type, name, arg1, arg2, m, n, p):
-
-        # self._validate(inspect.currentframe().f_code.co_name, op_type)
-
-        # kernel = f"""
-# #include <stdio.h>
-# #include <cublas_v2.h>
-
-# static cublasHandle_t __tl_cublas_handle = nullptr;
-# static bool __tl_cublas_handle_created = false;
-
-# extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
-                                    # int M, int N, int P) {{
-    # if (!__tl_cublas_handle_created) {{
-        # cublasStatus_t create_status = cublasCreate(&__tl_cublas_handle);
-        # if (create_status != CUBLAS_STATUS_SUCCESS) {{
-            # fprintf(stderr, "TensorLang: cublasCreate failed: %d\\n", (int)create_status);
-            # return;
-        # }}
-        # __tl_cublas_handle_created = true;
-    # }}
-
-    # const float alpha = 1.0f;
-    # const float beta = 0.0f;
-
-    # // TensorLang stores row-major arrays. cuBLAS is column-major, so
-    # // compute C^T = B^T * A^T.
-    # cublasStatus_t status = cublasSgemm(
-        # __tl_cublas_handle,
-        # CUBLAS_OP_N, CUBLAS_OP_N,
-        # P, M, N,
-        # &alpha,
-        # B, P,
-        # A, N,
-        # &beta,
-        # C, P
-    # );
-
-    # if (status != CUBLAS_STATUS_SUCCESS) {{
-        # fprintf(stderr, "TensorLang: cublasSgemm failed: %d\\n", (int)status);
-    # }}
-
-    # cudaDeviceSynchronize();
-    # {self.cuda_debug()}
-# }}
-# """
-        # return kernel, (op_type, name, arg1, arg2, m, n, p)
-
 
     # ================================================================
     # MatMul (cuBLAS-backed)
@@ -701,7 +547,6 @@ extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
 """
         return kernel, (op_type, name, arg1, arg2, m, n, p)
 
-
     # ================================================================
     # ReLu
     # ================================================================
@@ -711,7 +556,6 @@ extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
             op_type, name, arg1, size, 
             operation="fmaxf(0.0f, input[idx])"
         )
-
 
     # ================================================================
     # GELU
@@ -743,7 +587,6 @@ extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
             operation="1.0f / (1.0f + expf(-input[idx]))"
         )
 
-
     # ================================================================
     # Tanh
     # ================================================================
@@ -753,7 +596,6 @@ extern "C" void launch_matmul_{name}(const float* A, const float* B, float* C,
             op_type, name, arg1, size, 
             operation="tanhf(input[idx])"
         )
-
 
     # ================================================================
     # Softmax
@@ -836,7 +678,6 @@ extern "C" void launch_softmax_{name}(float* input, float* output, {kernel_param
 """
         return kernel, kernel_info
 
-
     # ================================================================
     # Greater broadcast
     # ================================================================
@@ -883,7 +724,6 @@ extern "C" void launch_greater_{name}(float* A, float* B, float* C, int rows, in
 """
             return kernel, (f"{op_type}_broadcast", name, arg1, arg2, rows, cols)
 
-
     # ================================================================
     # Less / Less broadcast
     # ================================================================
@@ -927,7 +767,6 @@ extern "C" void launch_less_{name}(float* A, float* B, float* C, int rows, int c
 }}
 """
             return kernel, (f"{op_type}_broadcast", name, arg1, arg2, rows, cols)
-
 
     # ================================================================
     # Equal / Equal Broadcast
@@ -973,7 +812,6 @@ extern "C" void launch_equal_{name}(float* A, float* B, float* C, int rows, int 
 }}
 """
             return kernel, (f"{op_type}_broadcast", name, arg1, arg2, rows, cols)
-
 
     # ================================================================
     # sum
@@ -1077,7 +915,6 @@ extern "C" void launch_sum_{name}(float* input, float* output, int rows, int col
                 # kernels.append(('sum_axis0', name, tensor_name, None, rows, cols, axis))
                 # cuda_code += kernel
                 return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
-
 
     # ================================================================
     # mean
@@ -1184,124 +1021,6 @@ extern "C" void launch_mean_{name}(float* input, float* output, int rows, int co
                 # kernels.append(('mean_axis0', name, tensor_name, None, rows, cols, axis))
                 # cuda_code += kernel
                 return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
-
-
-#     # ================================================================
-#     # slice
-#     # ================================================================
-#     def slice(self, op_type, name, tensor_name, slice_specs, input_shape, output_shape):
-
-#         # For now, implement common 2D slicing cases
-#         if len(input_shape) == 2 and len(slice_specs) <= 2:
-#             rows, cols = int(input_shape[0]), int(input_shape[1])
-            
-#             # Parse slice specifications
-#             row_spec = slice_specs[0] if len(slice_specs) > 0 else {'type': 'full_slice'}
-#             col_spec = slice_specs[1] if len(slice_specs) > 1 else {'type': 'full_slice'}
-            
-#             # Calculate slice bounds
-#             if row_spec['type'] == 'slice':
-#                 row_start = row_spec.get('start', 0) or 0
-#                 row_end = row_spec.get('end', rows) or rows
-#             elif row_spec['type'] == 'index':
-#                 row_start = row_spec['value']
-#                 row_end = row_spec['value'] + 1
-#             else:  # full_slice
-#                 row_start, row_end = 0, rows
-                
-#             if col_spec['type'] == 'slice':
-#                 col_start = col_spec.get('start', 0) or 0
-#                 col_end = col_spec.get('end', cols) or cols
-#             elif col_spec['type'] == 'index':
-#                 col_start = col_spec['value']
-#                 col_end = col_spec['value'] + 1
-#             else:  # full_slice
-#                 col_start, col_end = 0, cols
-            
-#             # Bounds checking
-#             row_start = max(0, min(row_start, rows))
-#             row_end = max(row_start, min(row_end, rows))
-#             col_start = max(0, min(col_start, cols))
-#             col_end = max(col_start, min(col_end, cols))
-            
-#             out_rows = row_end - row_start
-#             out_cols = col_end - col_start
-            
-#             kernel = f"""
-# __global__ void slice_kernel_{name}(float* input, float* output, 
-#                                 int in_rows, int in_cols,
-#                                 int row_start, int row_end,
-#                                 int col_start, int col_end,
-#                                 int out_rows, int out_cols) {{
-#     int out_row = blockIdx.y * blockDim.y + threadIdx.y;
-#     int out_col = blockIdx.x * blockDim.x + threadIdx.x;
-    
-#     if (out_row < out_rows && out_col < out_cols) {{
-#         int in_row = row_start + out_row;
-#         int in_col = col_start + out_col;
-        
-#         int in_idx = in_row * in_cols + in_col;
-#         int out_idx = out_row * out_cols + out_col;
-        
-#         output[out_idx] = input[in_idx];
-#     }}
-# }}
-# extern "C" void launch_slice_{name}(float* input, float* output,
-#                                 int in_rows, int in_cols,
-#                                 int row_start, int row_end,
-#                                 int col_start, int col_end,
-#                                 int out_rows, int out_cols) {{
-#     dim3 block(16, 16);
-#     dim3 grid((out_cols + block.x - 1) / block.x, (out_rows + block.y - 1) / block.y);
-#     slice_kernel_{name}<<<grid, block>>>(input, output, in_rows, in_cols,
-#                                         row_start, row_end, col_start, col_end,
-#                                         out_rows, out_cols);
-#     cudaDeviceSynchronize();
-#     {self.cuda_debug()}
-# }}
-# """
-#             # kernels.append(('slice_2d', name, tensor_name, None, rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols))
-#             # cuda_code += kernel
-
-#             return kernel, (f"{op_type}_2d", name, tensor_name, None, rows, cols, row_start, row_end, col_start, col_end, out_rows, out_cols)
-        
-#         elif len(input_shape) == 1 and len(slice_specs) == 1:
-#             # 1D slicing
-#             size = int(input_shape[0])
-#             spec = slice_specs[0]
-            
-#             if spec['type'] == 'slice':
-#                 start = spec.get('start', 0) or 0
-#                 end = spec.get('end', size) or size
-#             elif spec['type'] == 'index':
-#                 start = spec['value']
-#                 end = spec['value'] + 1
-#             else:  # full_slice
-#                 start, end = 0, size
-                
-#             start = max(0, min(start, size))
-#             end = max(start, min(end, size))
-#             out_size = end - start
-            
-#             kernel = f"""
-# __global__ void slice_1d_kernel_{name}(float* input, float* output, int start, int size) {{
-#     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-#     if (idx < size) {{
-#         output[idx] = input[start + idx];
-#     }}
-# }}
-# extern "C" void launch_slice_{name}(float* input, float* output, int start, int size) {{
-#     dim3 block(256);
-#     dim3 grid((size + block.x - 1) / block.x);
-#     slice_1d_kernel_{name}<<<grid, block>>>(input, output, start, size);
-#     cudaDeviceSynchronize();
-#     {self.cuda_debug()}
-# }}
-# """
-#             # kernels.append(('slice_1d', name, tensor_name, None, start, out_size))
-#             # cuda_code += kernel
-
-#             return kernel, (f"{op_type}_1d", name, tensor_name, None, start, out_size)
 
     # ================================================================
     # slice
@@ -1436,7 +1155,6 @@ extern "C" void launch_slice_{name}(float* input, float* output, int start, int 
 """
             return kernel, (f"{op_type}_1d", name, tensor_name, None, start, out_size)
 
-
     # ================================================================
     # max
     # ================================================================
@@ -1540,8 +1258,6 @@ extern "C" void launch_max_{name}(float* input, float* output, int rows, int col
                 # kernels.append(('max_axis0', name, tensor_name, None, rows, cols, axis))
                 # cuda_code += kernel
                 return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
-
-
 
     # ================================================================
     # min
@@ -1649,7 +1365,6 @@ extern "C" void launch_min_{name}(float* input, float* output, int rows, int col
                 # cuda_code += kernel
                 return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
 
-
     # ================================================================
     # argmax
     # ================================================================
@@ -1730,8 +1445,6 @@ extern "C" void launch_argmax_{name}(float* input, float* output, int rows, int 
                 # cuda_code += kernel
                 return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
 
-
-
     # ================================================================
     # argmin
     # ================================================================
@@ -1807,7 +1520,6 @@ extern "C" void launch_argmin_{name}(float* input, float* output, int rows, int 
             # kernels.append(('argmin_axis', name, tensor_name, None, rows, cols, axis))
             # cuda_code += kernel
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
-
 
     # ================================================================
     # linear
@@ -1890,7 +1602,6 @@ extern "C" void launch_linear_{name}(float* input, float* weight, float* bias,
             # kernels.append(('linear_2d', name, input_name, weight_name, bias_name, batch_size, in_features, out_features))
             # cuda_code += kernel
             return kernel, (f"{op_type}_2d", name, input_name, weight_name, bias_name, batch_size, in_features, out_features)
-
 
     # ================================================================
     # layer_norm
@@ -2041,7 +1752,6 @@ extern "C" void launch_layer_norm_{name}(float* input, float* output,
             # cuda_code += kernel
             return kernel, (f"{op_type}_1d", name, tensor_name, None, size, eps)
 
-
     # ================================================================
     # cross_entropy
     # ================================================================
@@ -2116,7 +1826,6 @@ extern "C" void launch_cross_entropy_{name}(float* predictions, float* targets,
 """
             return kernel, (f"{op_type}", name, pred_name, target_name, batch_size, num_classes)
 
-
     # ================================================================
     # mse_loss
     # ================================================================
@@ -2173,7 +1882,6 @@ extern "C" void launch_mse_loss_{name}(float* predictions, float* targets,
 }}
 """
         return kernel, (f"{op_type}", name, pred_name, target_name, total_elements)
-
 
     # ================================================================
     # Transpose, Reshape, Concat
@@ -2250,7 +1958,6 @@ extern "C" void launch_transpose_{name}(float* input, float* output, int total_e
 """
         return kernel, ("transpose", name, tensor_name, None, total_elements)
 
-
     # ================================================================
     # batch_norm
     # ================================================================
@@ -2288,7 +1995,6 @@ extern "C" void launch_batch_norm_{name}(float* input, float* running_mean, floa
 }}
 """
             return kernel, (f"{op_type}_2d", name, tensor_name, running_mean_name, batch_size, num_features, eps, running_var_name)
-
 
     # ================================================================
     # instance_norm
@@ -2339,7 +2045,6 @@ extern "C" void launch_instance_norm_{name}(float* input, float* output,
 """
             return kernel, (f"{op_type}_2d", name, tensor_name, None, None, batch_size, num_features, eps)
 
-
     # ================================================================
     # Reshape
     # ================================================================
@@ -2363,7 +2068,6 @@ extern "C" void launch_reshape_{name}(float* input, float* output, int total_ele
 """
 
         return kernel, (f"{op_type}", name, tensor_name, None, total_elements)
-
 
     # ================================================================
     # Concat
@@ -2454,7 +2158,6 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
 """
                 return kernel, (f"{op_type}_axis1", name, tensor1, tensor2, rows, cols1, cols2)
 
-
     # ================================================================
     # SGD update (in-place)
     # ================================================================
@@ -2477,7 +2180,6 @@ extern "C" void launch_sgd_update_{name}(float* param, const float* grad, float 
 }}
 """
         return kernel, ('sgd_update', name, param_name, grad_name, size)
-
 
     # ================================================================
     # Adam update (in-place)
@@ -2533,75 +2235,6 @@ extern "C" void launch_adam_update_{name}(
 }}
 """
         return kernel, ('adam_update', name, param_name, grad_name, size)
-
-
-    # # ================================================================
-    # # Fused elementwise chain
-    # # ================================================================
-    # def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size):
-        # """Generate a single kernel for an elementwise op chain.
-
-        # chain: list of (op_type, out_name, [arg_names...])
-        # """
-        # value_map = {}
-        # for idx, a in enumerate(external_inputs):
-            # value_map[a] = ("in", idx)
-        # for idx, o in enumerate(outputs):
-            # value_map[o] = ("out", idx)
-
-        # def resolve(arg):
-            # kind, i = value_map[arg]
-            # if kind == "in":
-                # return f"in{i}[idx]"
-            # return f"r{i}"
-
-        # param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
-        # param_parts += [f"float* out{i}" for i in range(len(outputs))]
-        # param_parts.append("int size")
-        # param_str = ", ".join(param_parts)
-
-        # body_lines = ["int idx = blockIdx.x * blockDim.x + threadIdx.x;", "if (idx < size) {"]
-        # for oi, (op, _out, args) in enumerate(chain):
-            # if op in ("add", "minus", "mult", "div"):
-                # sym = {"add": "+", "minus": "-", "mult": "*", "div": "/"}[op]
-                # expr = f"{resolve(args[0])} {sym} {resolve(args[1])}"
-            # elif op == "relu":
-                # expr = f"fmaxf(0.0f, {resolve(args[0])})"
-            # elif op == "sigmoid":
-                # expr = f"1.0f / (1.0f + expf(-{resolve(args[0])}))"
-            # elif op == "tanh":
-                # expr = f"tanhf({resolve(args[0])})"
-            # elif op == "gelu":
-                # expr = f"0.5f * {resolve(args[0])} * (1.0f + erff({resolve(args[0])} * 0.70710678f))"
-            # elif op == "swish":
-                # expr = f"{resolve(args[0])} / (1.0f + expf(-{resolve(args[0])}))"
-            # else:
-                # expr = resolve(args[0])
-            # body_lines.append(f"    float r{oi} = {expr};")
-        # for oi in range(len(outputs)):
-            # body_lines.append(f"    out{oi}[idx] = r{oi};")
-        # body_lines.append("}")
-
-        # launch_args = ", ".join(
-            # [f"in{i}" for i in range(len(external_inputs))]
-            # + [f"out{i}" for i in range(len(outputs))]
-            # + ["size"]
-        # )
-        # kernel = f"""
-# __global__ void fused_elementwise_kernel_{name}({param_str}) {{
-    # {chr(10).join(body_lines)}
-# }}
-# extern "C" void launch_fused_elementwise_{name}({param_str}) {{
-    # dim3 block(256);
-    # dim3 grid((size + block.x - 1) / block.x);
-    # fused_elementwise_kernel_{name}<<<grid, block>>>({launch_args});
-    # cudaDeviceSynchronize();
-    # {self.cuda_debug()}
-# }}
-# """
-        # kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size)
-        # return kernel, kernel_info
-
 
     # ================================================================
     # Fused elementwise chain (broadcast-aware)

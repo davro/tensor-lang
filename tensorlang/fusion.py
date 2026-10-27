@@ -20,14 +20,12 @@ _FUSIBLE = {
     "relu", "sigmoid", "tanh", "gelu", "swish",
 }
 
-
 def _is_let_expr(node):
     return (
         isinstance(node, dict)
         and node.get("type") == "let"
         and isinstance(node.get("expr"), dict)
     )
-
 
 def _expr_args(expr):
     if not isinstance(expr, dict):
@@ -36,14 +34,12 @@ def _expr_args(expr):
         return expr["args"]
     return None
 
-
 def _first_arg_name(arg):
     if isinstance(arg, str):
         return arg
     if isinstance(arg, dict):
         return arg.get("name")
     return None
-
 
 def _can_broadcast(shape1, shape2):
     ndim = max(len(shape1), len(shape2))
@@ -53,7 +49,6 @@ def _can_broadcast(shape1, shape2):
         if d1 != d2 and d1 != 1 and d2 != 1:
             return False
     return True
-
 
 def _broadcast_ok(node, env):
     """True if every input can broadcast to the output shape."""
@@ -67,7 +62,6 @@ def _broadcast_ok(node, env):
         if not _can_broadcast(env[name]["shape"], out_shape):
             return False
     return True
-
 
 def fuse_elementwise_chains(nodes, env):
     if not FUSION_ENABLED or not nodes:

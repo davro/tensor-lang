@@ -10,7 +10,6 @@ tensorlang = TensorLang()
 def _is_scalar_shape(shape):
     return len(shape) == 0 or all(d == 1 for d in shape)
 
-
 def _shape_error(op, name, shape1, shape2, arg_names=None, hint=None):
     if arg_names and len(arg_names) == 2:
         operands = f"'{arg_names[0]}' {tuple(shape1)} vs '{arg_names[1]}' {tuple(shape2)}"
@@ -31,7 +30,6 @@ _MATRIX_VECTOR_HINT = (
     "one of the 2D operand's dimensions"
 )
 
-
 def _resolve_tensor_type(env, tensor_name):
     t = env.get(tensor_name)
     if t is not None:
@@ -43,7 +41,6 @@ def _resolve_tensor_type(env, tensor_name):
             return base_t.copy()
     return None
 
-
 def _optimizer_arg_name(arg):
     if isinstance(arg, str):
         return arg
@@ -53,7 +50,6 @@ def _optimizer_arg_name(arg):
         if arg.get("type") == "name":
             return arg["name"]
     return None
-
 
 def _validate_optimizer_call(node_or_expr, env):
     args = node_or_expr.get("args", node_or_expr.get("arguments", []))
@@ -95,7 +91,6 @@ def _validate_optimizer_call(node_or_expr, env):
         return False
 
     return True
-
 
 def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
     # ================================================================

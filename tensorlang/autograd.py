@@ -5,11 +5,9 @@ Implements automatic differentiation for training neural networks.
 File: tensorlang/autograd.py
 """
 
-
 import numpy as np
 
 from tensorlang.tensor_lang import TensorLang
-
 
 class ComputationNode:
     """Represents a single operation in the computation graph."""
@@ -40,14 +38,14 @@ class ComputationGraph:
         self.requires_grad: set[str] = set()
         self.tensorlang = TensorLang()
         self.debug_mode = debug_mode
-        
+
     def register_tensor(self, name: str, value: np.ndarray, requires_grad: bool = False):
         """Register a tensor in the graph."""
         self.tensors[name] = value
         if requires_grad:
             self.requires_grad.add(name)
             self.gradients[name] = np.zeros_like(value)
-            
+
     def add_operation(self, op_type: str, output_name: str, inputs: list[str], 
                      metadata: dict | None = None):
         """Record an operation in the computation graph."""
@@ -56,7 +54,7 @@ class ComputationGraph:
         
         if self.debug_mode:
             self.tensorlang.print(message=f"[AUTOGRAD] Recorded: {node}")
-            
+
     def zero_grad(self):
         """Reset all gradients to zero."""
         for name in self.requires_grad:
@@ -191,8 +189,7 @@ class ComputationGraph:
             unexpected_grads = set(self.gradients.keys()) - self.requires_grad - {loss_name}
             if unexpected_grads:
                 self.tensorlang.print(message=f"[AUTOGRAD] Intermediate gradients: {sorted(unexpected_grads)}")
-                    
-    
+
     def _backward_node(self, node: ComputationNode):
         """Compute gradients for a single operation."""
         
@@ -284,7 +281,6 @@ class ComputationGraph:
     # ================================================================
     # Backward Pass Implementations
     # ================================================================
-    
     def _accumulate_grad(self, tensor_name: str, grad: np.ndarray):
         """Accumulate gradient for a tensor."""
         # Initialize gradient storage if it doesn't exist
@@ -302,21 +298,6 @@ class ComputationGraph:
             grad = self._unbroadcast(grad, input_shape)
             
         self.gradients[tensor_name] += grad
-    
-    # def _unbroadcast(self, grad: np.ndarray, target_shape: Tuple) -> np.ndarray:
-    #     """Reverse broadcasting by summing over broadcast dimensions."""
-    #     # Sum over dimensions that were added
-    #     ndim_diff = len(grad.shape) - len(target_shape)
-    #     for _ in range(ndim_diff):
-    #         grad = grad.sum(axis=0)
-        
-    #     # Sum over dimensions that were broadcast from 1 to n
-    #     for i, (grad_dim, target_dim) in enumerate(zip(grad.shape, target_shape)):
-    #         if target_dim == 1 and grad_dim != 1:
-    #             grad = grad.sum(axis=i, keepdims=True)
-                
-    #     return grad
-    
 
     def _unbroadcast(self, grad: np.ndarray, target_shape: tuple) -> np.ndarray:
         """
@@ -458,27 +439,23 @@ class ComputationGraph:
         
         return grad
 
-
     def _backward_add(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of addition: passes gradient to both inputs."""
         a, b = node.inputs
         self._accumulate_grad(a, output_grad)
         self._accumulate_grad(b, output_grad)
-    
 
     def _backward_minus(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of subtraction: +grad to first input, -grad to second."""
         a, b = node.inputs
         self._accumulate_grad(a, output_grad)
         self._accumulate_grad(b, -output_grad)
-    
 
     def _backward_mult(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of multiplication: d(a*b)/da = b, d(a*b)/db = a."""
         a, b = node.inputs
         self._accumulate_grad(a, output_grad * self.tensors[b])
         self._accumulate_grad(b, output_grad * self.tensors[a])
-    
 
     def _backward_div(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of division: d(a/b)/da = 1/b, d(a/b)/db = -a/b²."""
@@ -486,7 +463,6 @@ class ComputationGraph:
         b_val = self.tensors[b]
         self._accumulate_grad(a, output_grad / b_val)
         self._accumulate_grad(b, -output_grad * self.tensors[a] / (b_val ** 2))
-    
 
     def _backward_matmul(self, node: ComputationNode, output_grad: np.ndarray):
         """
@@ -506,14 +482,12 @@ class ComputationGraph:
         # Gradient w.r.t. B
         grad_b = a_val.T @ output_grad
         self._accumulate_grad(b, grad_b)
-    
 
     def _backward_relu(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of ReLU: 1 where input > 0, else 0."""
         inp = node.inputs[0]
         mask = (self.tensors[inp] > 0).astype(np.float32)
         self._accumulate_grad(inp, output_grad * mask)
-    
 
     def _backward_sigmoid(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of sigmoid: σ(x) * (1 - σ(x))."""
@@ -521,7 +495,6 @@ class ComputationGraph:
         sigmoid_out = self.tensors[node.output_name]
         grad = output_grad * sigmoid_out * (1 - sigmoid_out)
         self._accumulate_grad(inp, grad)
-    
 
     def _backward_tanh(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of tanh: 1 - tanh²(x)."""
@@ -529,7 +502,6 @@ class ComputationGraph:
         tanh_out = self.tensors[node.output_name]
         grad = output_grad * (1 - tanh_out ** 2)
         self._accumulate_grad(inp, grad)
-    
 
     def _backward_gelu(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of GELU."""
@@ -571,7 +543,6 @@ class ComputationGraph:
         grad = grad - softmax_out * sum_grad
         
         self._accumulate_grad(inp, grad)
-    
 
     def _backward_sum(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of sum: broadcast gradient back to input shape."""
@@ -587,7 +558,6 @@ class ComputationGraph:
             grad = np.broadcast_to(grad, self.tensors[inp].shape)
             
         self._accumulate_grad(inp, grad)
-    
 
     def _backward_mean(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of mean: broadcast gradient / count back to input."""
@@ -607,7 +577,6 @@ class ComputationGraph:
             grad = np.broadcast_to(grad, input_shape)
             
         self._accumulate_grad(inp, grad)
-    
 
     def _backward_linear(self, node: ComputationNode, output_grad: np.ndarray):
         """
@@ -637,7 +606,6 @@ class ComputationGraph:
         else:
             grad_b = output_grad.sum(axis=0)
         self._accumulate_grad(bias, grad_b)
-    
 
     def _backward_layer_norm(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of layer normalization (simplified)."""
@@ -662,7 +630,6 @@ class ComputationGraph:
         grad = grad_x_norm / std + grad_var * 2 * (x - mean) / N + grad_mean / N
         
         self._accumulate_grad(inp, grad)
-    
 
     def _backward_mse_loss(self, node: ComputationNode, output_grad: np.ndarray):
         """Gradient of MSE loss: 2 * (pred - target) / n."""
@@ -677,7 +644,6 @@ class ComputationGraph:
         
         self._accumulate_grad(pred, grad)
 
-    
     def _backward_cross_entropy(self, node: ComputationNode, output_grad: np.ndarray):
         """
         Gradient of cross-entropy loss.

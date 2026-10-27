@@ -378,7 +378,6 @@ class TestRunner:
         
         print("=" * 80)
 
-    
     def extract_expected_from_tl(self, tl_file_path):
         """Extract @EXPECTED block from a .tl file.
         
@@ -420,7 +419,6 @@ class TestRunner:
             print(f"Warning: Failed to parse @EXPECTED JSON in {tl_file_path}: {e}")
             return None
 
-
     def _extract_start_time(self, timing_str):
         """Extract start time from timing string for sorting."""
         if timing_str.startswith("["):
@@ -431,12 +429,10 @@ class TestRunner:
                 return 0
         return 0
 
-
     def _strip_ansi(self, text):
         """Remove ANSI color codes for length calculation."""
         ansi_escape = re.compile(r'\033\[[0-9;]*m')
         return ansi_escape.sub('', text)
-
 
     def load_npy_result(self, cache_dir, variable_name):
         """Load a single .npy file for a variable."""
@@ -450,7 +446,6 @@ class TestRunner:
         except (OSError, ValueError, EOFError) as e:
             print(f"Warning: Failed to load {npy_path}: {e}")
             return None
-
 
     def compare_results(self, computed, expected, variable_name):
         """Compare computed result with expected result.
@@ -482,7 +477,6 @@ class TestRunner:
         
         return True, None
 
-
     def _format_timing(self, duration, test_start_abs, suite_start_time):
         """Format timing string based on whether we're in parallel or sequential mode."""
         if suite_start_time is None:
@@ -491,7 +485,6 @@ class TestRunner:
             test_start_rel = test_start_abs - suite_start_time
             test_end_rel = test_start_rel + duration
             return f"[{test_start_rel:.1f}s → {test_end_rel:.1f}s]"
-
 
     def print_results_table(self, results, verify_tensors, suite_start_time=None):
         """Print results in a formatted table, sorted by execution start time."""

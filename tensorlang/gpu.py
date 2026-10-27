@@ -80,11 +80,9 @@ def detect_gpus():
             continue
     return gpus
 
-
 def gpu_count():
     """Number of NVIDIA GPUs detected (0 if none / nvidia-smi unavailable)."""
     return len(detect_gpus())
-
 
 def pin_env(device_index, base_env=None):
     """
@@ -99,7 +97,6 @@ def pin_env(device_index, base_env=None):
     env["CUDA_VISIBLE_DEVICES"] = str(device_index)
     return env
 
-
 def pin_current_process(device_index):
     """
     Pin *this* process to a single physical device by setting
@@ -112,7 +109,6 @@ def pin_current_process(device_index):
     context.
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(device_index)
-
 
 def choose_device(requested_gpus=1, gpus=None):
     """
