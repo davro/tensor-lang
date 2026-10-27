@@ -442,14 +442,14 @@ class ExecutionMixin:
     def _resolve_alias_inline(self, node, gpu_allocs, tensors):
         alias_name = node["name"]
         source_name = node["expr"]["name"]
-        if source_name in tensors and alias_name not in tensors:
+        if source_name in tensors:
             tensors[alias_name] = tensors[source_name].copy()
             if self.debug_mode:
-                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: created alias: {alias_name} -> {source_name}")
-        if source_name in gpu_allocs and alias_name in gpu_allocs:
+                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: alias {alias_name} -> {source_name}")
+        if source_name in gpu_allocs:
             gpu_allocs[alias_name] = gpu_allocs[source_name]
             if self.debug_mode:
-                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: created GPU alias: {alias_name} -> {source_name}")
+                self.tensorlang.print(message=f"[COMPILER] CUDA Execute: GPU alias {alias_name} -> {source_name}")
 
     def _execute_save_statement(self, save_node, tensors, gpu_allocs, env, cache_file_dir, cuda):
         tensor_name = save_node["tensor"]
@@ -491,6 +491,8 @@ class ExecutionMixin:
         iterations = for_node["iterations"]
         body = for_node["body"]
 
+        loop_kernels = for_node.get("_kernels", kernels)
+
         rebinds = [n for n in body if n["type"] == "rebind"]
         exec_nodes = [n for n in body if n["type"] != "rebind"]
         backward_node = next((n for n in exec_nodes if n["type"] == "backward"), None)
@@ -513,21 +515,33 @@ class ExecutionMixin:
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] for loop: iteration {i + 1}/{iterations}")
 
-            for pos, (global_idx, node) in enumerate(for_node["_flat_items"]):
+            for pos, (local_idx, node) in enumerate(for_node["_flat_items"]):
                 if node["type"] in ("backward", "save", "rebind"):
-                    continue
-                if global_idx is None:
                     continue
                 if bw_list_pos is not None and pos >= bw_list_pos:
                     continue
+
+                if node.get("type") == "for":
+                    self._execute_for_loop(node, kernels, ast_to_kernel_map,
+                                           lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                    continue
+
+                if (node.get("type") == "let"
+                        and isinstance(node.get("expr"), dict)
+                        and node["expr"].get("type") == "name"):
+                    self._resolve_alias_inline(node, gpu_allocs, tensors)
+                    continue
+
+                if local_idx is None:
+                    continue
                 self._execute_single_kernel(
-                    kernels[global_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                    loop_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
                 )
 
             if backward_node is not None:
                 loss_name = backward_node["loss_tensor"]
 
-                for global_idx, body_node in for_node["_flat_items"]:
+                for idx, body_node in for_node["_flat_items"]:
                     if body_node["type"] != "let":
                         continue
                     bname = body_node["name"]
@@ -577,15 +591,27 @@ class ExecutionMixin:
                         }
 
                 if bw_list_pos is not None:
-                    for pos, (global_idx, node) in enumerate(for_node["_flat_items"]):
+                    for pos, (local_idx, node) in enumerate(for_node["_flat_items"]):
                         if node["type"] in ("backward", "save", "rebind"):
-                            continue
-                        if global_idx is None:
                             continue
                         if pos <= bw_list_pos:
                             continue
+
+                        if node.get("type") == "for":
+                            self._execute_for_loop(node, kernels, ast_to_kernel_map,
+                                                   lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                            continue
+
+                        if (node.get("type") == "let"
+                                and isinstance(node.get("expr"), dict)
+                                and node["expr"].get("type") == "name"):
+                            self._resolve_alias_inline(node, gpu_allocs, tensors)
+                            continue
+
+                        if local_idx is None:
+                            continue
                         self._execute_single_kernel(
-                            kernels[global_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                            loop_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
                         )
 
             pending_gpu = {}
@@ -622,12 +648,19 @@ class ExecutionMixin:
             gpu_allocs.update(pending_gpu)
             tensors.update(pending_tensors)
 
-            for tname, tval in tensors.items():
-                requires_grad = tname in self.requires_grad_tensors
-                self.comp_graph.register_tensor(tname, tval, requires_grad)
+            # Re-resolve alias lets now that rebinds have been applied,
+            # so `let y = w` tracks the rebound storage within the same iteration.
+            for node in body:
+                if (node.get("type") == "let"
+                        and isinstance(node.get("expr"), dict)
+                        and node["expr"].get("type") == "name"):
+                    self._resolve_alias_inline(node, gpu_allocs, tensors)
+
+            for node in body:
+                if node.get("type") == "save":
+                    self._execute_save_statement(node, tensors, gpu_allocs, env, cache_file_dir, cuda)
 
         if self.debug_mode:
             self.tensorlang.print(
                 message=f"[COMPILER] for loop: completed {iterations} iterations"
             )
-

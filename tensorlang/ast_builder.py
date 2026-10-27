@@ -27,7 +27,6 @@ def _reset_tmp_counter():
     """Call at the start of each compilation to reset the counter for this thread."""
     _tls.counter = 0
 
-
 def flatten_expr_args(expr_node: dict, synthetic_nodes: list, DEBUG_MODE=False) -> dict:
     """
     Recursively flatten a nested expression node so all args are name strings.
@@ -56,7 +55,6 @@ def flatten_expr_args(expr_node: dict, synthetic_nodes: list, DEBUG_MODE=False) 
         expr_node['args'] = new_args
 
     return expr_node
-
 
 def flatten_expr_arg(arg_node, synthetic_nodes: list, DEBUG_MODE=False) -> str:
     """
@@ -91,7 +89,6 @@ def flatten_expr_arg(arg_node, synthetic_nodes: list, DEBUG_MODE=False) -> str:
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] Synthesised binding: {tmp_name} = {arg_node['type']}(...)")
     return tmp_name
-
 
 def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str | None, dict]:
     """Build AST from parse tree, handling function definitions and inlining"""
@@ -267,7 +264,6 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str
 
     return ast, output_tensor, functions
 
-
 def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """Parse: let name: Type = expr [with grad]"""
 
@@ -327,7 +323,6 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | 
         'tree': tree
     }
 
-
 def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     """Parse type annotation"""
     if DEBUG_MODE:
@@ -356,7 +351,6 @@ def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     if tree.data == 'type':
         return build_type(tree.children[0], DEBUG_MODE, DEBUG_INFO)
 
-
 def build_shape(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple:
     """Parse shape specification"""
     if DEBUG_MODE:
@@ -369,7 +363,6 @@ def build_shape(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple:
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] Shape numbers: {nums}")
     return tuple(nums)
-
 
 def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     """Parse any expression"""
@@ -652,7 +645,6 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     print(f"[AST] Unrecognized expr type: {tree.data}")
     return None
 
-
 def build_slice_spec(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     """Parse slice specification like 0:2, :, 1:, etc."""
     if tree.data == 'slice_spec':
@@ -680,7 +672,6 @@ def build_slice_spec(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
                 return {'type': 'slice', 'start': start, 'end': end}
 
     return {'type': 'full_slice'}
-
 
 def build_function_def(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """Parse function definition: fn name(params) -> return_type { body }"""
@@ -756,7 +747,6 @@ def build_function_def(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict |
         'return_expr': return_expr
     }
 
-
 def build_user_function_call(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     """Parse user function call: func_name(arg1, arg2, ...)"""
     if tree.data != 'user_function_call':
@@ -776,7 +766,6 @@ def build_user_function_call(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
         'func_name': func_name,
         'args': args
     }
-
 
 def inline_function_call(func_def: dict, args: list, env: dict, unique_suffix: str) -> tuple[list, str | None]:
     """Inline a function call by creating new let bindings with unique names"""
@@ -826,7 +815,6 @@ def inline_function_call(func_def: dict, args: list, env: dict, unique_suffix: s
         return inlined_statements, return_value_name
 
     return inlined_statements, None
-
 
 def substitute_names(expr: dict, param_map: dict, name_mapping: dict) -> dict:
     """Recursively substitute parameter names and local variable names in an expression.
@@ -919,7 +907,6 @@ def substitute_names(expr: dict, param_map: dict, name_mapping: dict) -> dict:
 
     return new_expr
 
-
 def build_rebind_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """Parse: NAME "=" expr  (mutation of existing binding, no 'let')"""
     if tree.data != 'rebind_statement':
@@ -931,7 +918,6 @@ def build_rebind_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> di
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] rebind: {name} = {expr}")
     return {'type': 'rebind', 'name': name, 'expr': expr}
-
 
 def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """Parse: for NAME in range(NUMBER) { (for_body_statement)* }"""
@@ -970,6 +956,11 @@ def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict 
                 if node:
                     body_nodes.append(node)
 
+            elif inner.data == 'for_statement':
+                node = build_for_statement(inner, DEBUG_MODE, DEBUG_INFO)
+                if node:
+                    body_nodes.append(node)
+
             elif inner.data == 'expr':
                 expr_node = build_expression(inner, DEBUG_MODE, DEBUG_INFO)
                 if expr_node and expr_node.get('type') in OPTIMIZER_NAMES:
@@ -996,7 +987,6 @@ def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict 
         'body':       body_nodes,
     }
 
-
 def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """Parse: backward(loss_name)"""
     if tree.data != 'backward_statement':
@@ -1011,7 +1001,6 @@ def build_backward_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> 
             'loss_tensor': loss_tensor
         }
     return None
-
 
 def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | None:
     """

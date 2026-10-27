@@ -318,7 +318,24 @@ class CodegenMixin:
         flat_items = []
 
         for node in nodes:
-            if node.get("type") in ("backward", "save", "rebind", "for"):
+            if node.get("type") in ("backward", "save", "rebind"):
+                flat_items.append((None, node))
+                continue
+
+            if node.get("type") == "for":
+                if scope_prefix:
+                    nested_scope = f"{scope_prefix}_loop{self._loop_scope_counter}"
+                else:
+                    nested_scope = f"loop{self._loop_scope_counter}"
+                self._loop_scope_counter += 1
+
+                nested_kernels, nested_cuda, nested_flat = self._generate_kernels_for_nodes(
+                    node["body"], env, generator, scope_prefix=nested_scope
+                )
+
+                node["_kernels"] = nested_kernels
+                node["_flat_items"] = nested_flat
+                cuda_code += nested_cuda
                 flat_items.append((None, node))
                 continue
 
@@ -379,4 +396,3 @@ class CodegenMixin:
                 flat_items.append((None, node))
 
         return kernels, cuda_code, flat_items
-

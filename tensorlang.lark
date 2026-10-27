@@ -57,6 +57,7 @@ for_body_statement: let_binding
                   | backward_statement
                   | if_statement
                   | save_statement
+                  | for_statement
                   | expr
 
 

@@ -198,17 +198,12 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin):
                         body_kernels, body_cuda, flat_items = self._generate_kernels_for_nodes(
                             node["body"], env, generator, scope_prefix=scope_prefix
                         )
-                        global_flat_items = []
-                        for local_idx, body_node in flat_items:
-                            if local_idx is not None:
-                                global_idx = len(kernels) + local_idx
-                                global_flat_items.append((global_idx, body_node))
-                            else:
-                                global_flat_items.append((None, body_node))
                         kernels.extend(body_kernels)
                         cuda_code += body_cuda
-                        node["_flat_items"] = global_flat_items
+                        node["_kernels"] = body_kernels
+                        node["_flat_items"] = flat_items
                         continue
+
 
                     if node.get("type") in OPTIMIZER_NAMES or (
                         node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES
@@ -578,7 +573,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin):
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
-                if kernels:
+                if kernels or cuda_code.strip():
                     if self.debug_mode:
                         self.tensorlang.print(message="[COMPILER] KERNEL CUDA!")
 
@@ -849,5 +844,3 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin):
             self.tensorlang.print(message=f"[COMPILER] Unexpected error: {e}")
             traceback.print_exc()
             sys.exit(1)
-
-
