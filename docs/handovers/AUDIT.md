@@ -1,9 +1,6 @@
-Here is the complete updated `AUDIT.md` with broadcasting-aware fusion reflected.
-
-```markdown
 # TensorLang audit: updated
 
-The audit's critical correctness items are now resolved. The codebase has **133/133 `.tl` tests** and **25/25 Python regression tests** passing (including the scoped-kernel tests), and `ruff check tensorlang/` is clean.
+The audit's critical correctness items are now resolved. The codebase has **141/141 tests** passing (including scoped-kernel, for-loop, and NumPy interop tests), and `ruff check tensorlang/` is clean.
 
 ## Completed from the original audit
 
@@ -27,6 +24,8 @@ The audit's critical correctness items are now resolved. The codebase has **133/
 * `matmul` replaced with a cuBLAS-backed implementation (preserves API, shapes, autograd, scoped kernel names)
 * Built-in optimizers `sgd` and `adam` with compiler-managed state (multi-parameter, gradient zeroing/accumulation, pointer-swap rebinding)
 * Elementwise kernel fusion for elementwise chains (add→relu, minus→relu, add→sigmoid, add→tanh, gelu, swish); supports non-broadcast and broadcasting modes (row/column/general broadcast); fused vs. unfused outputs and gradients verified bit-identical
+* **For-loop limitations resolved:** nested loops (arbitrary depth), `save()` inside loops (per-iteration, correct storage), alias resolution across rebinds (re-resolves after rebinds), shape-stability guard on rebinds, gate fix for nested-only loops (`if kernels or cuda_code.strip()`)
+* **NumPy zero-copy interop (foundation):** `InteropMixin` with `load_numpy`, `to_numpy`, `sync_to_gpu`, `sync_to_cpu`; 6 Python tests + `.tl` round-trip test; CPU-side buffer sharing without copying
 
 ## Remaining limitations / future work
 
@@ -35,9 +34,7 @@ The audit's critical correctness items are now resolved. The codebase has **133/
 * `if` / `elif` / `else` is grammar-only and not executed
 * `any()` / `all()` are grammar-only
 * `f64` is parsed but effectively `f32`
-* For-loop bodies support only a subset of operations
-* `save()` and alias resolution are not supported inside loops
-* Nested loops are not supported
+* For-loop bodies support a subset of operations (normalisations, comparisons, slicing, reshape, transpose, concat, and user-defined functions not yet supported inside loops)
 * Most kernels are 1D/2D only
 * Axis support remains limited for several ops
 * `batch_norm` has no gamma/beta affine parameters
@@ -51,7 +48,7 @@ The audit's critical correctness items are now resolved. The codebase has **133/
 ### Performance and architecture
 
 * Kernel fusion is limited to elementwise chains; reductions and matmul are not fused
-* No zero-copy Python/PyTorch interop yet
+* NumPy interop is CPU-side only — GPU-side zero-copy requires CUDA unified memory (deferred)
 * Tier-B multi-GPU single-program execution is not implemented
 * Mixed precision is not implemented or validated
 
@@ -70,20 +67,12 @@ The audit's critical correctness items are now resolved. The codebase has **133/
 ## Recommended next focus
 
 1. Finish shape-mismatch messages (`linear`, `cross_entropy`, `mse_loss`, `reshape`, `concat`) and validate annotated lets in the type checker
-2. Expand for-loop body coverage
-3. Refactor `compiler.py` into codegen/execution/io mixins
-4. For-loop limitations: `save()` in loops, alias resolution, nested loops
-5. Zero-copy Python/PyTorch interop
-6. Mixed precision (FP16/BF16) with cuBLAS tensor cores
+2. Mixed precision (FP16/FP32) with cuBLAS tensor cores
+3. GPU-side zero-copy interop (CUDA unified memory)
+4. mmap-based zero-copy `load()` in `.tl`
+5. Hot reload in dev mode
+6. Multi-GPU single-program execution (Tier-B)
 
 ## Bottom line
 
-TensorLang is now in a much more consistent state: grammar, type checker, kernel generator, compiler, autograd, tests, lint, documentation, and scoped kernel names are aligned for the supported feature set. cuBLAS-backed matmul and first-class SGD/Adam optimizers make it usable for real training loops. Elementwise kernel fusion — including broadcasting chains (row/column/general modes) — now removes per-op launch overhead for common activation patterns, with fused and unfused results verified bit-identical. The next milestone should be **compiler maintainability (refactor) and training-loop completeness**, then interop and mixed precision.
-```
-
-### Key changes from the previous version
-- Test count bumped to **133/133** (added `fusion_broadcast.tl`).
-- Completed list: fusion now explicitly mentions broadcasting support (row/column/general modes) and bit-identical verification.
-- Performance/architecture: replaced the stale "limited to non-broadcast" note with "limited to elementwise chains; reductions and matmul are not fused".
-- Recommended next focus: added the `compiler.py` refactor and for-loop limitations (`save()`, aliases, nested loops) ahead of interop/mixed precision.
-- Bottom line: updated to reflect broadcasting fusion and the new priority order.
+TensorLang is now in a much more consistent state: grammar, type checker, kernel generator, compiler, autograd, tests, lint, documentation, and scoped kernel names are aligned for the supported feature set. cuBLAS-backed matmul and first-class SGD/Adam optimizers make it usable for real training loops. Elementwise kernel fusion — including broadcasting chains (row/column/general modes) — now removes per-op launch overhead for common activation patterns, with fused and unfused results verified bit-identical. Training loops now support nesting, `save()` inside loops, and alias resolution across rebinds. NumPy zero-copy interop (CPU-side) allows sharing buffers without copying. The next milestone should be **mixed precision and GPU-side interop**, then multi-GPU execution.

@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.4.0. Core suite: 133/133 tests passing.
+> **Status:** v0.4.0 (v0.5 in development). Core suite: 141/141 tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** consistency between grammar, type checker, kernel generator, compiler, autograd, and documentation.
+> **Current focus:** v0.5 — mixed precision (FP16/FP32) and N-dimensional tensor support. GPU-side zero-copy interop and dev-mode hot reload remain on the roadmap.
 
 ---
 
@@ -16,12 +16,14 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [Current Status and Limitations](#current-status-and-limitations)
 * [Setup](#setup)
 * [Quick Start](#quick-start)
+* [Repository Layout](#repository-layout)
 * [Language Overview](#language-overview)
 * [Operations](#operations)
 * [Automatic Differentiation](#automatic-differentiation)
 * [Training Loops](#training-loops)
 * [Optimizers](#optimizers)
 * [File I/O](#file-io)
+* [NumPy Interop](#numpy-interop)
 * [Cache](#cache)
 * [Architecture](#architecture)
 * [Performance](#performance)
@@ -29,6 +31,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [Applications](#applications)
 * [Future Work](#future-work)
 * [Contributing](#contributing)
+* [About](#about)
 * [License](#license)
 
 ---
@@ -44,12 +47,13 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **Type safety** — compile-time tensor shape and broadcasting checks
 * **ML-first design** — built specifically for neural network operations
 * **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
-* **Training loops** — `for` loops with `backward()` and pointer-swap weight rebinding
+* **Training loops** — `for` loops with `backward()`, pointer-swap weight rebinding, nested loops, and `save()` inside loops
 * **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state
 * **Elementwise kernel fusion** — fuses elementwise chains (e.g. `add → relu`), including broadcasting cases, into a single CUDA kernel
 * **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
 * **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
-* **Extensible architecture** — clean separation of parsing, type checking, and code generation
+* **NumPy zero-copy interop** — share CPU buffers between TensorLang tensors and NumPy arrays without copying
+* **Extensible architecture** — clean separation of parsing, type checking, and code generation (codegen, execution, interop, and per-category kernel generators)
 
 **Important framing:** Python is the host/compiler language. Tensor operations run as native CUDA kernels, but the compiler, runtime orchestration, and test runner are Python-based.
 
@@ -72,26 +76,31 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Losses: `mse_loss`, `cross_entropy`
 * Linear layers: `linear`
 * Reverse-mode autograd for a defined subset of operations
-* Training loops with weight rebinding
+* Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes)
 * Scoped kernel names for loop bodies
 * User-defined functions
 * File I/O: `load()`, `save()`
+* NumPy zero-copy interop (CPU-side buffer sharing)
 * Comments: `//` and `/* */`
+* Application system (`apps/`) with `hello_mlp`, `decision_boundary`, `tic_tac_toe`, and `2048` (engine verified)
+* Shared app toolkit (`apps/tlkit/`)
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**.
-* **`any()` / `all()` reductions:** present in the grammar but **not implemented**.
-* **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`.
-* **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)).
-* **For-loop bodies support only a subset of operations** (see [Training Loops](#training-loops)).
-* **Most kernels are 1D/2D only.** Higher-rank tensors are not generally supported.
+* **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**. Targeted post-v0.5.
+* **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
+* **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
+* **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)). `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons are targeted for v0.5.
+* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.
+* **Most kernels are 1D/2D only.** N-dimensional (higher-rank) tensor support is **in progress for v0.5**.
 * **Axis support is limited** for several reductions and normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
+* **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
+* **Mixed precision (FP16/FP32)** is not implemented. **In progress for v0.5** (FP16 storage with FP32 accumulation, cuBLAS tensor-core matmul path).
 
 ---
 
@@ -116,7 +125,7 @@ cd tensor-lang
 ```bash
 chmod +x build.sh
 
-# Install dependencies
+# Install dependencies (run with bash, NOT source — see note below)
 bash build.sh --install
 
 # Activate the venv
@@ -125,6 +134,12 @@ source python-env/bin/activate
 # Run the full test suite
 source build.sh
 ```
+
+**Important notes**
+
+* Always prefer `bash build.sh --install`. Using `source build.sh --install` hits an `exit 0` that kills the current shell.
+* `pycuda` requires a working NVIDIA CUDA toolkit.
+* After install, the venv lives in `python-env/`.
 
 ---
 
@@ -137,9 +152,68 @@ python3 tensorlang.py tests/activation_pipeline.tl
 # Debug mode
 python3 tensorlang.py tests/inline_expr_basic.tl --debug
 
+# Run with caching of kernels and intermediate tensors
+python3 tensorlang.py --cache-layers tests/training_pipeline.tl
+
 # Run tests
 python3 tensorlang.py --test
 python3 tensorlang.py --test --filter autograd
+```
+
+---
+
+## Repository Layout
+
+```
+tensor-lang/
+├── tensorlang.py              # CLI entry point
+├── tensorlang/                # Core package
+│   ├── app_runner.py          # Application discovery and execution
+│   ├── ast_builder.py         # AST construction and inlining
+│   ├── autograd.py            # NumPy reference autograd
+│   ├── codegen.py             # Code generation orchestration
+│   ├── compiler.py            # Orchestration, execution, caching, scoped kernel names
+│   ├── constants.py           # Shared constants
+│   ├── execution.py           # Runtime execution, loops, rebinding
+│   ├── fusion.py              # Elementwise kernel fusion (broadcasting-aware)
+│   ├── generators/            # Per-category CUDA kernel generators
+│   │   ├── base.py
+│   │   ├── comparisons.py
+│   │   ├── elementwise.py
+│   │   ├── nn.py
+│   │   ├── optimizers.py
+│   │   ├── reductions.py
+│   │   ├── shapes.py
+│   │   └── unary.py
+│   ├── gpu.py                 # GPU detection + CUDA_VISIBLE_DEVICES pinning
+│   ├── interop.py             # NumPy zero-copy interop
+│   ├── io.py                  # File I/O helpers
+│   ├── kernel_generator.py    # CUDA kernel generation
+│   ├── tensor_lang.py         # Argument parsing etc.
+│   ├── tensor_verifier.py     # Tensor verification helpers
+│   ├── test_runner.py         # Test discovery and execution
+│   └── type_checker.py        # Shape and broadcasting checks
+├── tensorlang.lark            # Grammar
+├── build.sh                   # Install / test / lint helper
+├── tests/                     # Core language tests (.tl)
+│   └── python/                # Plain-Python unittest suite
+├── apps/                      # User-facing applications
+│   ├── tlkit/                 # Shared toolkit for visual/interactive apps
+│   │   ├── chunked_runner.py
+│   │   ├── sequence_player.py
+│   │   ├── colormap.py
+│   │   └── README.md
+│   ├── examples/
+│   │   ├── hello_mlp/
+│   │   └── decision_boundary/
+│   └── games/
+│       ├── tic_tac_toe/
+│       └── 2048/
+├── examples/                  # Older / misc examples
+├── cache/                     # Generated CUDA, .npy, etc. (gitignored)
+├── check.py                   # Parse + typecheck any .tl file, no GPU needed
+├── verify.py                  # NumPy-interpret a .tl AST, no GPU needed
+└── requirements.txt
 ```
 
 ---
@@ -237,7 +311,7 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `mse_loss` | Supported | Predictions and targets must have the same shape |
+| `mse_loss` | Supported | Predictions and targets must have the same shape. Result is a `(1,1)` tensor, not a bare scalar — use `.item()` in Python. |
 | `cross_entropy` | Supported | Probability inputs and class-index targets |
 
 ### Comparisons
@@ -308,6 +382,8 @@ The following operations may be present in the language but are **not currently 
 * `argmax`, `argmin`
 * `greater`, `less`, `equal`
 
+`reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, and `argmin` gradients are targeted for v0.5.
+
 ### Autograd Notes
 
 * `matmul` gradients assume 2D operands.
@@ -318,7 +394,7 @@ The following operations may be present in the language but are **not currently 
 
 ## Training Loops
 
-TensorLang supports multi-step gradient descent via `for` loops.
+TensorLang supports multi-step gradient descent via `for` loops, including nested loops.
 
 ```text
 for epoch in range(5) {
@@ -327,6 +403,19 @@ for epoch in range(5) {
     backward(loss)
     let w_updated = minus(w, mult(lr, w_grad))
     w = w_updated
+    save(w, "w.npy")
+}
+```
+
+Nested loops are supported with independent counters:
+
+```text
+for i in range(3) {
+    for j in range(4) {
+        let inc = fill(1.0, (1, 1))
+        let acc_new = add(acc, inc)
+        acc = acc_new
+    }
 }
 ```
 
@@ -349,35 +438,19 @@ w = w_updated
 
 Both compile to the same CUDA kernels. Inline expressions are flattened into synthetic `__tmp_N` bindings.
 
+### Training Loop Features
+
+* **Nested loops** — arbitrary depth, independent counters per level
+* **`save()` inside loops** — fires per iteration, captures current storage, overwrites the file each time
+* **Alias resolution** — `let y = x` inside a loop re-resolves after rebinds, so `y` tracks the rebound variable
+* **Shape-stability guard** — rebinds with mismatched shapes are skipped with a diagnostic
+* **Kernel symbols** generated inside loop bodies are scoped with a `loopN_` prefix, so the same tensor name can be reused across loop iterations, multiple loops, and top-level code without CUDA symbol collisions
+
 ### Training Loop Constraints
 
 * Loop counts must be integer literals: `range(5)`, not `range(n)`.
-* Loop bodies support only a subset of operations.
-* `save()` inside a loop is not currently executed.
-* Alias nodes such as `let y = x` inside a loop are not currently resolved.
-* Nested loops are not supported.
-* Kernel symbols generated inside loop bodies are scoped with a `loopN_` prefix, so the same tensor name can be reused across loop iterations, multiple loops, and top-level code without CUDA symbol collisions.
-
-Example:
-
-```text
-for epoch in range(5) {
-    let y_pred = matmul(x, w)
-    let loss = mse_loss(y_pred, y_true)
-    ...
-}
-
-let y_pred_final = matmul(x, w)
-let loss_final = mse_loss(y_pred_final, y_true)
-```
-
-### Rebinding
-
-```text
-w = w_updated
-```
-
-This swaps GPU buffer pointers rather than copying memory.
+* Loop bodies support a subset of operations (see below).
+* Rebinding requires a name on the right-hand side: `w = w_updated`, not `w = minus(w, step)`.
 
 ### Operations Supported in Loop Bodies
 
@@ -391,8 +464,21 @@ Loop bodies currently support:
 * `cross_entropy`
 * `linear`
 * `sum`, `mean`
+* `fill`
+* `save()`
+* Nested `for` loops
+* `let` bindings and rebinds
+* `backward()`
 
-They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O, or user-defined functions.
+They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.
+
+### Rebinding
+
+```text
+w = w_updated
+```
+
+This swaps GPU buffer pointers rather than copying memory.
 
 ---
 
@@ -459,7 +545,47 @@ If no type annotation is provided, shape is inferred from the file.
 save(tensor, "output.npy")
 ```
 
-`save()` is currently supported at top level. It is not executed inside `for` loops.
+`save()` is supported both at top level and inside `for` loops. Inside a loop, it fires per iteration and overwrites the file each time, so the final file reflects the last iteration's value.
+
+---
+
+## NumPy Interop
+
+TensorLang provides zero-copy NumPy interop at the Python API level. CPU-side tensor buffers can be shared with NumPy arrays without copying.
+
+### Python API
+
+```python
+import numpy as np
+from tensorlang.compiler import TensorCompiler
+
+compiler = TensorCompiler()
+
+# Zero-copy load: TensorLang uses arr's buffer directly
+arr = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+compiler.load_numpy("x", arr)
+
+# Zero-copy view: returns np.ndarray sharing storage with tensors["x"]
+view = compiler.to_numpy("x")
+assert view.ctypes.data == arr.ctypes.data
+
+# Explicit sync helpers
+compiler.sync_to_gpu("x")   # push CPU buffer → GPU
+compiler.sync_to_cpu("x")   # pull GPU → CPU (in place)
+```
+
+### Contracts
+
+| Direction | Ownership | Lifetime | Mutation visibility |
+|---|---|---|---|
+| NumPy → TensorLang | NumPy owns CPU buffer; TensorLang owns GPU copy | NumPy array must outlive the compiler session | Python writes visible only if re-synced to GPU |
+| TensorLang → NumPy (CPU) | TensorLang owns `tensors[name]`; NumPy gets a view | Compiler session must outlive the NumPy view | TensorLang writes (via kernels) visible through the view after D→H sync |
+
+### Constraints
+
+* `load_numpy` requires C-contiguous `float32` arrays (non-contiguous arrays are made contiguous automatically).
+* GPU-side zero-copy (CUDA unified memory) is deferred to a future version.
+* Mixed precision through shared buffers is not supported yet.
 
 ---
 
@@ -493,22 +619,31 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 ### Compilation Pipeline
 
 1. **Lexing & Parsing** — Lark grammar (`tensorlang.lark`)
-2. **AST Construction** — flatten inline expressions; inline user-defined functions
+2. **AST Construction** — flatten inline expressions; inline user-defined functions; build nested loop bodies
 3. **Type Checking** — validate tensor shapes, broadcasting rules, and gradient tensor pre-registration
-4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations
+4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting)
 5. **Compilation** — `nvcc` to shared library
-6. **Execution** — PyCUDA kernel launching, memory management, and loop iteration with pointer-swap rebinding
+6. **Execution** — PyCUDA kernel launching, memory management, loop iteration with pointer-swap rebinding, nested loop recursion, `save()` per iteration
 
 ### Key Modules
 
 * `tensorlang/ast_builder.py` — AST construction and inlining
 * `tensorlang/type_checker.py` — shape and broadcasting checks
 * `tensorlang/kernel_generator.py` — CUDA kernel generation
+* `tensorlang/codegen.py` — code generation orchestration
 * `tensorlang/compiler.py` — orchestration, execution, caching, scoped kernel names
+* `tensorlang/execution.py` — runtime execution, loops, rebinding
+* `tensorlang/interop.py` — NumPy zero-copy interop (`InteropMixin`)
 * `tensorlang/autograd.py` — NumPy reference autograd implementation
+* `tensorlang/fusion.py` — elementwise kernel fusion (broadcasting-aware)
+* `tensorlang/generators/` — per-category CUDA kernel generators (base, comparisons, elementwise, nn, optimizers, reductions, shapes, unary)
 * `tensorlang/test_runner.py` — test discovery and execution
 * `tensorlang/app_runner.py` — application discovery and execution
 * `tensorlang/gpu.py` — GPU detection and process-level pinning
+* `tensorlang/tensor_lang.py` — argument parsing
+* `tensorlang/tensor_verifier.py` — tensor verification helpers
+* `tensorlang/constants.py` — shared constants
+* `tensorlang/io.py` — file I/O helpers
 
 ---
 
@@ -569,6 +704,35 @@ python3 tensorlang.py --test --verify-tensors
 
 Tensor verification is performed by the test runner, not the compiler. It checks NaN/Inf, extreme values, expected values, and cached `.npy` files.
 
+### Test Inventory
+
+The suite covers:
+
+* Basics, arithmetic, broadcasting
+* Activations (relu, sigmoid, tanh, softmax, gelu, swish)
+* Reductions, slicing, reshape, transpose, concat
+* Linear layers, MLP, neural nets
+* Normalisations (layer/batch/instance)
+* Losses (mse, cross-entropy)
+* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish)
+* Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
+* Functions, pipelines, portfolio-style examples
+* Load/save
+
+Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
+
+### Development Tools
+
+Two GPU-free helpers are available for quick checks:
+
+```bash
+# Parse + typecheck any .tl file (no GPU needed)
+python3 check.py path/to/file.tl
+
+# NumPy-interpret a .tl AST (no GPU needed)
+python3 verify.py path/to/file.tl
+```
+
 ### Multi-GPU Test Execution
 
 ```bash
@@ -578,19 +742,46 @@ python3 tensorlang.py --test --gpu 1
 python3 tensorlang.py --test --no-gpu-pinning
 ```
 
-This is process-level pinning only. A single TensorLang program does not span multiple GPUs.
+This is process-level pinning only. A single TensorLang program does not span multiple GPUs. Round-robin pinning is real but modest on the small/fast correctness suite; heavier concurrent GPU workloads are the better use case.
 
 ---
 
 ## Applications
 
-Applications live under `apps/` and are discovered by `app.toml`.
+Applications live under `apps/` and are discovered by `app.toml`. The shared toolkit `apps/tlkit/` (`chunked_runner.py`, `sequence_player.py`, `colormap.py`) supports visual/interactive apps.
 
 ```bash
 python3 tensorlang.py --list-apps
 python3 tensorlang.py --app examples/hello_mlp
 python3 tensorlang.py --app examples/decision_boundary
 python3 tensorlang.py --app games/2048 --app-args <16 numbers>
+```
+
+### App Layout
+
+```
+apps/
+└── [<category>/]
+    └── <app-name>/
+        ├── app.toml
+        ├── <entry>.tl
+        └── tests/
+            └── *.tl
+```
+
+### Minimal `app.toml`
+
+```toml
+[app]
+name = "hello_mlp"
+description = "Minimal 2-layer MLP training example"
+
+[requirements]
+gpus = 1
+memory_gb = 4
+
+[entry_points]
+main = "main.tl"
 ```
 
 ### App Requirements
@@ -616,32 +807,44 @@ python3 tensorlang.py --app examples/hello_mlp --test
 
 App tests run sequentially.
 
+### Notable Apps
+
+* `examples/hello_mlp` — minimal 2-layer MLP training example.
+* `examples/decision_boundary` — trains a 2-8-1 tanh/sigmoid MLP on XOR and animates the decision boundary. Verified: loss dropped from 0.243585 to 0.001573 over 1000 epochs.
+* `games/tic_tac_toe` — complete.
+* `games/2048` — tensor-ops game engine (`step.tl`) verified.
+
 ---
 
 ## Future Work
 
+### v0.5 Milestone (in progress)
+
+* **Mixed precision (FP16/FP32):** FP16 storage with FP32 accumulation, cuBLAS tensor-core matmul path.
+* **N-dimensional tensor support:** general stride-based indexing across the generator suite (elementwise, reductions, shapes, nn, unary, comparisons).
+* **Autograd coverage:** gradients for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`.
+* **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
+
 ### Short Term
 
 * Improve shape-mismatch error messages
-* Expand for-loop body operation coverage
-* Add alias resolution inside loop bodies
-* Support `save()` inside loops
-* Implement or remove `if`, `any()`, and `all()`
+* Implement or remove `if`, `any()`, and `all()` (targeted post-v0.5)
+* `batch_norm` gamma/beta affine parameters
 
 ### Medium Term
 
-* Refactor `compiler.py` into codegen/execution/io mixins
-* For-loop limitations: `save()` in loops, alias resolution, nested loops
-* Buffer pooling for long training runs
+* GPU-side zero-copy interop (CUDA unified memory)
+* Larger NumPy interop round-trip tests
+* mmap-based zero-copy `load()` in `.tl`
 * Hot reload in dev mode
-* Zero-copy Python/PyTorch interop
+* More practical example applications (vision, simple game agent, signal processing, finance) so the language does not feel purely abstract
 
 ### Long Term
 
 * Multi-GPU single-program execution (Tier-B)
-* Mixed precision (FP16/FP32), validated on appropriate hardware
 * MLIR integration
 * Additional hardware backends (ROCm, Metal)
+* WGSL transpile backend (or removal of the `--transpile` flag)
 
 ---
 
@@ -656,6 +859,12 @@ Contributions are welcome. Useful areas include:
 * Application examples
 
 When adding tests, copy expected values from a real run. Do not manually round or approximate them.
+
+---
+
+## About
+
+Original author: davro (David). Related projects of interest: `workspace` (PyQt6 IDE with Ollama), `we-not-me` (TradingView indicators). Primary motivation for recent work: move from pure compiler infrastructure toward practical, visible applications.
 
 ---
 
