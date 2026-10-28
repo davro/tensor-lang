@@ -1,7 +1,31 @@
+# File: tensorlang/interop.py
+
 """NumPy zero-copy interop for TensorCompiler."""
 
 import numpy as np
 import pycuda.driver as cuda
+
+from tensorlang.constants import dtype_numpy, DTYPE_INFO
+
+
+def _np_to_tl_dtype(np_dtype):
+    """Map a numpy dtype to a TensorLang dtype name."""
+    if np_dtype == np.float16:
+        return "f16"
+    if np_dtype == np.float32:
+        return "f32"
+    if np_dtype == np.float64:
+        return "f64"
+    raise TypeError(f"Unsupported numpy dtype: {np_dtype}")
+
+
+def _tl_to_np_dtype(tl_dtype):
+    """Map a TensorLang dtype name to a numpy dtype."""
+    return dtype_numpy(tl_dtype)
+
+
+# _SUPPORTED_NUMPY_DTYPES = {np.float16, np.float32, np.float64}
+_SUPPORTED_NUMPY_DTYPES = {np.dtype(np.float16), np.dtype(np.float32), np.dtype(np.float64)}
 
 
 class InteropMixin:
@@ -24,37 +48,39 @@ class InteropMixin:
 
         The array's buffer is used directly as ``self.tensors[name]``.
         A GPU allocation is created and data is copied H→D once.
+        Supports float16, float32, and float64 arrays.
         """
-        self.env = getattr(self, 'env', {})
-        self.tensors = getattr(self, 'tensors', {})
-        self.gpu_allocs = getattr(self, 'gpu_allocs', {})
         self.env = getattr(self, 'env', {})
         self.tensors = getattr(self, 'tensors', {})
         self.gpu_allocs = getattr(self, 'gpu_allocs', {})
         self._interop_refs = getattr(self, '_interop_refs', {})
         if not isinstance(arr, np.ndarray):
             raise TypeError("load_numpy requires a numpy.ndarray")
-        if arr.dtype != np.float32:
-            raise TypeError(f"load_numpy requires float32, got {arr.dtype}")
+        if arr.dtype not in _SUPPORTED_NUMPY_DTYPES:
+            raise TypeError(
+                f"load_numpy requires float16/32/64, got {arr.dtype}"
+            )
         if not arr.flags["C_CONTIGUOUS"]:
             arr = np.ascontiguousarray(arr)
         if arr.ndim == 0:
             arr = arr.reshape(1)
 
         shape = tuple(int(d) for d in arr.shape)
-        self.env[name] = {"dtype": "f32", "shape": shape}
+        tl_dtype = _np_to_tl_dtype(arr.dtype)
+        self.env[name] = {"dtype": tl_dtype, "shape": shape}
         self.tensors[name] = arr  # zero-copy: same buffer
         self._interop_refs[name] = arr
 
         # GPU allocation + H→D copy
-        size_bytes = int(arr.size * np.float32().nbytes)
+        np_dtype = arr.dtype
+        size_bytes = int(arr.size * np_dtype.itemsize)
         self.gpu_allocs[name] = cuda.mem_alloc(size_bytes)
         cuda.memcpy_htod(self.gpu_allocs[name], arr)
 
         if self.debug_mode:
             self.tensorlang.print(
                 message=f"[INTEROP] load_numpy: {name} shape={shape} "
-                        f"ptr={arr.ctypes.data} (zero-copy)"
+                        f"dtype={tl_dtype} ptr={arr.ctypes.data} (zero-copy)"
             )
         return name
 
@@ -66,24 +92,26 @@ class InteropMixin:
 
         If the tensor is not yet in ``self.tensors`` (e.g. GPU-only),
         a D→H copy is performed first into a new buffer.
+        The returned array uses the tensor's stored dtype.
         """
-        self.env = getattr(self, 'env', {})
-        self.tensors = getattr(self, 'tensors', {})
-        self.gpu_allocs = getattr(self, 'gpu_allocs', {})
         self.env = getattr(self, 'env', {})
         self.tensors = getattr(self, 'tensors', {})
         self.gpu_allocs = getattr(self, 'gpu_allocs', {})
         if name in self.tensors:
             arr = self.tensors[name]
             if not isinstance(arr, np.ndarray):
-                arr = np.asarray(arr, dtype=np.float32)
+                tl_dtype = self.env.get(name, {}).get("dtype", "f32")
+                np_dtype = _tl_to_np_dtype(tl_dtype)
+                arr = np.asarray(arr, dtype=np_dtype)
                 self.tensors[name] = arr
             return arr
 
         # GPU-only: copy D→H
         if name in self.gpu_allocs and name in self.env:
             shape = tuple(int(d) for d in self.env[name]["shape"])
-            arr = np.zeros(shape, dtype=np.float32)
+            tl_dtype = self.env[name].get("dtype", "f32")
+            np_dtype = _tl_to_np_dtype(tl_dtype)
+            arr = np.zeros(shape, dtype=np_dtype)
             cuda.memcpy_dtoh(arr, self.gpu_allocs[name])
             self.tensors[name] = arr
             return arr
@@ -98,19 +126,23 @@ class InteropMixin:
         self.env = getattr(self, 'env', {})
         self.tensors = getattr(self, 'tensors', {})
         self.gpu_allocs = getattr(self, 'gpu_allocs', {})
-        self.env = getattr(self, 'env', {})
-        self.tensors = getattr(self, 'tensors', {})
-        self.gpu_allocs = getattr(self, 'gpu_allocs', {})
         if name not in self.tensors:
             raise KeyError(f"sync_to_gpu: '{name}' not in tensors")
+        if name not in self.env:
+            raise KeyError(f"sync_to_gpu: '{name}' not in env")
+
+        tl_dtype = self.env[name].get("dtype", "f32")
+        np_dtype = _tl_to_np_dtype(tl_dtype)
+
+        shape = tuple(int(d) for d in self.env[name]["shape"])
         if name not in self.gpu_allocs:
-            shape = tuple(int(d) for d in self.env[name]["shape"])
-            size_bytes = int(np.prod(shape) * np.float32().nbytes)
+            size_bytes = int(np.prod(shape) * np_dtype.itemsize)
             self.gpu_allocs[name] = cuda.mem_alloc(size_bytes)
-        arr = np.ascontiguousarray(self.tensors[name], dtype=np.float32)
+
+        arr = np.ascontiguousarray(self.tensors[name], dtype=np_dtype)
         cuda.memcpy_htod(self.gpu_allocs[name], arr)
         if self.debug_mode:
-            self.tensorlang.print(message=f"[INTEROP] sync_to_gpu: {name}")
+            self.tensorlang.print(message=f"[INTEROP] sync_to_gpu: {name} dtype={tl_dtype}")
 
     # ------------------------------------------------------------------
     # sync_to_cpu: pull GPU → CPU buffer (in-place when possible)
@@ -120,25 +152,26 @@ class InteropMixin:
         self.env = getattr(self, 'env', {})
         self.tensors = getattr(self, 'tensors', {})
         self.gpu_allocs = getattr(self, 'gpu_allocs', {})
-        self.env = getattr(self, 'env', {})
-        self.tensors = getattr(self, 'tensors', {})
-        self.gpu_allocs = getattr(self, 'gpu_allocs', {})
         if name not in self.gpu_allocs:
             raise KeyError(f"sync_to_cpu: '{name}' not in gpu_allocs")
         if name not in self.env:
             raise KeyError(f"sync_to_cpu: '{name}' not in env")
+
         shape = tuple(int(d) for d in self.env[name]["shape"])
+        tl_dtype = self.env[name].get("dtype", "f32")
+        np_dtype = _tl_to_np_dtype(tl_dtype)
+
         if name in self.tensors and isinstance(self.tensors[name], np.ndarray):
             arr = self.tensors[name]
-            if arr.shape != shape or arr.dtype != np.float32:
-                arr = np.zeros(shape, dtype=np.float32)
+            if arr.shape != shape or arr.dtype != np_dtype:
+                arr = np.zeros(shape, dtype=np_dtype)
                 self.tensors[name] = arr
         else:
-            arr = np.zeros(shape, dtype=np.float32)
+            arr = np.zeros(shape, dtype=np_dtype)
             self.tensors[name] = arr
         cuda.memcpy_dtoh(arr, self.gpu_allocs[name])
         if self.debug_mode:
-            self.tensorlang.print(message=f"[INTEROP] sync_to_cpu: {name}")
+            self.tensorlang.print(message=f"[INTEROP] sync_to_cpu: {name} dtype={tl_dtype}")
         return arr
 
     # ------------------------------------------------------------------
@@ -147,6 +180,6 @@ class InteropMixin:
     def load_numpy_mmap(self, file_path):
         """Memory-map a .npy file (zero-copy, read-only)."""
         loaded = np.load(file_path, mmap_mode="r")
-        if loaded.dtype != np.float32:
+        if loaded.dtype not in _SUPPORTED_NUMPY_DTYPES:
             loaded = loaded.astype(np.float32)
         return np.ascontiguousarray(loaded)

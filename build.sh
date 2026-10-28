@@ -122,11 +122,14 @@ if (( INSTALL )); then
     pip install numpy
     pip install tqdm
     pip install pandas
-    #pip install yfinance
     pip install tomli
     pip install plotly
     pip install dash
     pip install pytest
+    pip install gguf
+
+    # gmx charts
+    #pip install yfinance
 
     # tradingbot
     pip install dotenv

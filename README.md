@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.4.0 (v0.5 in development). Core suite: 141/141 tests passing.
+> **Status:** v0.5.0 (mixed precision complete; N-D in progress). Core suite: 145/145 tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5 — mixed precision (FP16/FP32) and N-dimensional tensor support. GPU-side zero-copy interop and dev-mode hot reload remain on the roadmap.
+> **Current focus:** v0.5 — N-dimensional tensor support. Mixed precision (FP16/FP32) is complete.
 
 ---
 
@@ -53,6 +53,7 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
 * **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
 * **NumPy zero-copy interop** — share CPU buffers between TensorLang tensors and NumPy arrays without copying
+* **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cuBLAS tensor-core matmul path; cast-based elementwise/activation/reduction kernels
 * **Extensible architecture** — clean separation of parsing, type checking, and code generation (codegen, execution, interop, and per-category kernel generators)
 
 **Important framing:** Python is the host/compiler language. Tensor operations run as native CUDA kernels, but the compiler, runtime orchestration, and test runner are Python-based.
@@ -65,9 +66,9 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 
 ### Implemented and working
 
-* Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]`
+* Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]` and `Tensor[f16, (batch, features)]`
 * Element-wise arithmetic with broadcasting
-* Matrix multiplication (`matmul`) — cuBLAS-backed
+* Matrix multiplication (`matmul`) — cuBLAS-backed (FP32 and FP16 with tensor core path)
 * Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish`
 * Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax`
 * Comparisons: `greater`, `less`, `equal`
@@ -75,17 +76,18 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm`
 * Losses: `mse_loss`, `cross_entropy`
 * Linear layers: `linear`
-* Reverse-mode autograd for a defined subset of operations
+* Reverse-mode autograd for a defined subset of operations (FP32 and FP16)
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes)
 * Scoped kernel names for loop bodies
 * User-defined functions
 * File I/O: `load()`, `save()`
-* NumPy zero-copy interop (CPU-side buffer sharing)
+* NumPy zero-copy interop (CPU-side buffer sharing, float16/32/64)
 * Comments: `//` and `/* */`
 * Application system (`apps/`) with `hello_mlp`, `decision_boundary`, `tic_tac_toe`, and `2048` (engine verified)
 * Shared app toolkit (`apps/tlkit/`)
+* **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cast-based kernels; cuBLAS tensor-core matmul path; f16 autograd and training loops
 
 ### Known limitations
 
@@ -100,7 +102,8 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
 * **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
-* **Mixed precision (FP16/FP32)** is not implemented. **In progress for v0.5** (FP16 storage with FP32 accumulation, cuBLAS tensor-core matmul path).
+* **Loss scaling** for FP16 training is not implemented (deferred to v0.5.1).
+* **FP16 master weights in optimizer** — Adam uses FP16 state; FP32 master weights deferred.
 
 ---
 
@@ -173,18 +176,18 @@ tensor-lang/
 │   ├── autograd.py            # NumPy reference autograd
 │   ├── codegen.py             # Code generation orchestration
 │   ├── compiler.py            # Orchestration, execution, caching, scoped kernel names
-│   ├── constants.py           # Shared constants
+│   ├── constants.py           # Shared constants (dtype registry, promotion)
 │   ├── execution.py           # Runtime execution, loops, rebinding
 │   ├── fusion.py              # Elementwise kernel fusion (broadcasting-aware)
 │   ├── generators/            # Per-category CUDA kernel generators
-│   │   ├── base.py
-│   │   ├── comparisons.py
-│   │   ├── elementwise.py
-│   │   ├── nn.py
-│   │   ├── optimizers.py
-│   │   ├── reductions.py
-│   │   ├── shapes.py
-│   │   └── unary.py
+│   │   ├── base.py            # Shared helpers, dtype cast templates
+│   │   ├── comparisons.py     # greater, less, equal
+│   │   ├── elementwise.py     # add, minus, mult, div, fill, fused
+│   │   ├── nn.py             # matmul, linear, norms, losses
+│   │   ├── optimizers.py     # sgd_update, adam_update
+│   │   ├── reductions.py     # sum, mean, min, max, argmin, argmax, softmax
+│   │   ├── shapes.py         # reshape, transpose, slice, concat
+│   │   └── unary.py          # relu, sigmoid, tanh, gelu, swish
 │   ├── gpu.py                 # GPU detection + CUDA_VISIBLE_DEVICES pinning
 │   ├── interop.py             # NumPy zero-copy interop
 │   ├── io.py                  # File I/O helpers
@@ -225,7 +228,12 @@ tensor-lang/
 ```text
 let x: Tensor[f32, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
 let w: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
+
+// Mixed precision: FP16 storage
+let x16: Tensor[f16, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
 ```
+
+Supported dtypes: `f16`, `f32`. (`f64` is parsed but lowered to `f32`.)
 
 Shapes are part of the type system. The compiler checks shape compatibility and broadcasting rules at compile time.
 
@@ -274,9 +282,9 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `matmul(A, B)` | Supported | 2D×2D or 2D×1D; cuBLAS-backed |
-| `add`, `minus`, `mult`, `div` | Supported | Broadcasting supported |
-| `linear(input, weight, bias)` | Supported | 1D or 2D input |
+| `matmul(A, B)` | Supported | 2D×2D or 2D×1D; cuBLAS-backed (FP32 and FP16 tensor core path) |
+| `add`, `minus`, `mult`, `div` | Supported | Broadcasting supported; dtype-aware (f16/f32) |
+| `linear(input, weight, bias)` | Supported | 1D or 2D input; dtype-aware |
 
 ### Activations
 
@@ -293,8 +301,8 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `sum` | Supported | Full or 2D axis `0`/`1` |
-| `mean` | Supported | Full or 2D axis `0`/`1` |
+| `sum` | Supported | Full or 2D axis `0`/`1`; accumulates in f32 |
+| `mean` | Supported | Full or 2D axis `0`/`1`; accumulates in f32 |
 | `min`, `max` | Supported | Full or 2D axis `0`/`1` |
 | `argmin` | Supported | Full reduction or 2D axis `1` |
 | `argmax` | Supported | Full reduction or 2D axis `1` |
@@ -318,7 +326,7 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `greater`, `less`, `equal` | Partial | Equal shapes or limited 2D/1D broadcast |
+| `greater`, `less`, `equal` | Partial | Equal shapes or limited 2D/1D broadcast; output always f32 |
 
 ---
 
@@ -367,6 +375,8 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `cross_entropy` | Yes (probability inputs, class-index targets) |
 | `gelu` | Yes |
 | `swish` | Yes |
+
+Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computation uses NumPy's type promotion (may upcast to f32 internally).
 
 ### Not Currently Wired into Autograd
 
@@ -537,7 +547,7 @@ Supported formats:
 * `.npz` (uses `data` array or first available array)
 * `.csv` (requires pandas; drops a leading date/time/index/id column)
 
-If no type annotation is provided, shape is inferred from the file.
+If no type annotation is provided, shape and dtype are inferred from the file (including float16 from `.npy`).
 
 ### Save
 
@@ -583,9 +593,9 @@ compiler.sync_to_cpu("x")   # pull GPU → CPU (in place)
 
 ### Constraints
 
-* `load_numpy` requires C-contiguous `float32` arrays (non-contiguous arrays are made contiguous automatically).
+* `load_numpy` requires C-contiguous `float16`, `float32`, or `float64` arrays (non-contiguous arrays are made contiguous automatically).
 * GPU-side zero-copy (CUDA unified memory) is deferred to a future version.
-* Mixed precision through shared buffers is not supported yet.
+* Mixed precision through shared buffers is supported (f16/f32/f64).
 
 ---
 
@@ -620,8 +630,8 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 1. **Lexing & Parsing** — Lark grammar (`tensorlang.lark`)
 2. **AST Construction** — flatten inline expressions; inline user-defined functions; build nested loop bodies
-3. **Type Checking** — validate tensor shapes, broadcasting rules, and gradient tensor pre-registration
-4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting)
+3. **Type Checking** — validate tensor shapes, broadcasting rules, gradient tensor pre-registration, dtype propagation and promotion
+4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting); dtype-aware kernel generation (f16/f32)
 5. **Compilation** — `nvcc` to shared library
 6. **Execution** — PyCUDA kernel launching, memory management, loop iteration with pointer-swap rebinding, nested loop recursion, `save()` per iteration
 
@@ -636,13 +646,13 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 * `tensorlang/interop.py` — NumPy zero-copy interop (`InteropMixin`)
 * `tensorlang/autograd.py` — NumPy reference autograd implementation
 * `tensorlang/fusion.py` — elementwise kernel fusion (broadcasting-aware)
-* `tensorlang/generators/` — per-category CUDA kernel generators (base, comparisons, elementwise, nn, optimizers, reductions, shapes, unary)
+* `tensorlang/generators/` — per-category CUDA kernel generators (base, comparisons, elementwise, nn, optimizers, reductions, shapes, unary) — all dtype-aware
 * `tensorlang/test_runner.py` — test discovery and execution
 * `tensorlang/app_runner.py` — application discovery and execution
 * `tensorlang/gpu.py` — GPU detection and process-level pinning
 * `tensorlang/tensor_lang.py` — argument parsing
 * `tensorlang/tensor_verifier.py` — tensor verification helpers
-* `tensorlang/constants.py` — shared constants
+* `tensorlang/constants.py` — shared constants (dtype registry, promotion)
 * `tensorlang/io.py` — file I/O helpers
 
 ---
@@ -655,6 +665,7 @@ Current performance characteristics:
 * Elementwise chains such as `add → relu` are fused into a single CUDA kernel, including broadcasting cases (row/column/general broadcast modes).
 * Training-loop weight updates use pointer swaps (no GPU memory copy between iterations).
 * Generated CUDA source is cached and reused when unchanged.
+* Mixed precision: FP16 storage with FP32 accumulation reduces memory bandwidth; cuBLAS tensor-core matmul path for f16 (engages on Volta+; falls back to standard FP16 GEMM on Pascal).
 * 4096×4096 matrix multiplication runs, but has not been benchmarked against cuBLAS or PyTorch.
 
 Performance claims should be treated as unverified until baselined on the same hardware.
@@ -718,6 +729,7 @@ The suite covers:
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
 * Functions, pipelines, portfolio-style examples
 * Load/save
+* Mixed precision (f16 basic, matmul, autograd, training)
 
 Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
 
@@ -820,10 +832,11 @@ App tests run sequentially.
 
 ### v0.5 Milestone (in progress)
 
-* **Mixed precision (FP16/FP32):** FP16 storage with FP32 accumulation, cuBLAS tensor-core matmul path.
 * **N-dimensional tensor support:** general stride-based indexing across the generator suite (elementwise, reductions, shapes, nn, unary, comparisons).
 * **Autograd coverage:** gradients for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`.
 * **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
+* **Loss scaling** for FP16 training (static or dynamic).
+* **FP16 master weights in optimizer** (Adam with FP32 master weights).
 
 ### Short Term
 

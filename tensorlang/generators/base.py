@@ -1,12 +1,59 @@
+"""
+TensorLang Generator BaseGenerator
+Kernel BaseGenerator
+
+File: tensorlang/generators/base.py
+"""
+
 from datetime import datetime, timezone
+
+from tensorlang.constants import dtype_ctype, dtype_include
+
+
+# ---------------------------------------------------------------------------
+# Dtype-aware cast templates
+# ---------------------------------------------------------------------------
+# Maps dtype name -> dict with:
+#   ctype:  C/CUDA type string
+#   read:   template to read an element as float  (for compute)
+#   write:  template to write a float result back  (for storage)
+DTYPE_CASTS = {
+    "f16": {
+        "ctype": "__half",
+        "read":  "__half2float({var}[{idx}])",
+        "write": "__float2half({expr})",
+    },
+    "f32": {
+        "ctype": "float",
+        "read":  "{var}[{idx}]",
+        "write": "{expr}",
+    },
+}
 
 
 class BaseGenerator:
     def __init__(self, DEBUG_MODE):
         self.DEBUG_MODE = DEBUG_MODE
-        # Shared guard: compute_broadcast_index helper must be emitted at most
-        # once per compilation unit.
         self._broadcast_helper_emitted = False
+
+    # ------------------------------------------------------------------
+    # Dtype helpers (inherited by all mixins)
+    # ------------------------------------------------------------------
+    def _ctype(self, dtype):
+        """C/CUDA type string for a dtype name."""
+        return dtype_ctype(dtype)
+
+    def _include(self, dtype):
+        """CUDA include directive for a dtype (f16 needs cuda_fp16.h)."""
+        return dtype_include(dtype)
+
+    def _read(self, dtype, var, idx="idx"):
+        """Template to read var[idx] as a float (for computation)."""
+        return DTYPE_CASTS[dtype]["read"].format(var=var, idx=idx)
+
+    def _write(self, dtype, expr):
+        """Template to write a float expr back as the storage dtype."""
+        return DTYPE_CASTS[dtype]["write"].format(expr=expr)
 
     def cuda_header(self):
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -53,4 +100,3 @@ class BaseGenerator:
         if self.DEBUG_MODE:
             return "CUDA_CHECK_ERROR();"
         return "// DEBUG DISABLED"
-

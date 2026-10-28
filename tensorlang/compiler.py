@@ -1,3 +1,5 @@
+# File: tensorlang/compiler.py
+
 import errno
 import os
 import subprocess
@@ -19,11 +21,10 @@ import pycuda.driver as cuda
 from tensorlang.ast_builder import build_ast
 from tensorlang.autograd import AutogradContext, ComputationGraph
 from tensorlang.codegen import CodegenMixin
-from tensorlang.constants import OPTIMIZER_NAMES
+from tensorlang.constants import OPTIMIZER_NAMES, dtype_numpy, promote_dtype
 from tensorlang.execution import ExecutionMixin
 from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.io import IOMixin
-from tensorlang.interop import InteropMixin
 from tensorlang.interop import InteropMixin
 from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.tensor_lang import TensorLang
@@ -90,7 +91,11 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             grammar_file = "tensorlang.lark"
             with open(grammar_file, "r") as f:
                 grammar = f.read()
-            parser = Lark(grammar, start="program", parser="lalr")
+            # parser = Lark(grammar, start="program", parser="lalr")
+            # parser = Lark(grammar, start="program", parser="lalr", keep_all_tokens=True)
+            # parser = Lark(grammar, start="program", parser="earley")
+            parser = Lark(grammar, start="program", parser="lalr", propagate_positions=True)
+
             if self.debug_mode:
                 self.tensorlang.print(type="[COMPILER]", message=f"Loaded Lark Grammar file: {grammar_file}")
         except FileNotFoundError:
@@ -136,7 +141,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             if self.debug_ast:
                 self.tensorlang.print(message=f"Parsed AST:\n{parse_tree.pretty()}")
 
-            ast, output_tensor, functions = build_ast(parse_tree, self.debug_mode, self.debug_info)
+            # ast, output_tensor, functions = build_ast(parse_tree, self.debug_mode, self.debug_info)
+            ast, output_tensor, functions = build_ast(parse_tree, self.debug_mode, self.debug_info, source_code=code)
 
             functions_called = list(functions.keys())
             if self.debug_mode:
@@ -166,7 +172,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                     if node.get("type") == "let" and node.get("requires_grad", False):
                         grad_name = f"{node['name']}_grad"
                         source_shape = env[node["name"]]["shape"]
-                        env[grad_name] = {"dtype": "f32", "shape": source_shape}
+                        source_dtype = env[node["name"]].get("dtype", "f32")
+                        env[grad_name] = {"dtype": source_dtype, "shape": source_shape}
                         if self.debug_mode:
                             self.tensorlang.print(
                                 message=f"[COMPILER] Pre-registered gradient shape: "
@@ -178,7 +185,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 grad_name = f"{body_node['name']}_grad"
                                 if body_node["name"] in env:
                                     source_shape = env[body_node["name"]]["shape"]
-                                    env[grad_name] = {"dtype": "f32", "shape": source_shape}
+                                    source_dtype = env[body_node["name"]].get("dtype", "f32")
+                                    env[grad_name] = {"dtype": source_dtype, "shape": source_shape}
 
                 generator = KernelGenerator(self.debug_mode)
                 kernels = []
@@ -212,7 +220,6 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         node["_flat_items"] = flat_items
                         continue
 
-
                     if node.get("type") in OPTIMIZER_NAMES or (
                         node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES
                     ):
@@ -241,7 +248,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                         if expr.get("type") == "tensor_literal":
                             shape = tuple(int(dim) for dim in env[name]["shape"])
-                            tensors[name] = np.array(expr["data"], dtype=np.float32).reshape(shape)
+                            np_dtype = dtype_numpy(env[name].get("dtype", "f32"))
+                            tensors[name] = np.array(expr["data"], dtype=np_dtype).reshape(shape)
                             if self.debug_info:
                                 self.tensorlang.print(type="[INFO]", message=f"Kernel Tensor Initialized {name} with shape {shape}")
 
@@ -266,19 +274,26 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                         )
                                         return False
                                 else:
+                                    if loaded_data.dtype == np.float16:
+                                        inferred_dtype = "f16"
+                                    elif loaded_data.dtype == np.float64:
+                                        inferred_dtype = "f64"
+                                    else:
+                                        inferred_dtype = "f32"
                                     env[name] = {
-                                        "dtype": "f32",
+                                        "dtype": inferred_dtype,
                                         "shape": loaded_data.shape,
                                         "metadata": metadata,
                                     }
-                                tensors[name] = loaded_data
+                                target_dtype = dtype_numpy(env[name].get("dtype", "f32"))
+                                tensors[name] = loaded_data.astype(target_dtype)
                                 if self.cache_layers:
                                     cache_npy_path = cache_file_dir / f"{name}.npy"
-                                    np.save(cache_npy_path, loaded_data)
+                                    np.save(cache_npy_path, tensors[name])
                                 if self.debug_info:
                                     if "columns" in metadata:
                                         self.tensorlang.print(type="[INFO]", message=f"Columns: {metadata['columns']}")
-                                    preview = loaded_data.flatten()[:5]
+                                    preview = tensors[name].flatten()[:5]
                                     self.tensorlang.print(type="[INFO]", message=f"First values: {preview}")
                             except FileNotFoundError as e:
                                 self.tensorlang.print(message=f"[COMPILER] Error: {e}")
@@ -294,36 +309,37 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             shape1, shape2 = env[arg1]["shape"], env[arg2]["shape"]
                             output_shape = env[name]["shape"]
                             self._record_operation(expr["type"], name, [arg1, arg2])
+                            result_dtype = promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32"))
                             if self.debug_mode:
                                 self.tensorlang.print(message=f"Tensor {expr['type']}")
                                 self.tensorlang.print(message=f"Tensor Shape1: {len(shape1)} Shape2: {len(shape2)}")
                             if shape1 == shape2:
                                 size = int(np.prod([int(d) for d in output_shape]))
-                                kernel, kernel_info = generator.elementwise(expr["type"], name, arg1, arg2, size)
+                                kernel, kernel_info = generator.elementwise(expr["type"], name, arg1, arg2, size, dtype=result_dtype)
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
                             elif _is_scalar_shape(shape1) or _is_scalar_shape(shape2):
                                 scalar_on_left = _is_scalar_shape(shape1) and not _is_scalar_shape(shape2)
                                 size = int(np.prod([int(d) for d in output_shape]))
                                 kernel, kernel_info = generator.binary_1d_broadcast(
-                                    expr["type"], name, arg1, arg2, size, scalar_on_left=scalar_on_left
+                                    expr["type"], name, arg1, arg2, size, scalar_on_left=scalar_on_left, dtype=result_dtype
                                 )
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
                             elif len(shape1) == 2 and len(shape2) == 1:
                                 kernel, kernel_info = generator.binary_broadcast(
-                                    expr["type"], expr["type"], name, arg1, arg2, shape1, shape2, output_shape
+                                    expr["type"], expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype=result_dtype
                                 )
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
                             elif len(shape1) == 1 and len(shape2) == 1 and (shape1[0] == 1 or shape2[0] == 1):
                                 size = int(np.prod([int(d) for d in output_shape]))
-                                kernel, kernel_info = generator.binary_1d_broadcast(expr["type"], name, arg1, arg2, size)
+                                kernel, kernel_info = generator.binary_1d_broadcast(expr["type"], name, arg1, arg2, size, dtype=result_dtype)
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
                             elif self.can_broadcast(shape1, shape2):
                                 kernel, kernel_info = generator.binary_general_broadcast(
-                                    expr["type"], name, arg1, arg2, shape1, shape2, output_shape
+                                    expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype=result_dtype
                                 )
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
@@ -345,7 +361,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                         elif expr.get("type") == "fill":
                             size = int(np.prod([int(dim) for dim in expr["shape"]]))
-                            kernel, kernel_info = generator.fill(expr["type"], name, None, None, size, expr["value"])
+                            fill_dtype = env[name].get("dtype", "f32") if name in env else "f32"
+                            kernel, kernel_info = generator.fill(expr["type"], name, None, None, size, expr["value"], dtype=fill_dtype)
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -360,7 +377,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             else:
                                 raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
                             kernel, kernel_info = generator.matmul(
-                                expr["type"], name, arg1, arg2, int(m), int(n), int(p)
+                                expr["type"], name, arg1, arg2, int(m), int(n), int(p),
+                                dtype=promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32"))
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -381,7 +399,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             method = getattr(generator, expr["type"], None)
                             if method is None:
                                 raise ValueError(f"No method found for operation: {expr['type']}")
-                            kernel, kernel_info = method(expr["type"], name, arg1, size)
+                            kernel, kernel_info = method(expr["type"], name, arg1, size, dtype=env[arg1].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
                             self._record_operation(expr["type"], name, [arg1])
@@ -390,7 +408,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.softmax(expr["type"], name, tensor_name, input_shape, axis)
+                            kernel, kernel_info = generator.softmax(expr["type"], name, tensor_name, input_shape, axis, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
                             self._record_operation("softmax", name, [tensor_name], metadata={"axis": axis})
@@ -401,7 +419,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             output_shape = env[name]["shape"]
                             size = int(np.prod([int(dim) for dim in output_shape]))
                             kernel, kernel_info = generator.greater_broadcast(
-                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size
+                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size, dtype="f32"
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -411,7 +429,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             shape1, shape2 = env[arg1]["shape"], env[arg2]["shape"]
                             output_shape = env[name]["shape"]
                             kernel, kernel_info = generator.less_broadcast(
-                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape
+                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype="f32"
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -421,7 +439,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             shape1, shape2 = env[arg1]["shape"], env[arg2]["shape"]
                             output_shape = env[name]["shape"]
                             kernel, kernel_info = generator.equal(
-                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape
+                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype="f32"
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -430,7 +448,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.sum(expr["type"], name, tensor_name, axis, input_shape)
+                            kernel, kernel_info = generator.sum(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
                             self._record_operation("sum", name, [tensor_name], metadata={"axis": axis})
@@ -439,7 +457,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.mean(expr["type"], name, tensor_name, axis, input_shape)
+                            kernel, kernel_info = generator.mean(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
                             self._record_operation("mean", name, [tensor_name], metadata={"axis": axis})
@@ -450,7 +468,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             input_shape = env[tensor_name]["shape"]
                             output_shape = env[name]["shape"]
                             kernel, kernel_info = generator.slice(
-                                expr["type"], name, tensor_name, slice_specs, input_shape, output_shape
+                                expr["type"], name, tensor_name, slice_specs, input_shape, output_shape, dtype=env[tensor_name].get("dtype", "f32")
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -459,7 +477,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.max(expr["type"], name, tensor_name, axis, input_shape)
+                            kernel, kernel_info = generator.max(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -467,7 +485,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.min(expr["type"], name, tensor_name, axis, input_shape)
+                            kernel, kernel_info = generator.min(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -475,7 +493,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.argmax(expr["type"], name, tensor_name, axis, input_shape)
+                            kernel, kernel_info = generator.argmax(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -483,7 +501,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
                             input_shape = env[tensor_name]["shape"]
-                            kernel, kernel_info = generator.argmin(expr["type"], name, tensor_name, axis, input_shape)
+                            kernel, kernel_info = generator.argmin(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -496,6 +514,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.linear(
                                 expr["type"], name, input_name, weight_name, bias_name,
                                 input_shape, weight_shape, output_shape,
+                                dtype=promote_dtype(promote_dtype(env[input_name].get("dtype", "f32"), env[weight_name].get("dtype", "f32")), env[bias_name].get("dtype", "f32"))
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -509,7 +528,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 axis = len(input_shape) - 1
                             self._record_operation("layer_norm", name, [tensor_name], metadata={"axis": axis, "eps": eps})
                             kernel, kernel_info = generator.layer_norm(
-                                expr["type"], name, tensor_name, axis, eps, input_shape
+                                expr["type"], name, tensor_name, axis, eps, input_shape, dtype=env[tensor_name].get("dtype", "f32")
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -520,7 +539,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             target_shape = env[target_name]["shape"]
                             self._record_operation("cross_entropy", name, [pred_name, target_name])
                             kernel, kernel_info = generator.cross_entropy(
-                                expr["type"], name, pred_name, pred_shape, target_shape, target_name
+                                expr["type"], name, pred_name, pred_shape, target_shape, target_name,
+                                dtype=promote_dtype(env[pred_name].get("dtype", "f32"), env[target_name].get("dtype", "f32"))
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -530,7 +550,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             pred_shape = env[pred_name]["shape"]
                             total_elements = int(np.prod([int(dim) for dim in pred_shape]))
                             kernel, kernel_info = generator.mse_loss(
-                                expr["type"], name, pred_name, target_name, total_elements
+                                expr["type"], name, pred_name, target_name, total_elements,
+                                dtype=promote_dtype(env[pred_name].get("dtype", "f32"), env[target_name].get("dtype", "f32"))
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -540,7 +561,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             input_shape = env[tensor_name]["shape"]
                             axes = expr.get("axes")
-                            kernel, kernel_info = generator.transpose(expr["type"], name, input_shape, tensor_name, axes)
+                            kernel, kernel_info = generator.transpose(expr["type"], name, input_shape, tensor_name, axes, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -548,14 +569,17 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             tensor_name = expr["tensor"]
                             input_shape = env[tensor_name]["shape"]
                             total_elements = int(np.prod([int(dim) for dim in input_shape]))
-                            kernel, kernel_info = generator.reshape(expr["type"], name, tensor_name, total_elements)
+                            kernel, kernel_info = generator.reshape(expr["type"], name, tensor_name, total_elements, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
                         elif expr.get("type") == "concat":
                             tensor_names = expr["tensors"]
                             axis = expr["axis"]
-                            kernel, kernel_info = generator.concat(expr["type"], name, tensor_names, axis, env)
+                            concat_dtype = env[tensor_names[0]].get("dtype", "f32")
+                            for tn in tensor_names[1:]:
+                                concat_dtype = promote_dtype(concat_dtype, env[tn].get("dtype", "f32"))
+                            kernel, kernel_info = generator.concat(expr["type"], name, tensor_names, axis, env, dtype=concat_dtype)
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
@@ -566,7 +590,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             eps = expr.get("eps", 1e-5)
                             input_shape = env[tensor_name]["shape"]
                             kernel, kernel_info = generator.batch_norm(
-                                expr["type"], name, input_shape, tensor_name, running_mean_name, eps, running_var_name
+                                expr["type"], name, input_shape, tensor_name, running_mean_name, eps, running_var_name,
+                                dtype=env[tensor_name].get("dtype", "f32")
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -576,7 +601,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             eps = expr.get("eps", 1e-5)
                             input_shape = env[tensor_name]["shape"]
                             kernel, kernel_info = generator.instance_norm(
-                                expr["type"], name, tensor_name, input_shape, eps
+                                expr["type"], name, tensor_name, input_shape, eps, dtype=env[tensor_name].get("dtype", "f32")
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
@@ -647,18 +672,36 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     self.tensorlang.print(message=f"[COMPILER] CUDA Execute: found backward() at AST index {i}")
                                 break
 
-                        for name in env:
-                            shape = tuple(int(dim) for dim in env[name]["shape"])
-                            size_bytes = int(np.prod(shape) * np.float32().nbytes) if shape else np.float32().nbytes
+                        for name, info in env.items():
+                            if name.endswith("_grad"):
+                                continue
+                            shape = tuple(int(dim) for dim in info["shape"])
+                            np_dtype = dtype_numpy(info.get("dtype", "f32"))
+                            size_bytes = int(np.prod(shape) * np_dtype.itemsize) if shape else np_dtype.itemsize
+                            if size_bytes == 0:
+                                size_bytes = np_dtype.itemsize
                             gpu_allocs[name] = cuda.mem_alloc(size_bytes)
                             if name in tensors:
-                                cuda.memcpy_htod(gpu_allocs[name], tensors[name])
+                                arr = np.ascontiguousarray(tensors[name], dtype=np_dtype)
+                                cuda.memcpy_htod(gpu_allocs[name], arr)
                                 if self.debug_mode:
                                     self.tensorlang.print(
                                         message=f"[COMPILER] CUDA Execute: copied \"{name}\" to GPU\n"
                                                 f"shape: {tensors[name].shape} \n"
                                                 f"sample: {tensors[name][:2] if getattr(tensors[name], 'ndim', 0) > 1 else tensors[name]}"
                                     )
+
+                        # Pre-allocate gradient tensors
+                        for name, info in env.items():
+                            if name.endswith("_grad"):
+                                shape = tuple(int(dim) for dim in info["shape"])
+                                np_dtype = dtype_numpy(info.get("dtype", "f32"))
+                                size_bytes = int(np.prod(shape) * np_dtype.itemsize) if shape else np_dtype.itemsize
+                                if size_bytes == 0:
+                                    size_bytes = np_dtype.itemsize
+                                gpu_allocs[name] = cuda.mem_alloc(size_bytes)
+                                zeros = np.zeros(shape if shape else (1,), dtype=np_dtype)
+                                cuda.memcpy_htod(gpu_allocs[name], zeros)
 
                         ast_to_kernel_map = {}
                         kernel_idx = 0
@@ -769,9 +812,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                             else:
                                                 if self.debug_mode:
                                                     self.tensorlang.print(message=f"[COMPILER] [Autograd] Warning: {grad_tensor_name} not in GPU allocations")
+                                            grad_dtype = env.get(grad_name, {}).get("dtype", "f32")
                                             env[grad_tensor_name] = {
-                                                "dtype": "f32",
-                                                "shape": grad_tensor.shape,
+                                                "dtype": grad_dtype,
+                                                "shape": tuple(int(d) for d in grad_tensor.shape),
                                             }
                                             if self.debug_mode:
                                                 self.tensorlang.print(message=f"[COMPILER] [Autograd] Made gradient accessible: {grad_tensor_name}")
@@ -852,3 +896,46 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             self.tensorlang.print(message=f"[COMPILER] Unexpected error: {e}")
             traceback.print_exc()
             sys.exit(1)
+
+    def can_broadcast(self, shape1, shape2):
+        if len(shape1) != len(shape2):
+            return False
+        for d1, d2 in zip(shape1, shape2):
+            if d1 != d2 and d1 != 1 and d2 != 1:
+                return False
+        return True
+
+    def _load_data_file(self, file_path, array_name=None):
+        import numpy as np
+        import pandas as pd
+        from pathlib import Path
+
+        path = Path(file_path)
+        suffix = path.suffix.lower()
+
+        if suffix == ".npy":
+            data = np.load(file_path)
+            return data, {"format": "npy"}
+
+        elif suffix == ".npz":
+            npz = np.load(file_path)
+            if "data" in npz.files:
+                data = npz["data"]
+            elif len(npz.files) > 0:
+                data = npz[npz.files[0]]
+            else:
+                npz.close()
+                raise ValueError("NPZ file has no arrays")
+            result = data
+            npz.close()
+            return result, {"format": "npz"}
+
+        elif suffix == ".csv":
+            df = pd.read_csv(file_path)
+            first_col = df.columns[0]
+            if first_col.lower() in ["date", "time", "datetime", "index", "id"]:
+                df = df.drop(columns=[first_col])
+            return df.to_numpy(dtype=np.float32), {"format": "csv", "columns": list(df.columns)}
+
+        else:
+            raise ValueError(f"Unsupported file format: {suffix}")

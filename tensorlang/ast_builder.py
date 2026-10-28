@@ -90,10 +90,14 @@ def flatten_expr_arg(arg_node, synthetic_nodes: list, DEBUG_MODE=False) -> str:
         tensorlang.print(message=f"[AST] Synthesised binding: {tmp_name} = {arg_node['type']}(...)")
     return tmp_name
 
-def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str | None, dict]:
+# def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple[list, str | None, dict]:
+def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False, source_code=None) -> tuple[list, str | None, dict]:
+
     """Build AST from parse tree, handling function definitions and inlining"""
     # Reset per-thread synthetic name counter for this compilation unit.
     _reset_tmp_counter()
+    _set_source_code(source_code)
+
     functions = {}
     ast = []
     output_tensor = None
@@ -307,7 +311,10 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | 
     # Build type if present
     ty = None
     if type_idx is not None:
+        #ty = build_type(children[type_idx], DEBUG_MODE, DEBUG_INFO)
+        #ty = build_type(children[type_idx], DEBUG_MODE, DEBUG_INFO, source_code=source_code)
         ty = build_type(children[type_idx], DEBUG_MODE, DEBUG_INFO)
+
 
     # Build expression
     expr = None
@@ -323,16 +330,101 @@ def build_let_binding(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict | 
         'tree': tree
     }
 
-def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
+# def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
+    # """Parse type annotation"""
+    # if DEBUG_MODE:
+        # tensorlang.print(message=f"[AST] Building type from {tree.data}")
+
+    # if tree.data == 'concrete_type':
+        # children = tree.children
+        # dtype_value = 'f32'
+        # if len(children) > 0 and isinstance(children[0], Token) and children[0].value in ['f16', 'f32', 'f64']:
+            # dtype_value = children[0].value
+        # shape_tree = children[1] if len(children) > 1 and isinstance(children[1], Tree) else None
+        # shape = build_shape(shape_tree, DEBUG_MODE, DEBUG_INFO) if shape_tree else (0, 0)
+        # return {'dtype': dtype_value, 'shape': shape}
+
+    # elif tree.data == 'generic_type':
+        # generic_shape_tree = tree.children[0]
+        # generic_dims = []
+        # for child in generic_shape_tree.children:
+            # if isinstance(child, Token):
+                # if child.type == 'NAME':
+                    # generic_dims.append(child.value)
+                # elif child.type == 'NUMBER':
+                    # generic_dims.append(int(float(child.value)))
+        # return {'dtype': 'f32', 'shape': tuple(generic_dims)}
+
+    # if tree.data == 'type':
+        # return build_type(tree.children[0], DEBUG_MODE, DEBUG_INFO)
+
+# def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
+    # """Parse type annotation"""
+    # if DEBUG_MODE:
+        # tensorlang.print(message=f"[AST] Building type from {tree.data}")
+
+    # if tree.data == 'concrete_type':
+        # children = tree.children
+        # dtype_value = 'f32'
+        # first_child = children[0] if len(children) > 0 else None
+        # if isinstance(first_child, Token) and first_child.value in ['f16', 'f32', 'f64']:
+            # dtype_value = first_child.value
+        # elif isinstance(first_child, Tree) and first_child.data == 'dtype':
+            # if len(first_child.children) > 0 and isinstance(first_child.children[0], Token):
+                # dtype_token = first_child.children[0]
+                # if dtype_token.value in ['f16', 'f32', 'f64']:
+                    # dtype_value = dtype_token.value
+        # shape_tree = children[1] if len(children) > 1 and isinstance(children[1], Tree) else None
+        # shape = build_shape(shape_tree, DEBUG_MODE, DEBUG_INFO) if shape_tree else (0, 0)
+        # return {'dtype': dtype_value, 'shape': shape}
+
+    # elif tree.data == 'generic_type':
+        # generic_shape_tree = tree.children[0]
+        # generic_dims = []
+        # for child in generic_shape_tree.children:
+            # if isinstance(child, Token):
+                # if child.type == 'NAME':
+                    # generic_dims.append(child.value)
+                # elif child.type == 'NUMBER':
+                    # generic_dims.append(int(float(child.value)))
+        # return {'dtype': 'f32', 'shape': tuple(generic_dims)}
+
+    # if tree.data == 'type':
+        # return build_type(tree.children[0], DEBUG_MODE, DEBUG_INFO)
+
+def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False, source_code=None) -> dict:
     """Parse type annotation"""
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] Building type from {tree.data}")
 
+    if source_code is None:
+        source_code = _get_source_code()
+
     if tree.data == 'concrete_type':
         children = tree.children
         dtype_value = 'f32'
-        if len(children) > 0 and isinstance(children[0], Token) and children[0].value in ['f32', 'f64']:
-            dtype_value = children[0].value
+        first_child = children[0] if len(children) > 0 else None
+        
+        # Try Token first (works with keep_all_tokens)
+        if isinstance(first_child, Token) and first_child.value in ['f16', 'f32', 'f64']:
+            dtype_value = first_child.value
+        # Try position info + source code
+        elif source_code and hasattr(first_child, 'meta') and first_child.meta is not None:
+            try:
+                start = first_child.meta.start_pos
+                end = first_child.meta.end_pos
+                dtype_text = source_code[start:end].strip()
+                if dtype_text in ['f16', 'f32', 'f64']:
+                    dtype_value = dtype_text
+            except Exception:
+                pass
+        # Fallback: try children of dtype tree
+        elif isinstance(first_child, Tree) and first_child.data == 'dtype':
+            for child in first_child.children:
+                if isinstance(child, Token) and child.value in ['f16', 'f32', 'f64']:
+                    dtype_value = child.value
+                    break
+        
         shape_tree = children[1] if len(children) > 1 and isinstance(children[1], Tree) else None
         shape = build_shape(shape_tree, DEBUG_MODE, DEBUG_INFO) if shape_tree else (0, 0)
         return {'dtype': dtype_value, 'shape': shape}
@@ -349,7 +441,9 @@ def build_type(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         return {'dtype': 'f32', 'shape': tuple(generic_dims)}
 
     if tree.data == 'type':
-        return build_type(tree.children[0], DEBUG_MODE, DEBUG_INFO)
+        return build_type(tree.children[0], DEBUG_MODE, DEBUG_INFO, source_code=source_code)
+
+
 
 def build_shape(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> tuple:
     """Parse shape specification"""
@@ -1038,3 +1132,9 @@ def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict
         'tensor': tensor_name,
         'file_path': file_path
     }
+
+def _set_source_code(code):
+    _tls.source_code = code
+
+def _get_source_code():
+    return getattr(_tls, 'source_code', None)

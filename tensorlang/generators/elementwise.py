@@ -1,22 +1,35 @@
+"""
+TensorLang Generator ElementwiseMixin
+Kernel ElementwiseMixin
+
+File: tensorlang/generators/elementwise.py
+"""
+
 import numpy as np
 
 from .base import BaseGenerator
 
 
 class ElementwiseMixin(BaseGenerator):
-    def elementwise(self, op_type, name, arg1, arg2, size):
+    def elementwise(self, op_type, name, arg1, arg2, size, dtype="f32"):
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
-        kernel = f"""
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+        a_read = self._read(dtype, "A")
+        b_read = self._read(dtype, "B")
+        result = self._write(dtype, f"{a_read} {op_symbol} {b_read}")
+
+        kernel = include + f"""
 // -----------------------------------------------------------------------------
-// TensorLang -> Elementwise {op_type} ({op_symbol})
+// TensorLang -> Elementwise {op_type} ({op_symbol}) [{dtype}]
 // -----------------------------------------------------------------------------
-__global__ void {op_type}_kernel_{name}(float* A, float* B, float* C, int size) {{
+__global__ void {op_type}_kernel_{name}({ctype}* A, {ctype}* B, {ctype}* C, int size) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {{
-        C[idx] = A[idx] {op_symbol} B[idx];
+        C[idx] = {result};
     }}
 }}
-extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) {{
+extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int size) {{
     dim3 block(256);
     dim3 grid((size + block.x - 1) / block.x);
     {op_type}_kernel_{name}<<<grid, block>>>(A, B, C, size);
@@ -26,20 +39,25 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) 
 """
         return kernel, (op_type, name, arg1, arg2, size)
 
-    def binary_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape):
+    def binary_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape, dtype="f32"):
         rows, cols = output_shape
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
 
         if shape1[0] == shape2[0]:
-            kernel = f"""
-__global__ void {op_type}_broadcast_rows_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+            a_read = self._read(dtype, "A", "i * cols + j")
+            b_read = self._read(dtype, "B", "i")
+            result = self._write(dtype, f"{a_read} {op_symbol} {b_read}")
+            kernel = include + f"""
+__global__ void {op_type}_broadcast_rows_kernel_{name}({ctype}* A, {ctype}* B, {ctype}* C, int rows, int cols) {{
     int i = blockIdx.y * blockDim.y + threadIdx.y;
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < rows && j < cols) {{
-        C[i * cols + j] = A[i * cols + j] {op_symbol} B[i];
+        C[i * cols + j] = {result};
     }}
 }}
-extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, int cols) {{
+extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int rows, int cols) {{
     dim3 block(16, 16);
     dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
     {op_type}_broadcast_rows_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
@@ -49,15 +67,18 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, 
 """
             return kernel, (f'{op_type}_broadcast_rows', name, arg1, arg2, rows, cols)
         else:
-            kernel = f"""
-__global__ void {op_type}_broadcast_kernel_{name}(float* A, float* B, float* C, int rows, int cols) {{
+            a_read = self._read(dtype, "A", "i * cols + j")
+            b_read = self._read(dtype, "B", "j")
+            result = self._write(dtype, f"{a_read} {op_symbol} {b_read}")
+            kernel = include + f"""
+__global__ void {op_type}_broadcast_kernel_{name}({ctype}* A, {ctype}* B, {ctype}* C, int rows, int cols) {{
     int i = blockIdx.y * blockDim.y + threadIdx.y;
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < rows && j < cols) {{
-        C[i * cols + j] = A[i * cols + j] {op_symbol} B[j];
+        C[i * cols + j] = {result};
     }}
 }}
-extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, int cols) {{
+extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int rows, int cols) {{
     dim3 block(16, 16);
     dim3 grid((cols + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
     {op_type}_broadcast_kernel_{name}<<<grid, block>>>(A, B, C, rows, cols);
@@ -67,21 +88,30 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int rows, 
 """
             return kernel, (f'{op_type}_broadcast', name, arg1, arg2, rows, cols)
 
-    def binary_1d_broadcast(self, op_type, name, arg1, arg2, size, scalar_on_left=False):
+    def binary_1d_broadcast(self, op_type, name, arg1, arg2, size, scalar_on_left=False, dtype="f32"):
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
-        if scalar_on_left:
-            scalar_expr = "A[0] " + op_symbol + " B_scalar[idx]"
-        else:
-            scalar_expr = "A[idx] " + op_symbol + " B_scalar[0]"
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
 
-        kernel = f"""
-__global__ void {op_type}_scalar_kernel_{name}(float* A, float* B_scalar, float* C, int size) {{
+        if scalar_on_left:
+            a_read = self._read(dtype, "A", "0")
+            b_read = self._read(dtype, "B_scalar", "idx")
+            scalar_expr = f"{a_read} {op_symbol} {b_read}"
+        else:
+            a_read = self._read(dtype, "A", "idx")
+            b_read = self._read(dtype, "B_scalar", "0")
+            scalar_expr = f"{a_read} {op_symbol} {b_read}"
+
+        result = self._write(dtype, scalar_expr)
+
+        kernel = include + f"""
+__global__ void {op_type}_scalar_kernel_{name}({ctype}* A, {ctype}* B_scalar, {ctype}* C, int size) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {{
-        C[idx] = {scalar_expr};
+        C[idx] = {result};
     }}
 }}
-extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) {{
+extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int size) {{
     dim3 block(256);
     dim3 grid((size + block.x - 1) / block.x);
     {op_type}_scalar_kernel_{name}<<<grid, block>>>(A, B, C, size);
@@ -91,11 +121,14 @@ extern "C" void launch_{op_type}_{name}(float* A, float* B, float* C, int size) 
 """
         return kernel, (f'{op_type}_scalar', name, arg1, arg2, size)
 
-    def binary_general_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape):
+    def binary_general_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape, dtype="f32"):
         ndim_out = len(output_shape)
         total_elements = int(np.prod([int(dim) for dim in output_shape]))
         padded_shape1 = (1,) * (ndim_out - len(shape1)) + tuple(shape1)
         padded_shape2 = (1,) * (ndim_out - len(shape2)) + tuple(shape2)
+
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
 
         if not self._broadcast_helper_emitted:
             broadcast_helper = """
@@ -120,9 +153,14 @@ __device__ int compute_broadcast_index(int linear_idx, const int* out_shape, con
             broadcast_helper = ""
 
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
-        kernel = broadcast_helper + f"""
+
+        a_read = self._read(dtype, "A", "idx1")
+        b_read = self._read(dtype, "B", "idx2")
+        result = self._write(dtype, f"{a_read} {op_symbol} {b_read}")
+
+        kernel = broadcast_helper + include + f"""
 __global__ void {op_type}_general_broadcast_kernel_{name}(
-    float* A, float* B, float* C,
+    {ctype}* A, {ctype}* B, {ctype}* C,
     int* shape1, int* shape2, int* out_shape,
     int ndim, int total_elements) {{
 
@@ -132,12 +170,12 @@ __global__ void {op_type}_general_broadcast_kernel_{name}(
         int idx1 = compute_broadcast_index(idx, out_shape, shape1, ndim);
         int idx2 = compute_broadcast_index(idx, out_shape, shape2, ndim);
 
-        C[idx] = A[idx1] {op_symbol} B[idx2];
+        C[idx] = {result};
     }}
 }}
 
 extern "C" void launch_{op_type}_{name}(
-    float* A, float* B, float* C,
+    {ctype}* A, {ctype}* B, {ctype}* C,
     int* shape1, int* shape2, int* out_shape,
     int ndim, int total_elements) {{
 
@@ -153,15 +191,19 @@ extern "C" void launch_{op_type}_{name}(
         return kernel, ('general_broadcast', op_type, name, arg1, arg2,
                         list(padded_shape1), list(padded_shape2), list(output_shape), total_elements)
 
-    def fill(self, op_type, name, arg1, arg2, size, op_value):
-        kernel = f"""
-__global__ void fill_kernel_{name}(float* output, float value, int size) {{
+    def fill(self, op_type, name, arg1, arg2, size, op_value, dtype="f32"):
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+        write = self._write(dtype, "value")
+
+        kernel = include + f"""
+__global__ void fill_kernel_{name}({ctype}* output, float value, int size) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {{
-        output[idx] = value;
+        output[idx] = {write};
     }}
 }}
-extern "C" void launch_fill_{name}(float* output, float value, int size) {{
+extern "C" void launch_fill_{name}({ctype}* output, float value, int size) {{
     dim3 block(256);
     dim3 grid((size + block.x - 1) / block.x);
     fill_kernel_{name}<<<grid, block>>>(output, value, size);
@@ -172,7 +214,10 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
         return kernel, (op_type, name, arg1, arg2, size, op_value)
 
     def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size,
-                          broadcast=False, input_shapes=None, output_shape=None):
+                          broadcast=False, input_shapes=None, output_shape=None, dtype="f32"):
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+
         value_map = {}
         for idx, a in enumerate(external_inputs):
             value_map[a] = ("in", idx)
@@ -182,13 +227,13 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
         def resolve_fast(arg):
             kind, i = value_map[arg]
             if kind == "in":
-                return f"in{i}[idx]"
+                return self._read(dtype, f"in{i}", "idx")
             return f"r{i}"
 
         def resolve_bc(arg):
             kind, i = value_map[arg]
             if kind == "in":
-                return f"in{i}[in{i}_idx]"
+                return self._read(dtype, f"in{i}", f"in{i}_idx")
             return f"r{i}"
 
         _OP_EXPR = {
@@ -204,8 +249,8 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
         }
 
         if not broadcast:
-            param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
-            param_parts += [f"float* out{i}" for i in range(len(outputs))]
+            param_parts = [f"{ctype}* in{i}" for i in range(len(external_inputs))]
+            param_parts += [f"{ctype}* out{i}" for i in range(len(outputs))]
             param_parts.append("int size")
             param_str = ", ".join(param_parts)
 
@@ -216,7 +261,7 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                 expr = _OP_EXPR.get(op, lambda x, _y: x)(a0, a1)
                 body_lines.append(f"    float r{oi} = {expr};")
             for oi in range(len(outputs)):
-                body_lines.append(f"    out{oi}[idx] = r{oi};")
+                body_lines.append(f"    out{oi}[idx] = {self._write(dtype, f'r{oi}')};" )
             body_lines.append("}")
 
             launch_args = ", ".join(
@@ -224,7 +269,7 @@ extern "C" void launch_fill_{name}(float* output, float value, int size) {{
                 + [f"out{i}" for i in range(len(outputs))]
                 + ["size"]
             )
-            kernel = f"""
+            kernel = include + f"""
 __global__ void fused_elementwise_kernel_{name}({param_str}) {{
     {chr(10).join(body_lines)}
 }}
@@ -277,8 +322,8 @@ __device__ int compute_broadcast_index(int linear_idx, const int* out_shape, con
         else:
             broadcast_helper = ""
 
-        param_parts = [f"float* in{i}" for i in range(len(external_inputs))]
-        param_parts += [f"float* out{i}" for i in range(len(outputs))]
+        param_parts = [f"{ctype}* in{i}" for i in range(len(external_inputs))]
+        param_parts += [f"{ctype}* out{i}" for i in range(len(outputs))]
         for i in range(len(external_inputs)):
             param_parts.append(f"int* in{i}_shape")
         param_parts.append("int* out_shape")
@@ -296,13 +341,14 @@ __device__ int compute_broadcast_index(int linear_idx, const int* out_shape, con
                 body_lines.append(f"    int in{i}_idx = idx % out_shape[1];")
             else:
                 body_lines.append(f"    int in{i}_idx = compute_broadcast_index(idx, out_shape, in{i}_shape, ndim);")
+
         for oi, (op, _out, args) in enumerate(chain):
             a0 = resolve_bc(args[0])
             a1 = resolve_bc(args[1]) if len(args) > 1 else a0
             expr = _OP_EXPR.get(op, lambda x, _y: x)(a0, a1)
             body_lines.append(f"    float r{oi} = {expr};")
         for oi in range(len(outputs)):
-            body_lines.append(f"    out{oi}[idx] = r{oi};")
+            body_lines.append(f"    out{oi}[idx] = {self._write(dtype, f'r{oi}')};" )
         body_lines.append("}")
 
         launch_args = ", ".join(
@@ -312,7 +358,7 @@ __device__ int compute_broadcast_index(int linear_idx, const int* out_shape, con
             + ["out_shape", "ndim", "size"]
         )
 
-        kernel = broadcast_helper + f"""
+        kernel = broadcast_helper + include + f"""
 __global__ void fused_elementwise_kernel_{name}({param_str}) {{
     {chr(10).join(body_lines)}
 }}
@@ -327,4 +373,3 @@ extern "C" void launch_fused_elementwise_{name}({param_str}) {{
         kernel_info = ("fused_elementwise", name, chain, external_inputs, outputs, size, True,
                        [list(s) for s in padded_in_shapes], list(output_shape))
         return kernel, kernel_info
-

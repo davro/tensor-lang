@@ -1,3 +1,5 @@
+# File: tensorlang/execution.py
+
 """Execution helpers for TensorCompiler."""
 
 import numpy as np
@@ -6,11 +8,53 @@ from ctypes import c_float, c_int, c_void_p
 from pathlib import Path
 
 from tensorlang.tensor_lang import TensorLang
+from tensorlang.constants import dtype_numpy
 
 
 class ExecutionMixin:
     def _inline_functions(self, ast, functions):
         return ast
+
+    def _tl_dtype(self, env, name):
+        """Get the TensorLang dtype name for a tensor, defaulting to f32."""
+        if name in env and isinstance(env[name], dict):
+            return env[name].get("dtype", "f32")
+        return "f32"
+
+    def _np_dtype(self, env, name):
+        """Get the numpy dtype for a tensor, defaulting to float32."""
+        return dtype_numpy(self._tl_dtype(env, name))
+
+    def _ensure_gpu_alloc(self, name, env, tensors, gpu_allocs, cuda):
+        """Ensure a GPU allocation exists for *name*, creating one if needed."""
+        if name in gpu_allocs:
+            return gpu_allocs[name]
+        if name not in env:
+            raise KeyError(f"_ensure_gpu_alloc: '{name}' not in env")
+        shape = tuple(int(d) for d in env[name]["shape"])
+        np_dtype = self._np_dtype(env, name)
+        size_bytes = int(np.prod(shape) * np_dtype.itemsize) if shape else np_dtype.itemsize
+        if size_bytes == 0:
+            size_bytes = np_dtype.itemsize
+        alloc = cuda.mem_alloc(size_bytes)
+        gpu_allocs[name] = alloc
+        # If we have CPU data, push it
+        if name in tensors and isinstance(tensors[name], np.ndarray):
+            arr = np.ascontiguousarray(tensors[name], dtype=np_dtype)
+            cuda.memcpy_htod(alloc, arr)
+        return alloc
+
+    def _allocate_zeros(self, shape, cuda, dtype_name="f32"):
+        """Allocate a GPU buffer of zeros with the given dtype."""
+        np_dtype = dtype_numpy(dtype_name)
+        size_bytes = int(np.prod(shape) * np_dtype.itemsize) if shape else np_dtype.itemsize
+        if size_bytes == 0:
+            size_bytes = np_dtype.itemsize
+        alloc = cuda.mem_alloc(size_bytes)
+        # Zero-fill
+        zeros = np.zeros(shape if shape else (1,), dtype=np_dtype)
+        cuda.memcpy_htod(alloc, zeros)
+        return alloc
 
     def _execute_single_kernel(self, kernel_info, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
         if not kernel_info:
@@ -71,8 +115,10 @@ class ExecutionMixin:
                 eps = self._eval_scalar(kernel_info[8], env, tensors, 1e-8)
 
                 state = self.optimizer_state.setdefault(param_name, {
-                    "m": self._allocate_zeros(env[param_name]["shape"], cuda),
-                    "v": self._allocate_zeros(env[param_name]["shape"], cuda),
+                    "m": self._allocate_zeros(env[param_name]["shape"], cuda,
+                                             dtype_name=self._tl_dtype(env, param_name)),
+                    "v": self._allocate_zeros(env[param_name]["shape"], cuda,
+                                             dtype_name=self._tl_dtype(env, param_name)),
                     "t": 0,
                 })
                 state["t"] += 1
@@ -155,10 +201,8 @@ class ExecutionMixin:
                 c_int(size),
             )
 
-        elif op_type in (
-            "add_broadcast", "minus_broadcast", "mult_broadcast", "div_broadcast",
-            "greater_broadcast", "less_broadcast", "equal_broadcast",
-        ):
+        elif op_type in ("add_broadcast", "minus_broadcast", "mult_broadcast", "div_broadcast",
+                        "greater_broadcast", "less_broadcast", "equal_broadcast"):
             op_name = op_type.split("_")[0]
             rows, cols = dims
             getattr(lib, f"launch_{op_name}_{kernel_func_name}")(
@@ -430,7 +474,8 @@ class ExecutionMixin:
     def _save_kernel_result(self, name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda):
         if name in env:
             shape = tuple(int(dim) for dim in env[name]["shape"])
-            output = np.zeros(shape, dtype=np.float32)
+            np_dtype = self._np_dtype(env, name)
+            output = np.zeros(shape, dtype=np_dtype)
             cuda.memcpy_dtoh(output, gpu_allocs[name])
             tensors[name] = output
             if self.cache_layers:
@@ -443,6 +488,7 @@ class ExecutionMixin:
         alias_name = node["name"]
         source_name = node["expr"]["name"]
         if source_name in tensors:
+            src_dtype = tensors[source_name].dtype
             tensors[alias_name] = tensors[source_name].copy()
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] CUDA Execute: alias {alias_name} -> {source_name}")
@@ -460,7 +506,8 @@ class ExecutionMixin:
             tensor_data = tensors[tensor_name]
         elif tensor_name in gpu_allocs and tensor_name in env:
             shape = tuple(int(dim) for dim in env[tensor_name]["shape"])
-            tensor_data = np.zeros(shape, dtype=np.float32)
+            np_dtype = self._np_dtype(env, tensor_name)
+            tensor_data = np.zeros(shape, dtype=np_dtype)
             cuda.memcpy_dtoh(tensor_data, gpu_allocs[tensor_name])
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] Copied {tensor_name} from GPU for save")
@@ -547,14 +594,16 @@ class ExecutionMixin:
                     bname = body_node["name"]
                     if bname in gpu_allocs and bname in env:
                         bshape = tuple(int(d) for d in env[bname]["shape"])
-                        barr = np.empty(bshape, dtype=np.float32)
+                        bnp_dtype = self._np_dtype(env, bname)
+                        barr = np.empty(bshape, dtype=bnp_dtype)
                         cuda.memcpy_dtoh(barr, gpu_allocs[bname])
                         tensors[bname] = barr
 
                 for tname in list(tensors.keys()):
                     if tname in gpu_allocs and tname in env:
                         tshape = tuple(int(d) for d in env[tname]["shape"])
-                        tarr = np.empty(tshape, dtype=np.float32)
+                        tnp_dtype = self._np_dtype(env, tname)
+                        tarr = np.empty(tshape, dtype=tnp_dtype)
                         cuda.memcpy_dtoh(tarr, gpu_allocs[tname])
                         tensors[tname] = tarr
 
@@ -585,8 +634,10 @@ class ExecutionMixin:
                             gpu_allocs[grad_tensor_name] = cuda.mem_alloc(grad_tensor.nbytes)
                             cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
 
+                        # Use the parameter's dtype for the gradient
+                        param_dtype = self._tl_dtype(env, grad_name)
                         env[grad_tensor_name] = {
-                            "dtype": "f32",
+                            "dtype": param_dtype,
                             "shape": grad_tensor.shape,
                         }
 

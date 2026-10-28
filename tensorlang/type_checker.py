@@ -3,7 +3,7 @@
 import numpy as np
 
 from tensorlang.tensor_lang import TensorLang
-from tensorlang.constants import OPTIMIZER_NAMES
+from tensorlang.constants import OPTIMIZER_NAMES, promote_dtype
 
 tensorlang = TensorLang()
 
@@ -198,7 +198,10 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             "sgd", "adam", "sgd_update", "adam_update",
         ]:
             if expr["type"] == "fill":
-                env[name] = {"dtype": "f32", "shape": expr["shape"]}
+                fill_dtype = "f32"
+                if ty and isinstance(ty, dict) and "dtype" in ty:
+                    fill_dtype = ty["dtype"]
+                env[name] = {"dtype": fill_dtype, "shape": expr["shape"]}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned from fill: {env[name]}")
                 continue
@@ -221,6 +224,13 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if suffix == ".npy":
                         loaded_data = np.load(file_path)
                         inferred_shape = tuple(loaded_data.shape)
+                        # Infer dtype from the loaded array
+                        if loaded_data.dtype == np.float16:
+                            inferred_dtype = "f16"
+                        elif loaded_data.dtype == np.float64:
+                            inferred_dtype = "f64"
+                        else:
+                            inferred_dtype = "f32"
 
                     elif suffix == ".npz":
                         npz_file = np.load(file_path)
@@ -236,6 +246,12 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             return False, env
 
                         inferred_shape = tuple(data_array.shape)
+                        if data_array.dtype == np.float16:
+                            inferred_dtype = "f16"
+                        elif data_array.dtype == np.float64:
+                            inferred_dtype = "f64"
+                        else:
+                            inferred_dtype = "f32"
                         npz_file.close()
 
                     elif suffix == ".csv":
@@ -250,12 +266,13 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         if first_col.lower() in ["date", "time", "datetime", "index", "id"]:
                             df = df.drop(columns=[first_col])
                         inferred_shape = tuple(df.shape)
+                        inferred_dtype = "f32"
 
                     else:
                         tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported file format: {suffix}")
                         return False, env
 
-                    env[name] = {"dtype": "f32", "shape": inferred_shape}
+                    env[name] = {"dtype": inferred_dtype, "shape": inferred_shape}
                     if DEBUG_MODE:
                         tensorlang.print(message=f"[TYPE CHECKER] {name}: inferred shape {inferred_shape} from {suffix.upper()} file")
 
@@ -286,7 +303,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if not output_shape:
                         output_shape = ()
 
-                env[name] = {"dtype": "f32", "shape": output_shape}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": output_shape}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -297,7 +314,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if tensor_type is None:
                     tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
                     return False, env
-                env[name] = {"dtype": "f32", "shape": tensor_type["shape"]}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": tensor_type["shape"]}
                 if DEBUG_INFO:
                     print(f"[INFO] Tensor {tensor_name} {name}:({expr['type']}):{env[name]}")
                 continue
@@ -308,7 +325,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if arg_type is None:
                     print(f"Type error: Undefined tensor {arg_name} for {expr['type']}")
                     return False, env
-                env[name] = {"dtype": "f32", "shape": arg_type["shape"]}
+                env[name] = {"dtype": arg_type["dtype"], "shape": arg_type["shape"]}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} for {name}: {env[name]}")
                 continue
@@ -353,7 +370,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 for i in range(len(slice_specs), len(input_shape)):
                     output_shape.append(input_shape[i])
 
-                env[name] = {"dtype": "f32", "shape": tuple(output_shape) if output_shape else ()}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": tuple(output_shape) if output_shape else ()}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -373,7 +390,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                     return False, env
 
-                env[name] = {"dtype": "f32", "shape": input_shape}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": input_shape}
                 if DEBUG_MODE:
                     print(f"Type {expr['type']} Assigned for {name}: {env[name]}")
                 continue
@@ -415,7 +432,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_var shape {var_shape} != expected {expected_stats_shape}")
                     return False, env
 
-                env[name] = {"dtype": "f32", "shape": input_shape}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": input_shape}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -426,7 +443,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if tensor_type is None:
                     tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for instance_norm")
                     return False, env
-                env[name] = {"dtype": "f32", "shape": tensor_type["shape"]}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": tensor_type["shape"]}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -450,7 +467,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if not output_shape:
                         output_shape = ()
 
-                env[name] = {"dtype": "f32", "shape": output_shape}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": output_shape}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -475,7 +492,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         return False, env
                     output_shape = tuple(input_shape[i] for i in axes)
 
-                env[name] = {"dtype": "f32", "shape": output_shape}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": output_shape}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -497,7 +514,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensorlang.print(message="[TYPE CHECKER] error: Reshape element count mismatch")
                     return False, env
 
-                env[name] = {"dtype": "f32", "shape": tuple(new_shape)}
+                env[name] = {"dtype": tensor_type["dtype"], "shape": tuple(new_shape)}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -520,6 +537,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     return False, env
 
                 concat_dim_size = 0
+                concat_dtype = tensor_types[0]["dtype"]
                 for tensor_type in tensor_types:
                     shape = tensor_type["shape"]
                     if len(shape) != len(first_shape):
@@ -530,10 +548,11 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             tensorlang.print(message="[TYPE CHECKER] error: Concat tensor shape mismatch")
                             return False, env
                     concat_dim_size += shape[axis]
+                    concat_dtype = promote_dtype(concat_dtype, tensor_type["dtype"])
 
                 output_shape = list(first_shape)
                 output_shape[axis] = concat_dim_size
-                env[name] = {"dtype": "f32", "shape": tuple(output_shape)}
+                env[name] = {"dtype": concat_dtype, "shape": tuple(output_shape)}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
@@ -571,7 +590,8 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             hint=(f"Inner dimensions must match: left has {args[0]['shape'][1]} "
                                   f"columns but right has {args[1]['shape'][0]} rows")))
                         return False, env
-                    env[name] = {"dtype": "f32", "shape": (args[0]["shape"][0], args[1]["shape"][1])}
+                    matmul_dtype = promote_dtype(args[0]["dtype"], args[1]["dtype"])
+                    env[name] = {"dtype": matmul_dtype, "shape": (args[0]["shape"][0], args[1]["shape"][1])}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue
@@ -621,7 +641,8 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                                 return False, env
                         output_shape = tuple(output_shape)
 
-                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    elem_dtype = promote_dtype(args[0]["dtype"], args[1]["dtype"])
+                    env[name] = {"dtype": elem_dtype, "shape": output_shape}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue
@@ -646,6 +667,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                                 return False, env
                         output_shape = shape1[:-len(shape2)] + tuple(output_shape)
 
+                    # Comparison results are 0/1 values; keep f32.
                     env[name] = {"dtype": "f32", "shape": output_shape}
                     if DEBUG_INFO:
                         tensorlang.print(message=f"[TYPE CHECKER] Type {expr['type']} assigned for {name}: {env[name]}")
@@ -687,7 +709,11 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         tensorlang.print(message="[TYPE CHECKER] error: Linear input must be 1D or 2D tensor")
                         return False, env
 
-                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    linear_dtype = promote_dtype(
+                        promote_dtype(input_tensor["dtype"], weight_tensor["dtype"]),
+                        bias_tensor["dtype"],
+                    )
+                    env[name] = {"dtype": linear_dtype, "shape": output_shape}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue
@@ -720,7 +746,8 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             return False, env
                         output_shape = ()
 
-                    env[name] = {"dtype": "f32", "shape": output_shape}
+                    loss_dtype = promote_dtype(predictions_tensor["dtype"], targets_tensor["dtype"])
+                    env[name] = {"dtype": loss_dtype, "shape": output_shape}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue

@@ -14,7 +14,7 @@ import argparse
 class TensorLang:
     """Main utility and setup class for the TensorLang runtime."""
     
-    version = "0.3.0"
+    version = "0.5.0"
     width   = 80
 
     def __init__(self):

@@ -126,10 +126,19 @@ user_function_call: NAME "(" [arg_list] ")"
 arg_list: expr ("," expr)*
 
 // Types
+//type: "Tensor" "[" dtype "," shape "]"          -> concrete_type
+//    | "Tensor" "[" generic_shape "]"            -> generic_type
+//dtype: "f16" | "f32" | "f64"
+
+
 type: "Tensor" "[" dtype "," shape "]"          -> concrete_type
     | "Tensor" "[" generic_shape "]"            -> generic_type
 
-dtype: "f32" | "f64"
+//dtype: DTYPE
+//DTYPE: "f16" | "f32" | "f64"
+dtype: "f16" | "f32" | "f64"
+
+
 shape: "(" NUMBER ("," NUMBER)* [","] ")"
 
 generic_shape: generic_dim ("," generic_dim)*

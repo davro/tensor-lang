@@ -1,10 +1,20 @@
+"""
+TensorLang Generator ShapesMixin
+Kernel ShapesMixin
+
+File: tensorlang/generators/shapes.py
+"""
+
 import numpy as np
 
 from .base import BaseGenerator
 
 
 class ShapesMixin(BaseGenerator):
-    def transpose(self, op_type, name, input_shape, tensor_name, axes=None):
+    def transpose(self, op_type, name, input_shape, tensor_name, axes=None, dtype="f32"):
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+
         input_shape = tuple(int(d) for d in input_shape)
         ndim = len(input_shape)
 
@@ -17,14 +27,14 @@ class ShapesMixin(BaseGenerator):
         total_elements = int(np.prod(input_shape)) if input_shape else 1
 
         if ndim == 0:
-            kernel = f"""
-__global__ void transpose_kernel_{name}(float* input, float* output, int total_elements) {{
+            kernel = include + f"""
+__global__ void transpose_kernel_{name}({ctype}* input, {ctype}* output, int total_elements) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elements) {{
         output[idx] = input[idx];
     }}
 }}
-extern "C" void launch_transpose_{name}(float* input, float* output, int total_elements) {{
+extern "C" void launch_transpose_{name}({ctype}* input, {ctype}* output, int total_elements) {{
     dim3 block(256);
     dim3 grid((total_elements + block.x - 1) / block.x);
     transpose_kernel_{name}<<<grid, block>>>(input, output, total_elements);
@@ -38,8 +48,8 @@ extern "C" void launch_transpose_{name}(float* input, float* output, int total_e
         out_shape_str = ", ".join(str(d) for d in output_shape)
         axes_str = ", ".join(str(a) for a in axes)
 
-        kernel = f"""
-__global__ void transpose_kernel_{name}(float* input, float* output, int total_elements) {{
+        kernel = include + f"""
+__global__ void transpose_kernel_{name}({ctype}* input, {ctype}* output, int total_elements) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elements) {{
         const int in_shape[{ndim}] = {{{in_shape_str}}};
@@ -66,7 +76,7 @@ __global__ void transpose_kernel_{name}(float* input, float* output, int total_e
         output[idx] = input[in_idx];
     }}
 }}
-extern "C" void launch_transpose_{name}(float* input, float* output, int total_elements) {{
+extern "C" void launch_transpose_{name}({ctype}* input, {ctype}* output, int total_elements) {{
     dim3 block(256);
     dim3 grid((total_elements + block.x - 1) / block.x);
     transpose_kernel_{name}<<<grid, block>>>(input, output, total_elements);
@@ -76,16 +86,19 @@ extern "C" void launch_transpose_{name}(float* input, float* output, int total_e
 """
         return kernel, ("transpose", name, tensor_name, None, total_elements)
 
-    def reshape(self, op_type, name, tensor_name, total_elements):
-        kernel = f"""
-__global__ void reshape_kernel_{name}(float* input, float* output, int total_elements) {{
+    def reshape(self, op_type, name, tensor_name, total_elements, dtype="f32"):
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+
+        kernel = include + f"""
+__global__ void reshape_kernel_{name}({ctype}* input, {ctype}* output, int total_elements) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (idx < total_elements) {{
         output[idx] = input[idx];
     }}
 }}
-extern "C" void launch_reshape_{name}(float* input, float* output, int total_elements) {{
+extern "C" void launch_reshape_{name}({ctype}* input, {ctype}* output, int total_elements) {{
     dim3 block(256);
     dim3 grid((total_elements + block.x - 1) / block.x);
     reshape_kernel_{name}<<<grid, block>>>(input, output, total_elements);
@@ -95,7 +108,10 @@ extern "C" void launch_reshape_{name}(float* input, float* output, int total_ele
 """
         return kernel, (f"{op_type}", name, tensor_name, None, total_elements)
 
-    def slice(self, op_type, name, tensor_name, slice_specs, input_shape, output_shape):
+    def slice(self, op_type, name, tensor_name, slice_specs, input_shape, output_shape, dtype="f32"):
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+
         if len(input_shape) == 2 and len(slice_specs) <= 2:
             rows, cols = int(input_shape[0]), int(input_shape[1])
 
@@ -136,8 +152,8 @@ extern "C" void launch_reshape_{name}(float* input, float* output, int total_ele
             out_rows = max(0, row_end - row_start)
             out_cols = max(0, col_end - col_start)
 
-            kernel = f"""
-__global__ void slice_kernel_{name}(float* input, float* output,
+            kernel = include + f"""
+__global__ void slice_kernel_{name}({ctype}* input, {ctype}* output,
                                 int in_rows, int in_cols,
                                 int row_start, int row_end,
                                 int col_start, int col_end,
@@ -154,7 +170,7 @@ __global__ void slice_kernel_{name}(float* input, float* output,
     }}
 }}
 
-extern "C" void launch_slice_{name}(float* input, float* output,
+extern "C" void launch_slice_{name}({ctype}* input, {ctype}* output,
                                 int in_rows, int in_cols,
                                 int row_start, int row_end,
                                 int col_start, int col_end,
@@ -195,15 +211,15 @@ extern "C" void launch_slice_{name}(float* input, float* output,
             end = max(start, min(end, size))
             out_size = max(0, end - start)
 
-            kernel = f"""
-__global__ void slice_1d_kernel_{name}(float* input, float* output, int start, int size) {{
+            kernel = include + f"""
+__global__ void slice_1d_kernel_{name}({ctype}* input, {ctype}* output, int start, int size) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {{
         output[idx] = input[start + idx];
     }}
 }}
 
-extern "C" void launch_slice_{name}(float* input, float* output, int start, int size) {{
+extern "C" void launch_slice_{name}({ctype}* input, {ctype}* output, int start, int size) {{
     dim3 block(256);
     dim3 grid((size + block.x - 1) / block.x);
     slice_1d_kernel_{name}<<<grid, block>>>(input, output, start, size);
@@ -213,7 +229,10 @@ extern "C" void launch_slice_{name}(float* input, float* output, int start, int 
 """
             return kernel, (f"{op_type}_1d", name, tensor_name, None, start, out_size)
 
-    def concat(self, op_type, name, tensor_names, axis, env):
+    def concat(self, op_type, name, tensor_names, axis, env, dtype="f32"):
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+
         if len(tensor_names) == 2 and axis == 0:
             tensor1, tensor2 = tensor_names
             shape1 = env[tensor1]['shape']
@@ -223,8 +242,8 @@ extern "C" void launch_slice_{name}(float* input, float* output, int start, int 
                 rows1, cols = int(shape1[0]), int(shape1[1])
                 rows2 = int(shape2[0])
 
-                kernel = f"""
-__global__ void concat_axis0_kernel_{name}(float* input1, float* input2, float* output,
+                kernel = include + f"""
+__global__ void concat_axis0_kernel_{name}({ctype}* input1, {ctype}* input2, {ctype}* output,
                                         int rows1, int rows2, int cols) {{
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -238,7 +257,7 @@ __global__ void concat_axis0_kernel_{name}(float* input1, float* input2, float* 
         }}
     }}
 }}
-extern "C" void launch_concat_{name}(float* input1, float* input2, float* output,
+extern "C" void launch_concat_{name}({ctype}* input1, {ctype}* input2, {ctype}* output,
                                     int rows1, int rows2, int cols) {{
     dim3 block(16, 16);
     int total_rows = rows1 + rows2;
@@ -259,8 +278,8 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
                 rows, cols1 = int(shape1[0]), int(shape1[1])
                 cols2 = int(shape2[1])
 
-                kernel = f"""
-__global__ void concat_axis1_kernel_{name}(float* input1, float* input2, float* output,
+                kernel = include + f"""
+__global__ void concat_axis1_kernel_{name}({ctype}* input1, {ctype}* input2, {ctype}* output,
                                         int rows, int cols1, int cols2) {{
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -275,7 +294,7 @@ __global__ void concat_axis1_kernel_{name}(float* input1, float* input2, float* 
         }}
     }}
 }}
-extern "C" void launch_concat_{name}(float* input1, float* input2, float* output,
+extern "C" void launch_concat_{name}({ctype}* input1, {ctype}* input2, {ctype}* output,
                                     int rows, int cols1, int cols2) {{
     dim3 block(16, 16);
     int total_cols = cols1 + cols2;
@@ -286,4 +305,3 @@ extern "C" void launch_concat_{name}(float* input1, float* input2, float* output
 }}
 """
                 return kernel, (f"{op_type}_axis1", name, tensor1, tensor2, rows, cols1, cols2)
-
