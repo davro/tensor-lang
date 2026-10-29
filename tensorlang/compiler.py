@@ -1,4 +1,8 @@
-# File: tensorlang/compiler.py
+"""
+TensorLang TensorCompiler
+
+File: tensorlang/compiler.py
+"""
 
 import errno
 import os
@@ -339,7 +343,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 cuda_code += kernel
                             elif self.can_broadcast(shape1, shape2):
                                 kernel, kernel_info = generator.binary_general_broadcast(
-                                    expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype=result_dtype
+                                    expr["type"], expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype=result_dtype
                                 )
                                 kernels.append(kernel_info)
                                 cuda_code += kernel
@@ -353,6 +357,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     )
                                 )
                                 return False
+
 
                         elif expr.get("type") == "fused_elementwise":
                             kernel, kernel_info = self._kernel_for_fused_expr(name, expr, env, generator, kernel_name=name)
@@ -368,30 +373,82 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                         elif expr.get("type") == "matmul":
                             arg1, arg2 = expr["args"]
-                            a_shape = env[arg1]["shape"]
-                            b_shape = env[arg2]["shape"]
-                            if len(a_shape) == 2 and len(b_shape) == 2:
-                                m, n, p = a_shape[0], a_shape[1], b_shape[1]
+                            a_shape = [int(d) for d in env[arg1]["shape"]]
+                            b_shape = [int(d) for d in env[arg2]["shape"]]
+
+                            if len(a_shape) >= 2 and len(b_shape) >= 2:
+                                m, n = a_shape[-2], a_shape[-1]
+                                p = b_shape[-1]
+                                if n != b_shape[-2]:
+                                    self.tensorlang.print(
+                                        message=f"[COMPILER] Error: matmul inner dimension mismatch: "
+                                                f"{a_shape} @ {b_shape}"
+                                    )
+                                    return False
+
+                                batch_a = a_shape[:-2]
+                                batch_b = b_shape[:-2]
+                                ndim_batch = max(len(batch_a), len(batch_b))
+                                padded_a = [1] * (ndim_batch - len(batch_a)) + batch_a
+                                padded_b = [1] * (ndim_batch - len(batch_b)) + batch_b
+
+                                out_batch = []
+                                for d1, d2 in zip(padded_a, padded_b):
+                                    if d1 != d2 and d1 != 1 and d2 != 1:
+                                        self.tensorlang.print(
+                                            message=f"[COMPILER] Error: matmul batch dims must broadcast: "
+                                                    f"{batch_a} vs {batch_b}"
+                                        )
+                                        return False
+                                    out_batch.append(max(d1, d2))
+
+                                batch_count = 1
+                                for d in out_batch:
+                                    batch_count *= d
+                                if not out_batch:
+                                    batch_count = 1
+
+                                out_shape = tuple(out_batch + [m, p])
+
+                                if batch_count <= 1 and len(a_shape) == 2 and len(b_shape) == 2:
+                                    kernel, kernel_info = generator.matmul(
+                                        expr["type"], name, arg1, arg2, int(m), int(n), int(p),
+                                        dtype=promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32"))
+                                    )
+                                else:
+                                    kernel, kernel_info = generator.matmul(
+                                        expr["type"], name, arg1, arg2, int(m), int(n), int(p),
+                                        batch_count=batch_count,
+                                        dtype=promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32"))
+                                    )
+                                kernels.append(kernel_info)
+                                cuda_code += kernel
+                                env[name] = {"dtype": promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32")), "shape": out_shape}
+                                self._record_operation("matmul", name, [arg1, arg2])
+
                             elif len(a_shape) == 2 and len(b_shape) == 1:
-                                m, n, p = a_shape[0], a_shape[1], 1
+                                m, n = a_shape[0], a_shape[1]
+                                if n != b_shape[0]:
+                                    self.tensorlang.print(
+                                        message=f"[COMPILER] Error: matmul inner dimension mismatch: "
+                                                f"{a_shape} @ {b_shape}"
+                                    )
+                                    return False
+                                kernel, kernel_info = generator.matmul(
+                                    expr["type"], name, arg1, arg2, int(m), int(n), 1,
+                                    dtype=promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32"))
+                                )
+                                kernels.append(kernel_info)
+                                cuda_code += kernel
+                                env[name] = {"dtype": promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32")), "shape": (m,)}
+                                self._record_operation("matmul", name, [arg1, arg2])
                             else:
-                                raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
-                            kernel, kernel_info = generator.matmul(
-                                expr["type"], name, arg1, arg2, int(m), int(n), int(p),
-                                dtype=promote_dtype(env[arg1].get("dtype", "f32"), env[arg2].get("dtype", "f32"))
-                            )
-                            kernels.append(kernel_info)
-                            cuda_code += kernel
-                            if len(a_shape) == 2 and len(b_shape) == 2:
-                                out_shape = (a_shape[0], b_shape[1])
-                            elif len(a_shape) == 2 and len(b_shape) == 1:
-                                out_shape = (a_shape[0],)
-                            elif len(a_shape) == 1 and len(b_shape) == 2:
-                                out_shape = (b_shape[1],)
-                            else:
-                                raise TypeError(f"Unsupported matmul shapes: {a_shape} @ {b_shape}")
-                            env[name] = {"dtype": env[arg1]["dtype"], "shape": out_shape}
-                            self._record_operation("matmul", name, [arg1, arg2])
+                                self.tensorlang.print(
+                                    message=f"[COMPILER] Error: unsupported matmul shapes: {a_shape} @ {b_shape}"
+                                )
+                                return False
+
+
 
                         elif expr.get("type") in ("relu", "sigmoid", "tanh", "gelu", "swish"):
                             arg1 = expr["args"][0]
@@ -897,13 +954,24 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             traceback.print_exc()
             sys.exit(1)
 
+    # def can_broadcast(self, shape1, shape2):
+        # if len(shape1) != len(shape2):
+            # return False
+        # for d1, d2 in zip(shape1, shape2):
+            # if d1 != d2 and d1 != 1 and d2 != 1:
+                # return False
+        # return True
+
     def can_broadcast(self, shape1, shape2):
-        if len(shape1) != len(shape2):
-            return False
-        for d1, d2 in zip(shape1, shape2):
+        ndim = max(len(shape1), len(shape2))
+        s1 = (1,) * (ndim - len(shape1)) + tuple(int(d) for d in shape1)
+        s2 = (1,) * (ndim - len(shape2)) + tuple(int(d) for d in shape2)
+        for d1, d2 in zip(s1, s2):
             if d1 != d2 and d1 != 1 and d2 != 1:
                 return False
         return True
+
+
 
     def _load_data_file(self, file_path, array_name=None):
         import numpy as np

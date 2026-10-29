@@ -1,4 +1,8 @@
-# File: tensorlang/type_checker.py
+"""
+TensorLang Type Checker
+
+File: tensorlang/type_checker.py
+"""
 
 import numpy as np
 
@@ -9,6 +13,11 @@ tensorlang = TensorLang()
 
 def _is_scalar_shape(shape):
     return len(shape) == 0 or all(d == 1 for d in shape)
+
+def _normalize_axis(axis, ndim):
+    if axis < 0:
+        axis += ndim
+    return axis
 
 def _shape_error(op, name, shape1, shape2, arg_names=None, hint=None):
     if arg_names and len(arg_names) == 2:
@@ -26,8 +35,8 @@ _ELEMENTWISE_HINT = (
     "(trailing dimensions equal or 1)"
 )
 _MATRIX_VECTOR_HINT = (
-    "A 1D operand combined with a 2D operand must have length equal to "
-    "one of the 2D operand's dimensions"
+    "A 1D operand combined with an N-D operand must have length equal to "
+    "one of the N-D operand's dimensions"
 )
 
 def _resolve_tensor_type(env, tensor_name):
@@ -224,7 +233,6 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if suffix == ".npy":
                         loaded_data = np.load(file_path)
                         inferred_shape = tuple(loaded_data.shape)
-                        # Infer dtype from the loaded array
                         if loaded_data.dtype == np.float16:
                             inferred_dtype = "f16"
                         elif loaded_data.dtype == np.float64:
@@ -296,6 +304,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if axis is None:
                     output_shape = ()
                 else:
+                    axis = _normalize_axis(axis, len(input_shape))
                     if axis < 0 or axis >= len(input_shape):
                         print(f"Type error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                         return False, env
@@ -314,6 +323,13 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if tensor_type is None:
                     tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
                     return False, env
+                input_shape = tensor_type["shape"]
+                axis = expr.get("axis")
+                if axis is not None:
+                    axis = _normalize_axis(axis, len(input_shape))
+                    if axis < 0 or axis >= len(input_shape):
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
+                        return False, env
                 env[name] = {"dtype": tensor_type["dtype"], "shape": tensor_type["shape"]}
                 if DEBUG_INFO:
                     print(f"[INFO] Tensor {tensor_name} {name}:({expr['type']}):{env[name]}")
@@ -386,6 +402,8 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 axis = expr.get("axis")
                 if axis is None:
                     axis = len(input_shape) - 1
+                else:
+                    axis = _normalize_axis(axis, len(input_shape))
                 if axis < 0 or axis >= len(input_shape):
                     tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                     return False, env
@@ -460,6 +478,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if axis is None:
                     output_shape = ()
                 else:
+                    axis = _normalize_axis(axis, len(input_shape))
                     if axis < 0 or axis >= len(input_shape):
                         tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
                         return False, env
@@ -532,6 +551,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensor_types.append(tensor_type)
 
                 first_shape = tensor_types[0]["shape"]
+                axis = _normalize_axis(axis, len(first_shape))
                 if axis < 0 or axis >= len(first_shape):
                     tensorlang.print(message="[TYPE CHECKER] error: Concat axis out of bounds")
                     return False, env
@@ -583,15 +603,43 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     return False, env
 
                 if expr["type"] == "matmul":
-                    if args[0]["shape"][1] != args[1]["shape"][0]:
-                        tensorlang.print(message=_shape_error(
-                            "matmul", name, args[0]["shape"], args[1]["shape"],
-                            arg_names,
-                            hint=(f"Inner dimensions must match: left has {args[0]['shape'][1]} "
-                                  f"columns but right has {args[1]['shape'][0]} rows")))
+                    a_shape = args[0]["shape"]
+                    b_shape = args[1]["shape"]
+
+                    if len(a_shape) < 2 or len(b_shape) < 2:
+                        tensorlang.print(message="[TYPE CHECKER] error: Matmul requires at least 2D tensors")
                         return False, env
+
+                    if a_shape[-1] != b_shape[-2]:
+                        tensorlang.print(message=_shape_error(
+                            "matmul", name, a_shape, b_shape,
+                            arg_names,
+                            hint=(f"Inner dimensions must match: left has {a_shape[-1]} "
+                                  f"columns but right has {b_shape[-2]} rows")))
+                        return False, env
+
+                    # Broadcast batch dimensions (N-D matmul: (..., m, k) @ (..., k, n))
+                    batch_a = a_shape[:-2]
+                    batch_b = b_shape[:-2]
+                    ndim = max(len(batch_a), len(batch_b))
+                    padded_a = (1,) * (ndim - len(batch_a)) + batch_a
+                    padded_b = (1,) * (ndim - len(batch_b)) + batch_b
+
+                    batch_out = []
+                    for d1, d2 in zip(padded_a, padded_b):
+                        if d1 == d2:
+                            batch_out.append(d1)
+                        elif d1 == 1:
+                            batch_out.append(d2)
+                        elif d2 == 1:
+                            batch_out.append(d1)
+                        else:
+                            tensorlang.print(message="[TYPE CHECKER] error: Matmul batch dimensions must broadcast")
+                            return False, env
+
+                    output_shape = tuple(batch_out) + (a_shape[-2], b_shape[-1])
                     matmul_dtype = promote_dtype(args[0]["dtype"], args[1]["dtype"])
-                    env[name] = {"dtype": matmul_dtype, "shape": (args[0]["shape"][0], args[1]["shape"][1])}
+                    env[name] = {"dtype": matmul_dtype, "shape": output_shape}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue
@@ -605,47 +653,60 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         output_shape = shape2
                     elif _is_scalar_shape(shape2):
                         output_shape = shape1
-                    elif len(shape1) == 2 and len(shape2) == 1:
-                        if shape1[0] == shape2[0] or shape1[1] == shape2[0]:
-                            output_shape = shape1
-                        else:
-                            tensorlang.print(message=_shape_error(
-                                expr["type"], name, shape1, shape2, arg_names,
-                                hint=_MATRIX_VECTOR_HINT))
-                            return False, env
-                    elif len(shape2) == 2 and len(shape1) == 1:
-                        if shape2[0] == shape1[0] or shape2[1] == shape1[0]:
-                            output_shape = shape2
-                        else:
-                            tensorlang.print(message=_shape_error(
-                                expr["type"], name, shape1, shape2, arg_names,
-                                hint=_MATRIX_VECTOR_HINT))
-                            return False, env
                     else:
-                        ndim = max(len(shape1), len(shape2))
-                        padded_shape1 = (1,) * (ndim - len(shape1)) + shape1
-                        padded_shape2 = (1,) * (ndim - len(shape2)) + shape2
+                        # Non-standard: 1D vector whose size matches a dim of an N-D tensor
+                        non_standard = False
+                        one_is_1d_nd = False  # True when one operand is 1D and other is N-D (ndim>=2)
 
-                        output_shape = []
-                        for d1, d2 in zip(padded_shape1, padded_shape2):
-                            if d1 == d2:
-                                output_shape.append(d1)
-                            elif d1 == 1:
-                                output_shape.append(d2)
-                            elif d2 == 1:
-                                output_shape.append(d1)
-                            else:
+                        if len(shape1) == 1 and len(shape2) >= 2:
+                            one_is_1d_nd = True
+                            if shape1[0] in shape2:
+                                output_shape = shape2
+                                non_standard = True
+                        elif len(shape2) == 1 and len(shape1) >= 2:
+                            one_is_1d_nd = True
+                            if shape2[0] in shape1:
+                                output_shape = shape1
+                                non_standard = True
+
+                        if one_is_1d_nd and not non_standard:
+                            # 1D size doesn't match any dim of N-D operand → matrix-vector hint
+                            tensorlang.print(message=_shape_error(
+                                expr["type"], name, shape1, shape2, arg_names,
+                                hint=_MATRIX_VECTOR_HINT))
+                            return False, env
+
+                        if not non_standard and not one_is_1d_nd:
+                            # Standard NumPy broadcasting
+                            ndim = max(len(shape1), len(shape2))
+                            padded_shape1 = (1,) * (ndim - len(shape1)) + tuple(shape1)
+                            padded_shape2 = (1,) * (ndim - len(shape2)) + tuple(shape2)
+
+                            output_shape = []
+                            broadcast_ok = True
+                            for d1, d2 in zip(padded_shape1, padded_shape2):
+                                if d1 == d2:
+                                    output_shape.append(d1)
+                                elif d1 == 1:
+                                    output_shape.append(d2)
+                                elif d2 == 1:
+                                    output_shape.append(d1)
+                                else:
+                                    broadcast_ok = False
+                                    break
+                            if not broadcast_ok:
                                 tensorlang.print(message=_shape_error(
                                     expr["type"], name, shape1, shape2, arg_names,
                                     hint=_ELEMENTWISE_HINT))
                                 return False, env
-                        output_shape = tuple(output_shape)
+                            output_shape = tuple(output_shape)
 
                     elem_dtype = promote_dtype(args[0]["dtype"], args[1]["dtype"])
                     env[name] = {"dtype": elem_dtype, "shape": output_shape}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue
+
 
                 if expr["type"] in ("greater", "less", "equal"):
                     shape1, shape2 = args[0]["shape"], args[1]["shape"]
@@ -683,31 +744,20 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     weight_shape = weight_tensor["shape"]
                     bias_shape = bias_tensor["shape"]
 
-                    if len(input_shape) == 1:
-                        in_features = input_shape[0]
-                        if len(weight_shape) != 2 or weight_shape[0] != in_features:
-                            tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
-                            return False, env
-                        out_features = weight_shape[1]
-                        if len(bias_shape) != 1 or bias_shape[0] != out_features:
-                            tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
-                            return False, env
-                        output_shape = (out_features,)
-
-                    elif len(input_shape) == 2:
-                        batch_size, in_features = input_shape
-                        if len(weight_shape) != 2 or weight_shape[0] != in_features:
-                            tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
-                            return False, env
-                        out_features = weight_shape[1]
-                        if len(bias_shape) != 1 or bias_shape[0] != out_features:
-                            tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
-                            return False, env
-                        output_shape = (batch_size, out_features)
-
-                    else:
-                        tensorlang.print(message="[TYPE CHECKER] error: Linear input must be 1D or 2D tensor")
+                    if len(input_shape) == 0:
+                        tensorlang.print(message="[TYPE CHECKER] error: Linear input must be at least 1D")
                         return False, env
+
+                    in_features = input_shape[-1]
+                    if len(weight_shape) != 2 or weight_shape[0] != in_features:
+                        tensorlang.print(message="[TYPE CHECKER] error: Linear weight shape mismatch")
+                        return False, env
+                    out_features = weight_shape[1]
+                    if len(bias_shape) != 1 or bias_shape[0] != out_features:
+                        tensorlang.print(message="[TYPE CHECKER] error: Linear bias shape mismatch")
+                        return False, env
+
+                    output_shape = input_shape[:-1] + (out_features,)
 
                     linear_dtype = promote_dtype(
                         promote_dtype(input_tensor["dtype"], weight_tensor["dtype"]),
@@ -728,14 +778,19 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     target_shape = targets_tensor["shape"]
 
                     if expr["type"] == "cross_entropy":
-                        if len(pred_shape) != 2:
-                            tensorlang.print(message="[TYPE CHECKER] error: Cross entropy predictions must be 2D")
+                        if len(pred_shape) < 2:
+                            tensorlang.print(message="[TYPE CHECKER] error: Cross entropy predictions must be at least 2D")
                             return False, env
-                        batch_size, _num_classes = pred_shape
-                        if not (
-                            (len(target_shape) == 1 and target_shape[0] == batch_size)
-                            or (len(target_shape) == 2 and target_shape == pred_shape)
-                        ):
+                        # Last dim is num_classes; target is class indices (pred_shape[:-1]) or one-hot (pred_shape)
+                        if len(target_shape) == len(pred_shape) - 1:
+                            if target_shape != pred_shape[:-1]:
+                                tensorlang.print(message="[TYPE CHECKER] error: Cross entropy target shape incompatible")
+                                return False, env
+                        elif len(target_shape) == len(pred_shape):
+                            if target_shape != pred_shape:
+                                tensorlang.print(message="[TYPE CHECKER] error: Cross entropy target shape incompatible")
+                                return False, env
+                        else:
                             tensorlang.print(message="[TYPE CHECKER] error: Cross entropy target shape incompatible")
                             return False, env
                         output_shape = ()

@@ -12,6 +12,7 @@ from .base import BaseGenerator
 
 class ElementwiseMixin(BaseGenerator):
     def elementwise(self, op_type, name, arg1, arg2, size, dtype="f32"):
+        """Simple elementwise op on flat arrays. Already N-D capable (operates on total element count)."""
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
         ctype = self._ctype(dtype)
         include = self._include(dtype)
@@ -40,12 +41,13 @@ extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int 
         return kernel, (op_type, name, arg1, arg2, size)
 
     def binary_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape, dtype="f32"):
+        """2D broadcast (rows/cols). For N-D, callers should use binary_general_broadcast."""
         rows, cols = output_shape
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
         ctype = self._ctype(dtype)
         include = self._include(dtype)
 
-        if shape1[0] == shape2[0]:
+        if shape1[0] == shape2[0] or (len(shape1) >= 1 and len(shape2) >= 1 and shape1[0] == shape2[0]):
             a_read = self._read(dtype, "A", "i * cols + j")
             b_read = self._read(dtype, "B", "i")
             result = self._write(dtype, f"{a_read} {op_symbol} {b_read}")
@@ -89,6 +91,7 @@ extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int 
             return kernel, (f'{op_type}_broadcast', name, arg1, arg2, rows, cols)
 
     def binary_1d_broadcast(self, op_type, name, arg1, arg2, size, scalar_on_left=False, dtype="f32"):
+        """1D scalar broadcast. For N-D scalar broadcast, callers should use binary_general_broadcast."""
         op_symbol = {'add': '+', 'minus': '-', 'mult': '*', 'div': '/'}[op_type]
         ctype = self._ctype(dtype)
         include = self._include(dtype)
@@ -122,8 +125,13 @@ extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int 
         return kernel, (f'{op_type}_scalar', name, arg1, arg2, size)
 
     def binary_general_broadcast(self, op_name, op_type, name, arg1, arg2, shape1, shape2, output_shape, dtype="f32"):
+        """General N-D broadcast. Primary path for N-D elementwise operations.
+
+        Uses stride-based indexing via compute_broadcast_index to handle arbitrary
+        N-D broadcasting (NumPy-style: align trailing dims, broadcast size-1 dims).
+        """
         ndim_out = len(output_shape)
-        total_elements = int(np.prod([int(dim) for dim in output_shape]))
+        total_elements = int(np.prod([int(dim) for dim in output_shape])) if output_shape else 1
         padded_shape1 = (1,) * (ndim_out - len(shape1)) + tuple(shape1)
         padded_shape2 = (1,) * (ndim_out - len(shape2)) + tuple(shape2)
 
@@ -192,6 +200,7 @@ extern "C" void launch_{op_type}_{name}(
                         list(padded_shape1), list(padded_shape2), list(output_shape), total_elements)
 
     def fill(self, op_type, name, arg1, arg2, size, op_value, dtype="f32"):
+        """Fill kernel. Already N-D capable (operates on total element count)."""
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         write = self._write(dtype, "value")
@@ -215,6 +224,14 @@ extern "C" void launch_fill_{name}({ctype}* output, float value, int size) {{
 
     def fused_elementwise(self, op_type, name, chain, env, external_inputs, outputs, size,
                           broadcast=False, input_shapes=None, output_shape=None, dtype="f32"):
+        """Fused elementwise kernel. N-D capable via general broadcast path.
+
+        Broadcast mode detection:
+        - identity: input shape == output shape → direct flat indexing
+        - row/col: 2D-only optimizations (broadcast along rows or cols)
+        - trailing: N-D input is a trailing suffix of output shape → modulo indexing
+        - general: arbitrary N-D broadcast → compute_broadcast_index
+        """
         ctype = self._ctype(dtype)
         include = self._include(dtype)
 
@@ -290,11 +307,18 @@ extern "C" void launch_fused_elementwise_{name}({param_str}) {{
         def _input_mode(inp_shape):
             if tuple(inp_shape) == tuple(output_shape):
                 return "identity"
+            # 2D-specific optimizations
             if len(output_shape) == 2 and len(inp_shape) == 1:
                 if inp_shape[0] == output_shape[0]:
                     return "row"
                 if inp_shape[0] == output_shape[1]:
                     return "col"
+            # N-D: trailing broadcast (input is suffix of output shape)
+            if len(inp_shape) < ndim and tuple(inp_shape) == tuple(output_shape[-len(inp_shape):]):
+                return "trailing"
+            # N-D: leading broadcast (input is prefix of output shape)
+            if len(inp_shape) < ndim and tuple(inp_shape) == tuple(output_shape[:len(inp_shape)]):
+                return "leading"
             return "general"
 
         modes = [_input_mode(s) for s in input_shapes]
@@ -339,6 +363,18 @@ __device__ int compute_broadcast_index(int linear_idx, const int* out_shape, con
                 body_lines.append(f"    int in{i}_idx = idx / out_shape[1];")
             elif mode == "col":
                 body_lines.append(f"    int in{i}_idx = idx % out_shape[1];")
+            elif mode == "trailing":
+                # Input is a trailing suffix: index = idx % (product of input dims)
+                in_size = 1
+                for d in input_shapes[i]:
+                    in_size *= int(d)
+                body_lines.append(f"    int in{i}_idx = idx % {in_size};")
+            elif mode == "leading":
+                # Input is a leading prefix: index = idx / (product of trailing output dims)
+                trailing_size = 1
+                for d in output_shape[len(input_shapes[i]):]:
+                    trailing_size *= int(d)
+                body_lines.append(f"    int in{i}_idx = idx / {trailing_size};")
             else:
                 body_lines.append(f"    int in{i}_idx = compute_broadcast_index(idx, out_shape, in{i}_shape, ndim);")
 

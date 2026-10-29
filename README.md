@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.0 (mixed precision complete; N-D in progress). Core suite: 145/145 tests passing.
+> **Status:** v0.5.0 (mixed precision + N-D complete). Core suite: 145/145 tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5 — N-dimensional tensor support. Mixed precision (FP16/FP32) is complete.
+> **Current focus:** v0.5.1 — loss scaling and autograd coverage expansion.
 
 ---
 
@@ -43,8 +43,8 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 **Key Benefits:**
 
 * **Native GPU acceleration** — tensor operations compile to CUDA kernels
-* **cuBLAS-accelerated matmul** — matrix multiplication dispatches to cuBLAS for performance
-* **Type safety** — compile-time tensor shape and broadcasting checks
+* **cuBLAS-accelerated matmul** — matrix multiplication dispatches to cuBLAS for performance, including batched N-D
+* **Type safety** — compile-time tensor shape and broadcasting checks (N-D aware)
 * **ML-first design** — built specifically for neural network operations
 * **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
 * **Training loops** — `for` loops with `backward()`, pointer-swap weight rebinding, nested loops, and `save()` inside loops
@@ -54,6 +54,7 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
 * **NumPy zero-copy interop** — share CPU buffers between TensorLang tensors and NumPy arrays without copying
 * **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cuBLAS tensor-core matmul path; cast-based elementwise/activation/reduction kernels
+* **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
 * **Extensible architecture** — clean separation of parsing, type checking, and code generation (codegen, execution, interop, and per-category kernel generators)
 
 **Important framing:** Python is the host/compiler language. Tensor operations run as native CUDA kernels, but the compiler, runtime orchestration, and test runner are Python-based.
@@ -66,20 +67,20 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 
 ### Implemented and working
 
-* Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]` and `Tensor[f16, (batch, features)]`
-* Element-wise arithmetic with broadcasting
-* Matrix multiplication (`matmul`) — cuBLAS-backed (FP32 and FP16 with tensor core path)
-* Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish`
-* Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax`
+* Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]`, `Tensor[f16, (batch, features)]`, and N-D: `Tensor[f32, (batch, channels, height, width)]`
+* Element-wise arithmetic with broadcasting (N-D aware)
+* Matrix multiplication (`matmul`) — cuBLAS-backed (FP32 and FP16 tensor core path), including batched N-D
+* Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish` (N-D aware)
+* Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax` (N-D aware, arbitrary axis)
 * Comparisons: `greater`, `less`, `equal`
-* Slicing, reshape, transpose, concat
-* Normalisations: `layer_norm`, `batch_norm`, `instance_norm`
-* Losses: `mse_loss`, `cross_entropy`
-* Linear layers: `linear`
+* Slicing, reshape, transpose, concat (N-D aware)
+* Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
+* Losses: `mse_loss`, `cross_entropy` (N-D aware)
+* Linear layers: `linear` (N-D aware)
 * Reverse-mode autograd for a defined subset of operations (FP32 and FP16)
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
-* Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes)
+* Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes, N-D aware)
 * Scoped kernel names for loop bodies
 * User-defined functions
 * File I/O: `load()`, `save()`
@@ -88,6 +89,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Application system (`apps/`) with `hello_mlp`, `decision_boundary`, `tic_tac_toe`, and `2048` (engine verified)
 * Shared app toolkit (`apps/tlkit/`)
 * **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cast-based kernels; cuBLAS tensor-core matmul path; f16 autograd and training loops
+* **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
 
 ### Known limitations
 
@@ -96,8 +98,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
 * **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)). `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons are targeted for v0.5.
 * **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.
-* **Most kernels are 1D/2D only.** N-dimensional (higher-rank) tensor support is **in progress for v0.5**.
-* **Axis support is limited** for several reductions and normalisations.
+* **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
@@ -231,11 +232,14 @@ let w: Tensor[f32, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
 
 // Mixed precision: FP16 storage
 let x16: Tensor[f16, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
+
+// N-dimensional: 4D tensor
+let img: Tensor[f32, (batch, channels, height, width)] = ...
 ```
 
 Supported dtypes: `f16`, `f32`. (`f64` is parsed but lowered to `f32`.)
 
-Shapes are part of the type system. The compiler checks shape compatibility and broadcasting rules at compile time.
+Shapes are part of the type system. The compiler checks shape compatibility and broadcasting rules at compile time, including N-D broadcasting (NumPy-style: align trailing dims, broadcast size-1 dims).
 
 ### User-Defined Functions
 
@@ -273,18 +277,18 @@ let w_updated = minus(w, __tmp_0)
 |---|---|---|
 | Tensor literals | Supported | `[[1.0, 2.0], [3.0, 4.0]]` |
 | `fill(value, shape)` | Supported | Scalar fill value only |
-| Slicing | Supported | 1D/2D, NumPy-style ranges and indices |
-| `reshape(tensor, shape)` | Supported | Element count must match |
+| Slicing | Supported | N-D, NumPy-style ranges and indices (index removes dim, slice keeps dim) |
+| `reshape(tensor, shape)` | Supported | Element count must match; N-D |
 | `transpose(tensor, axes=...)` | Supported | General N-dimensional; axes are validated |
-| `concat(a, b, axis=...)` | Partial | 2 tensors, 2D, axis `0` or `1` |
+| `concat(a, b, axis=...)` | Supported | 2 tensors, any N-D, any axis |
 
 ### Linear Algebra
 
 | Operation | Status | Notes |
 |---|---|---|
-| `matmul(A, B)` | Supported | 2D×2D or 2D×1D; cuBLAS-backed (FP32 and FP16 tensor core path) |
-| `add`, `minus`, `mult`, `div` | Supported | Broadcasting supported; dtype-aware (f16/f32) |
-| `linear(input, weight, bias)` | Supported | 1D or 2D input; dtype-aware |
+| `matmul(A, B)` | Supported | N-D batched: (..., m, k) @ (..., k, n) → (..., m, n); cuBLAS-backed (FP32 and FP16 tensor core path) |
+| `add`, `minus`, `mult`, `div` | Supported | N-D broadcasting (NumPy-style); dtype-aware (f16/f32) |
+| `linear(input, weight, bias)` | Supported | N-D: operates on last dim; dtype-aware |
 
 ### Activations
 
@@ -293,7 +297,7 @@ let w_updated = minus(w, __tmp_0)
 | `relu` | Supported | Yes |
 | `sigmoid` | Supported | Yes |
 | `tanh` | Supported | Yes |
-| `softmax` | Supported | Yes (1D or 2D axis `1`) |
+| `softmax` | Supported | Yes (any axis, N-D) |
 | `gelu` | Supported | Yes |
 | `swish` | Supported | Yes |
 
@@ -301,32 +305,32 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `sum` | Supported | Full or 2D axis `0`/`1`; accumulates in f32 |
-| `mean` | Supported | Full or 2D axis `0`/`1`; accumulates in f32 |
-| `min`, `max` | Supported | Full or 2D axis `0`/`1` |
-| `argmin` | Supported | Full reduction or 2D axis `1` |
-| `argmax` | Supported | Full reduction or 2D axis `1` |
+| `sum` | Supported | Full or any axis; N-D; accumulates in f32 |
+| `mean` | Supported | Full or any axis; N-D; accumulates in f32 |
+| `min`, `max` | Supported | Full or any axis; N-D |
+| `argmin` | Supported | Full reduction or any axis; N-D |
+| `argmax` | Supported | Full reduction or any axis; N-D |
 
 ### Normalisations
 
 | Operation | Status | Notes |
 |---|---|---|
-| `layer_norm` | Supported | 1D or 2D, axis `0` or `1` |
-| `batch_norm` | Partial | 2D; uses running mean/variance; no gamma/beta |
-| `instance_norm` | Partial | 2D only |
+| `layer_norm` | Supported | N-D, any axis |
+| `batch_norm` | Partial | N-D (channel at dim 1, NCHW); uses running mean/variance; no gamma/beta |
+| `instance_norm` | Partial | N-D (per-instance over non-batch dims) |
 
 ### Losses
 
 | Operation | Status | Notes |
 |---|---|---|
-| `mse_loss` | Supported | Predictions and targets must have the same shape. Result is a `(1,1)` tensor, not a bare scalar — use `.item()` in Python. |
-| `cross_entropy` | Supported | Probability inputs and class-index targets |
+| `mse_loss` | Supported | N-D; predictions and targets must have the same shape. Result is a `(1,1)` tensor, not a bare scalar — use `.item()` in Python. |
+| `cross_entropy` | Supported | N-D; probability inputs and class-index targets (last dim = classes) |
 
 ### Comparisons
 
 | Operation | Status | Notes |
 |---|---|---|
-| `greater`, `less`, `equal` | Partial | Equal shapes or limited 2D/1D broadcast; output always f32 |
+| `greater`, `less`, `equal` | Partial | N-D broadcasting; output always f32 |
 
 ---
 
@@ -366,12 +370,12 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `relu` | Yes |
 | `sigmoid` | Yes |
 | `tanh` | Yes |
-| `softmax` | Yes (1D or 2D axis `1`) |
+| `softmax` | Yes (any axis, N-D) |
 | `sum` | Yes |
 | `mean` | Yes |
 | `mse_loss` | Yes |
-| `linear` | Yes (1D or 2D) |
-| `layer_norm` | Yes (1D or 2D, axis `0` or `1`) |
+| `linear` | Yes (N-D) |
+| `layer_norm` | Yes (N-D, any axis) |
 | `cross_entropy` | Yes (probability inputs, class-index targets) |
 | `gelu` | Yes |
 | `swish` | Yes |
@@ -630,23 +634,23 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 1. **Lexing & Parsing** — Lark grammar (`tensorlang.lark`)
 2. **AST Construction** — flatten inline expressions; inline user-defined functions; build nested loop bodies
-3. **Type Checking** — validate tensor shapes, broadcasting rules, gradient tensor pre-registration, dtype propagation and promotion
-4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting); dtype-aware kernel generation (f16/f32)
+3. **Type Checking** — validate tensor shapes, broadcasting rules, gradient tensor pre-registration, dtype propagation and promotion (N-D aware)
+4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting and N-D); dtype-aware kernel generation (f16/f32); stride-based N-D indexing
 5. **Compilation** — `nvcc` to shared library
 6. **Execution** — PyCUDA kernel launching, memory management, loop iteration with pointer-swap rebinding, nested loop recursion, `save()` per iteration
 
 ### Key Modules
 
 * `tensorlang/ast_builder.py` — AST construction and inlining
-* `tensorlang/type_checker.py` — shape and broadcasting checks
+* `tensorlang/type_checker.py` — shape and broadcasting checks (N-D aware)
 * `tensorlang/kernel_generator.py` — CUDA kernel generation
 * `tensorlang/codegen.py` — code generation orchestration
 * `tensorlang/compiler.py` — orchestration, execution, caching, scoped kernel names
 * `tensorlang/execution.py` — runtime execution, loops, rebinding
 * `tensorlang/interop.py` — NumPy zero-copy interop (`InteropMixin`)
 * `tensorlang/autograd.py` — NumPy reference autograd implementation
-* `tensorlang/fusion.py` — elementwise kernel fusion (broadcasting-aware)
-* `tensorlang/generators/` — per-category CUDA kernel generators (base, comparisons, elementwise, nn, optimizers, reductions, shapes, unary) — all dtype-aware
+* `tensorlang/fusion.py` — elementwise kernel fusion (broadcasting-aware, N-D aware)
+* `tensorlang/generators/` — per-category CUDA kernel generators (base, comparisons, elementwise, nn, optimizers, reductions, shapes, unary) — all dtype-aware and N-D aware
 * `tensorlang/test_runner.py` — test discovery and execution
 * `tensorlang/app_runner.py` — application discovery and execution
 * `tensorlang/gpu.py` — GPU detection and process-level pinning
@@ -661,11 +665,12 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 Current performance characteristics:
 
-* Matrix multiplication is backed by cuBLAS (replacing the earlier shared-memory tiled kernel).
-* Elementwise chains such as `add → relu` are fused into a single CUDA kernel, including broadcasting cases (row/column/general broadcast modes).
+* Matrix multiplication is backed by cuBLAS (replacing the earlier shared-memory tiled kernel), including batched N-D via strided batched GEMM.
+* Elementwise chains such as `add → relu` are fused into a single CUDA kernel, including broadcasting cases (row/column/general broadcast modes) and N-D.
 * Training-loop weight updates use pointer swaps (no GPU memory copy between iterations).
 * Generated CUDA source is cached and reused when unchanged.
 * Mixed precision: FP16 storage with FP32 accumulation reduces memory bandwidth; cuBLAS tensor-core matmul path for f16 (engages on Volta+; falls back to standard FP16 GEMM on Pascal).
+* N-D operations use stride-based indexing with per-element thread dispatch.
 * 4096×4096 matrix multiplication runs, but has not been benchmarked against cuBLAS or PyTorch.
 
 Performance claims should be treated as unverified until baselined on the same hardware.
@@ -719,17 +724,18 @@ Tensor verification is performed by the test runner, not the compiler. It checks
 
 The suite covers:
 
-* Basics, arithmetic, broadcasting
+* Basics, arithmetic, broadcasting (N-D)
 * Activations (relu, sigmoid, tanh, softmax, gelu, swish)
-* Reductions, slicing, reshape, transpose, concat
+* Reductions, slicing, reshape, transpose, concat (N-D)
 * Linear layers, MLP, neural nets
-* Normalisations (layer/batch/instance)
-* Losses (mse, cross-entropy)
+* Normalisations (layer/batch/instance, N-D)
+* Losses (mse, cross-entropy, N-D)
 * Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
 * Functions, pipelines, portfolio-style examples
 * Load/save
 * Mixed precision (f16 basic, matmul, autograd, training)
+* N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
 
 Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
 
@@ -830,13 +836,12 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5 Milestone (in progress)
+### v0.5.1 (next)
 
-* **N-dimensional tensor support:** general stride-based indexing across the generator suite (elementwise, reductions, shapes, nn, unary, comparisons).
-* **Autograd coverage:** gradients for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`.
-* **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
 * **Loss scaling** for FP16 training (static or dynamic).
 * **FP16 master weights in optimizer** (Adam with FP32 master weights).
+* **Autograd coverage expansion:** gradients for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons.
+* **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
 
 ### Short Term
 

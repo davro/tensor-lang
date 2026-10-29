@@ -14,13 +14,17 @@ class ReductionMixin(BaseGenerator):
     def softmax(self, op_type, name, tensor_name, input_shape, axis, dtype="f32"):
         if axis is None:
             axis = len(input_shape) - 1
+        ndim = len(input_shape)
+        if axis < 0:
+            axis += ndim
 
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
         out_write = lambda expr: self._write(dtype, expr)
 
-        if len(input_shape) == 2 and axis == 1:
+        # --- 2D, last axis (axis == ndim-1) ---
+        if ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void softmax_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -39,8 +43,6 @@ __global__ void softmax_kernel_{name}({ctype}* input, {ctype}* output, int rows,
         }}
 
         for (int col = 0; col < cols; col++) {{
-            float val = {inp_read("row * cols + col")};
-            // recompute from stored exp (already in output as float-cast)
             output[row * cols + col] = {out_write(f"output[row * cols + col] / sum_exp")};
         }}
     }}
@@ -56,7 +58,8 @@ extern "C" void launch_softmax_{name}({ctype}* input, {ctype}* output, int rows,
             kernel_info = ('softmax', name, tensor_name, None, rows, cols, axis)
             return kernel, kernel_info
 
-        elif len(input_shape) == 1:
+        # --- 1D ---
+        elif ndim == 1:
             size = int(input_shape[0])
             kernel = include + f"""
 __global__ void softmax_kernel_{name}({ctype}* input, {ctype}* output, int size) {{
@@ -88,19 +91,98 @@ extern "C" void launch_softmax_{name}({ctype}* input, {ctype}* output, int size)
 """
             kernel_info = ('softmax_1d', name, tensor_name, None, size)
             return kernel, kernel_info
+
+        # --- N-D general (any axis) ---
         else:
-            raise ValueError(f"Unsupported softmax shape {input_shape} or axis {axis}")
+            total_elements = int(np.prod([int(d) for d in input_shape]))
+            axis_size = int(input_shape[axis])
+            kernel = include + f"""
+__global__ void softmax_nd_kernel_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis, int total_elements) {{
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) return;
+
+    // Compute input strides
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    int axis_stride = in_strides[axis];
+    int axis_size = in_shape[axis];
+
+    // Decompose idx into coords
+
+    // Decompose idx into coords
+    int coords[8];
+    int temp = idx;
+    for (int d = ndim - 1; d >= 0; d--) {{
+        coords[d] = temp % in_shape[d];
+        temp /= in_shape[d];
+    }}
+    int this_axis_coord = coords[axis];
+
+    // Base index with axis coord = 0
+    coords[axis] = 0;
+    int base_idx = 0;
+    for (int d = 0; d < ndim; d++) {{
+        base_idx += coords[d] * in_strides[d];
+    }}
+
+    // Find max along axis
+    float max_val = -FLT_MAX;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_idx + k * axis_stride;
+        max_val = fmaxf(max_val, {inp_read("in_idx")});
+    }}
+
+    // Sum of exp
+    float sum_exp = 0.0f;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_idx + k * axis_stride;
+        sum_exp += expf({inp_read("in_idx")} - max_val);
+    }}
+
+    // Normalize this element
+    int this_in_idx = base_idx + this_axis_coord * axis_stride;
+    float this_val = {inp_read("this_in_idx")};
+    float exp_val = expf(this_val - max_val);
+    output[idx] = {out_write("exp_val / sum_exp")};
+}}
+extern "C" void launch_softmax_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis, int total_elements) {{
+
+    dim3 block(256);
+    dim3 grid((total_elements + block.x - 1) / block.x);
+    softmax_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, total_elements);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = ('softmax_nd', name, tensor_name, None, total_elements, ndim, axis, list(input_shape))
+            return kernel, kernel_info
 
     def sum(self, op_type, name, tensor_name, axis, input_shape, dtype="f32"):
+        ndim = len(input_shape)
+        if axis is not None:
+            if axis < 0:
+                axis += ndim
+            if ndim == 1:
+                axis = None  # 1D axis reduction = full reduction
+
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
+        # --- Full reduction (axis is None) ---
         if axis is None:
             size = int(np.prod([int(dim) for dim in input_shape]))
 
             if dtype == "f16":
-                # Single-block reduction for f16 (accumulate in float, cast result)
                 kernel = include + f"""
 __global__ void sum_full_kernel_{name}({ctype}* input, {ctype}* output, int size) {{
     extern __shared__ float sdata[];
@@ -169,7 +251,8 @@ extern "C" void launch_sum_{name}(float* input, float* output, int size) {{
 """
             return kernel, (f"{op_type}_full", name, tensor_name, None, size)
 
-        elif len(input_shape) == 2 and axis == 1:
+        # --- 2D axis=1 ---
+        elif ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void sum_axis_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -192,7 +275,8 @@ extern "C" void launch_sum_{name}({ctype}* input, {ctype}* output, int rows, int
 """
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
 
-        elif len(input_shape) == 2 and axis == 0:
+        # --- 2D axis=0 ---
+        elif ndim == 2 and axis == 0:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void sum_axis0_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -215,11 +299,99 @@ extern "C" void launch_sum_{name}({ctype}* input, {ctype}* output, int rows, int
 """
             return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
 
+        # --- N-D axis reduction ---
+        else:
+            num_outputs = 1
+            for i, d in enumerate(input_shape):
+                if i != axis:
+                    num_outputs *= int(d)
+            axis_size = int(input_shape[axis])
+
+            kernel = include + f"""
+__global__ void sum_axis_nd_kernel_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    // Compute input strides
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    // Decompose out_idx into output coords, map to input base (axis coord = 0)
+    // Output has ndim-1 dims; map output dim j to input dim (j if j < axis else j+1)
+    int out_strides[8];
+    // Compute output strides (ndim-1 dims)
+    int ndim_out = ndim - 1;
+    if (ndim_out > 0) {{
+        out_strides[ndim_out - 1] = 1;
+        // Need output shape: in_shape without axis
+        // Compute on the fly: out_shape[j] = in_shape[j < axis ? j : j+1]
+        for (int d = ndim_out - 2; d >= 0; d--) {{
+            int out_dim_d = (d < axis) ? in_shape[d] : in_shape[d + 1];
+            int out_dim_next = (d + 1 < axis) ? in_shape[d + 1] : in_shape[d + 2];
+            out_strides[d] = out_strides[d + 1] * out_dim_next;
+        }}
+    }}
+
+    int out_coords[8];
+    int temp = out_idx;
+    for (int d = 0; d < ndim_out; d++) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = temp / out_strides[d];
+        temp %= out_strides[d];
+    }}
+
+    int base_in_idx = 0;
+    int out_d = 0;
+    for (int d = 0; d < ndim; d++) {{
+        if (d == axis) continue;
+        base_in_idx += out_coords[out_d] * in_strides[d];
+        out_d++;
+    }}
+
+    int axis_stride = in_strides[axis];
+
+    float acc = 0.0f;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_in_idx + k * axis_stride;
+        acc += {inp_read("in_idx")};
+    }}
+    output[out_idx] = {self._write(dtype, "acc")};
+}}
+extern "C" void launch_sum_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    sum_axis_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, num_outputs, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
+            return kernel, kernel_info
+
     def mean(self, op_type, name, tensor_name, axis, input_shape, dtype="f32"):
+        ndim = len(input_shape)
+        if axis is not None:
+            if axis < 0:
+                axis += ndim
+            if ndim == 1:
+                axis = None
+
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
+        # --- Full reduction ---
         if axis is None:
             size = int(np.prod([int(dim) for dim in input_shape]))
 
@@ -297,7 +469,8 @@ extern "C" void launch_mean_{name}(float* input, float* output, int size) {{
 """
             return kernel, (f"{op_type}_full", name, tensor_name, None, size)
 
-        elif len(input_shape) == 2 and axis == 1:
+        # --- 2D axis=1 ---
+        elif ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void mean_axis_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -320,7 +493,8 @@ extern "C" void launch_mean_{name}({ctype}* input, {ctype}* output, int rows, in
 """
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
 
-        elif len(input_shape) == 2 and axis == 0:
+        # --- 2D axis=0 ---
+        elif ndim == 2 and axis == 0:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void mean_axis0_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -343,11 +517,92 @@ extern "C" void launch_mean_{name}({ctype}* input, {ctype}* output, int rows, in
 """
             return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
 
+        # --- N-D axis reduction ---
+        else:
+            num_outputs = 1
+            for i, d in enumerate(input_shape):
+                if i != axis:
+                    num_outputs *= int(d)
+            axis_size = int(input_shape[axis])
+
+            kernel = include + f"""
+__global__ void mean_axis_nd_kernel_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    int ndim_out = ndim - 1;
+    int out_strides[8];
+    if (ndim_out > 0) {{
+        out_strides[ndim_out - 1] = 1;
+        for (int d = ndim_out - 2; d >= 0; d--) {{
+            int out_dim_next = (d + 1 < axis) ? in_shape[d + 1] : in_shape[d + 2];
+            out_strides[d] = out_strides[d + 1] * out_dim_next;
+        }}
+    }}
+
+    int out_coords[8];
+    int temp = out_idx;
+    for (int d = 0; d < ndim_out; d++) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = (out_strides[d] > 0) ? (temp / out_strides[d]) : 0;
+        if (out_strides[d] > 0) temp %= out_strides[d];
+    }}
+
+    int base_in_idx = 0;
+    int out_d = 0;
+    for (int d = 0; d < ndim; d++) {{
+        if (d == axis) continue;
+        base_in_idx += out_coords[out_d] * in_strides[d];
+        out_d++;
+    }}
+
+    int axis_stride = in_strides[axis];
+
+    float acc = 0.0f;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_in_idx + k * axis_stride;
+        acc += {inp_read("in_idx")};
+    }}
+    output[out_idx] = {self._write(dtype, "acc / (float)axis_size")};
+}}
+extern "C" void launch_mean_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    mean_axis_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, num_outputs, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
+            return kernel, kernel_info
+
     def max(self, op_type, name, tensor_name, axis, input_shape, dtype="f32"):
+        ndim = len(input_shape)
+        if axis is not None:
+            if axis < 0:
+                axis += ndim
+            if ndim == 1:
+                axis = None
+
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
+        # --- Full reduction ---
         if axis is None:
             size = int(np.prod([int(dim) for dim in input_shape]))
 
@@ -425,7 +680,8 @@ extern "C" void launch_max_{name}(float* input, float* output, int size) {{
 """
             return kernel, (f"{op_type}_full", name, tensor_name, None, size)
 
-        elif len(input_shape) == 2 and axis == 1:
+        # --- 2D axis=1 ---
+        elif ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void max_axis_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -448,7 +704,8 @@ extern "C" void launch_max_{name}({ctype}* input, {ctype}* output, int rows, int
 """
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
 
-        elif len(input_shape) == 2 and axis == 0:
+        # --- 2D axis=0 ---
+        elif ndim == 2 and axis == 0:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void max_axis0_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -471,11 +728,92 @@ extern "C" void launch_max_{name}({ctype}* input, {ctype}* output, int rows, int
 """
             return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
 
+        # --- N-D axis reduction ---
+        else:
+            num_outputs = 1
+            for i, d in enumerate(input_shape):
+                if i != axis:
+                    num_outputs *= int(d)
+            axis_size = int(input_shape[axis])
+
+            kernel = include + f"""
+__global__ void max_axis_nd_kernel_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    int ndim_out = ndim - 1;
+    int out_strides[8];
+    if (ndim_out > 0) {{
+        out_strides[ndim_out - 1] = 1;
+        for (int d = ndim_out - 2; d >= 0; d--) {{
+            int out_dim_next = (d + 1 < axis) ? in_shape[d + 1] : in_shape[d + 2];
+            out_strides[d] = out_strides[d + 1] * out_dim_next;
+        }}
+    }}
+
+    int out_coords[8];
+    int temp = out_idx;
+    for (int d = 0; d < ndim_out; d++) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = (out_strides[d] > 0) ? (temp / out_strides[d]) : 0;
+        if (out_strides[d] > 0) temp %= out_strides[d];
+    }}
+
+    int base_in_idx = 0;
+    int out_d = 0;
+    for (int d = 0; d < ndim; d++) {{
+        if (d == axis) continue;
+        base_in_idx += out_coords[out_d] * in_strides[d];
+        out_d++;
+    }}
+
+    int axis_stride = in_strides[axis];
+
+    float max_val = -FLT_MAX;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_in_idx + k * axis_stride;
+        max_val = fmaxf(max_val, {inp_read("in_idx")});
+    }}
+    output[out_idx] = {self._write(dtype, "max_val")};
+}}
+extern "C" void launch_max_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    max_axis_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, num_outputs, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
+            return kernel, kernel_info
+
     def min(self, op_type, name, tensor_name, axis, input_shape, dtype="f32"):
+        ndim = len(input_shape)
+        if axis is not None:
+            if axis < 0:
+                axis += ndim
+            if ndim == 1:
+                axis = None
+
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
+        # --- Full reduction ---
         if axis is None:
             size = int(np.prod([int(dim) for dim in input_shape]))
 
@@ -553,7 +891,8 @@ extern "C" void launch_min_{name}(float* input, float* output, int size) {{
 """
             return kernel, (f"{op_type}_full", name, tensor_name, None, size)
 
-        elif len(input_shape) == 2 and axis == 1:
+        # --- 2D axis=1 ---
+        elif ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void min_axis_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -576,7 +915,8 @@ extern "C" void launch_min_{name}({ctype}* input, {ctype}* output, int rows, int
 """
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
 
-        elif len(input_shape) == 2 and axis == 0:
+        # --- 2D axis=0 ---
+        elif ndim == 2 and axis == 0:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void min_axis0_kernel_{name}({ctype}* input, {ctype}* output, int rows, int cols) {{
@@ -599,11 +939,92 @@ extern "C" void launch_min_{name}({ctype}* input, {ctype}* output, int rows, int
 """
             return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
 
+        # --- N-D axis reduction ---
+        else:
+            num_outputs = 1
+            for i, d in enumerate(input_shape):
+                if i != axis:
+                    num_outputs *= int(d)
+            axis_size = int(input_shape[axis])
+
+            kernel = include + f"""
+__global__ void min_axis_nd_kernel_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    int ndim_out = ndim - 1;
+    int out_strides[8];
+    if (ndim_out > 0) {{
+        out_strides[ndim_out - 1] = 1;
+        for (int d = ndim_out - 2; d >= 0; d--) {{
+            int out_dim_next = (d + 1 < axis) ? in_shape[d + 1] : in_shape[d + 2];
+            out_strides[d] = out_strides[d + 1] * out_dim_next;
+        }}
+    }}
+
+    int out_coords[8];
+    int temp = out_idx;
+    for (int d = 0; d < ndim_out; d++) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = (out_strides[d] > 0) ? (temp / out_strides[d]) : 0;
+        if (out_strides[d] > 0) temp %= out_strides[d];
+    }}
+
+    int base_in_idx = 0;
+    int out_d = 0;
+    for (int d = 0; d < ndim; d++) {{
+        if (d == axis) continue;
+        base_in_idx += out_coords[out_d] * in_strides[d];
+        out_d++;
+    }}
+
+    int axis_stride = in_strides[axis];
+
+    float min_val = FLT_MAX;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_in_idx + k * axis_stride;
+        min_val = fminf(min_val, {inp_read("in_idx")});
+    }}
+    output[out_idx] = {self._write(dtype, "min_val")};
+}}
+extern "C" void launch_min_{name}(
+    {ctype}* input, {ctype}* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    min_axis_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, num_outputs, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
+            return kernel, kernel_info
+
     def argmax(self, op_type, name, tensor_name, axis, input_shape, dtype="f32"):
+        ndim = len(input_shape)
+        if axis is not None:
+            if axis < 0:
+                axis += ndim
+            if ndim == 1:
+                axis = None
+
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
+        # --- Full reduction ---
         if axis is None:
             size = int(np.prod([int(dim) for dim in input_shape]))
             kernel = include + f"""
@@ -647,7 +1068,8 @@ extern "C" void launch_argmax_{name}({ctype}* input, float* output, int size) {{
 """
             return kernel, ("argmax_full", name, tensor_name, None, size)
 
-        elif len(input_shape) == 2 and axis == 1:
+        # --- 2D axis=1 ---
+        elif ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void argmax_axis_kernel_{name}({ctype}* input, float* output, int rows, int cols) {{
@@ -675,11 +1097,126 @@ extern "C" void launch_argmax_{name}({ctype}* input, float* output, int rows, in
 """
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
 
+        # --- 2D axis=0 ---
+        elif ndim == 2 and axis == 0:
+            rows, cols = int(input_shape[0]), int(input_shape[1])
+            kernel = include + f"""
+__global__ void argmax_axis0_kernel_{name}({ctype}* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float max_val = {inp_read("col")};
+        int max_idx = 0;
+        for (int row = 1; row < rows; row++) {{
+            float v = {inp_read("row * cols + col")};
+            if (v > max_val) {{
+                max_val = v;
+                max_idx = row;
+            }}
+        }}
+        output[col] = (float)max_idx;
+    }}
+}}
+extern "C" void launch_argmax_{name}({ctype}* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    argmax_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
+
+        # --- N-D axis reduction ---
+        else:
+            num_outputs = 1
+            for i, d in enumerate(input_shape):
+                if i != axis:
+                    num_outputs *= int(d)
+            axis_size = int(input_shape[axis])
+
+            kernel = include + f"""
+__global__ void argmax_axis_nd_kernel_{name}(
+    {ctype}* input, float* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    int ndim_out = ndim - 1;
+    int out_strides[8];
+    if (ndim_out > 0) {{
+        out_strides[ndim_out - 1] = 1;
+        for (int d = ndim_out - 2; d >= 0; d--) {{
+            int out_dim_next = (d + 1 < axis) ? in_shape[d + 1] : in_shape[d + 2];
+            out_strides[d] = out_strides[d + 1] * out_dim_next;
+        }}
+    }}
+
+    int out_coords[8];
+    int temp = out_idx;
+    for (int d = 0; d < ndim_out; d++) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = (out_strides[d] > 0) ? (temp / out_strides[d]) : 0;
+        if (out_strides[d] > 0) temp %= out_strides[d];
+    }}
+
+    int base_in_idx = 0;
+    int out_d = 0;
+    for (int d = 0; d < ndim; d++) {{
+        if (d == axis) continue;
+        base_in_idx += out_coords[out_d] * in_strides[d];
+        out_d++;
+    }}
+
+    int axis_stride = in_strides[axis];
+
+    float max_val = -FLT_MAX;
+    int max_idx = 0;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_in_idx + k * axis_stride;
+        float v = {inp_read("in_idx")};
+        if (v > max_val) {{
+            max_val = v;
+            max_idx = k;
+        }}
+    }}
+    output[out_idx] = (float)max_idx;
+}}
+extern "C" void launch_argmax_{name}(
+    {ctype}* input, float* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    argmax_axis_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, num_outputs, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
+            return kernel, kernel_info
+
     def argmin(self, op_type, name, tensor_name, axis, input_shape, dtype="f32"):
+        ndim = len(input_shape)
+        if axis is not None:
+            if axis < 0:
+                axis += ndim
+            if ndim == 1:
+                axis = None
+
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
+        # --- Full reduction ---
         if axis is None:
             size = int(np.prod([int(dim) for dim in input_shape]))
             kernel = include + f"""
@@ -723,7 +1260,8 @@ extern "C" void launch_argmin_{name}({ctype}* input, float* output, int size) {{
 """
             return kernel, ("argmin_full", name, tensor_name, None, size)
 
-        if len(input_shape) == 2 and axis == 1:
+        # --- 2D axis=1 ---
+        if ndim == 2 and axis == 1:
             rows, cols = int(input_shape[0]), int(input_shape[1])
             kernel = include + f"""
 __global__ void argmin_axis_kernel_{name}({ctype}* input, float* output, int rows, int cols) {{
@@ -750,3 +1288,110 @@ extern "C" void launch_argmin_{name}({ctype}* input, float* output, int rows, in
 }}
 """
             return kernel, (f"{op_type}_axis", name, tensor_name, None, rows, cols, axis)
+
+        # --- 2D axis=0 ---
+        elif ndim == 2 and axis == 0:
+            rows, cols = int(input_shape[0]), int(input_shape[1])
+            kernel = include + f"""
+__global__ void argmin_axis0_kernel_{name}({ctype}* input, float* output, int rows, int cols) {{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < cols) {{
+        float min_val = {inp_read("col")};
+        int min_idx = 0;
+        for (int row = 1; row < rows; row++) {{
+            float v = {inp_read("row * cols + col")};
+            if (v < min_val) {{
+                min_val = v;
+                min_idx = row;
+            }}
+        }}
+        output[col] = (float)min_idx;
+    }}
+}}
+extern "C" void launch_argmin_{name}({ctype}* input, float* output, int rows, int cols) {{
+    dim3 block(256);
+    dim3 grid((cols + block.x - 1) / block.x);
+    argmin_axis0_kernel_{name}<<<grid, block>>>(input, output, rows, cols);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            return kernel, (f"{op_type}_axis0", name, tensor_name, None, rows, cols, axis)
+
+        # --- N-D axis reduction ---
+        else:
+            num_outputs = 1
+            for i, d in enumerate(input_shape):
+                if i != axis:
+                    num_outputs *= int(d)
+            axis_size = int(input_shape[axis])
+
+            kernel = include + f"""
+__global__ void argmin_axis_nd_kernel_{name}(
+    {ctype}* input, float* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    int in_strides[8];
+    in_strides[ndim - 1] = 1;
+    for (int d = ndim - 2; d >= 0; d--) {{
+        in_strides[d] = in_strides[d + 1] * in_shape[d + 1];
+    }}
+
+    int ndim_out = ndim - 1;
+    int out_strides[8];
+    if (ndim_out > 0) {{
+        out_strides[ndim_out - 1] = 1;
+        for (int d = ndim_out - 2; d >= 0; d--) {{
+            int out_dim_next = (d + 1 < axis) ? in_shape[d + 1] : in_shape[d + 2];
+            out_strides[d] = out_strides[d + 1] * out_dim_next;
+        }}
+    }}
+
+    int out_coords[8];
+    int temp = out_idx;
+    for (int d = 0; d < ndim_out; d++) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = (out_strides[d] > 0) ? (temp / out_strides[d]) : 0;
+        if (out_strides[d] > 0) temp %= out_strides[d];
+    }}
+
+    int base_in_idx = 0;
+    int out_d = 0;
+    for (int d = 0; d < ndim; d++) {{
+        if (d == axis) continue;
+        base_in_idx += out_coords[out_d] * in_strides[d];
+        out_d++;
+    }}
+
+    int axis_stride = in_strides[axis];
+
+    float min_val = FLT_MAX;
+    int min_idx = 0;
+    for (int k = 0; k < axis_size; k++) {{
+        int in_idx = base_in_idx + k * axis_stride;
+        float v = {inp_read("in_idx")};
+        if (v < min_val) {{
+            min_val = v;
+            min_idx = k;
+        }}
+    }}
+    output[out_idx] = (float)min_idx;
+}}
+extern "C" void launch_argmin_{name}(
+    {ctype}* input, float* output,
+    const int* in_shape, int ndim, int axis,
+    int num_outputs, int axis_size) {{
+
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    argmin_axis_nd_kernel_{name}<<<grid, block>>>(input, output, in_shape, ndim, axis, num_outputs, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+            kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
+            return kernel, kernel_info

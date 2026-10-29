@@ -1,5 +1,7 @@
-# tensorlang/fusion.py
-"""Conservative elementwise kernel fusion pass.
+"""
+TensorLang Fusion
+
+Conservative elementwise kernel fusion pass.
 
 Fuses consecutive elementwise unary/binary let-bindings into a single
 ``fused_elementwise`` node.  Supports both non-broadcast and broadcasting
@@ -7,6 +9,8 @@ chains (broadcasting fusion uses per-element index remapping).  The pass is
 purely a codegen optimization: autograd still records each original op, and
 the fused kernel writes every intermediate output so the backward pass
 keeps working.
+
+File: tensorlang/fusion.py
 """
 
 import os

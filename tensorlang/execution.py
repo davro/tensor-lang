@@ -1,6 +1,10 @@
-# File: tensorlang/execution.py
+"""
+TensorLang ExecutionMixin
 
-"""Execution helpers for TensorCompiler."""
+Execution helpers for TensorCompiler.
+
+File: tensorlang/execution.py
+"""
 
 import numpy as np
 import pycuda.driver as cuda
@@ -38,7 +42,6 @@ class ExecutionMixin:
             size_bytes = np_dtype.itemsize
         alloc = cuda.mem_alloc(size_bytes)
         gpu_allocs[name] = alloc
-        # If we have CPU data, push it
         if name in tensors and isinstance(tensors[name], np.ndarray):
             arr = np.ascontiguousarray(tensors[name], dtype=np_dtype)
             cuda.memcpy_htod(alloc, arr)
@@ -51,7 +54,6 @@ class ExecutionMixin:
         if size_bytes == 0:
             size_bytes = np_dtype.itemsize
         alloc = cuda.mem_alloc(size_bytes)
-        # Zero-fill
         zeros = np.zeros(shape if shape else (1,), dtype=np_dtype)
         cuda.memcpy_htod(alloc, zeros)
         return alloc
@@ -61,6 +63,10 @@ class ExecutionMixin:
             return
 
         op_type = kernel_info[0]
+
+        # ================================================================
+        # Special cases with non-standard kernel_info layouts
+        # ================================================================
 
         if op_type == "fused_elementwise":
             (_, kernel_func_name, chain, external_inputs, outputs, size,
@@ -141,21 +147,17 @@ class ExecutionMixin:
             return
 
         if op_type == "general_broadcast":
-            _, actual_op, kernel_func_name, arg1, arg2, padded_shape1, padded_shape2, output_shape_tuple, total_elements = kernel_info
+            (_, actual_op, kernel_func_name, arg1, arg2, padded_shape1, padded_shape2, output_shape_tuple, total_elements) = kernel_info
             tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
-            shape = tuple(int(dim) for dim in env[tensor_name]["shape"])
             if self.debug_mode:
-                self.tensorlang.print(message=f"[COMPILER] Executing {op_type} ({actual_op}) for {tensor_name}, shape: {shape}")
+                self.tensorlang.print(message=f"[COMPILER] Executing {op_type} ({actual_op}) for {tensor_name}")
             ndim = len(output_shape_tuple)
             shape1_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
             shape2_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
             out_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
-            shape1_array = np.array(padded_shape1, dtype=np.int32)
-            shape2_array = np.array(padded_shape2, dtype=np.int32)
-            out_shape_array = np.array(output_shape_tuple, dtype=np.int32)
-            cuda.memcpy_htod(shape1_gpu, shape1_array)
-            cuda.memcpy_htod(shape2_gpu, shape2_array)
-            cuda.memcpy_htod(out_shape_gpu, out_shape_array)
+            cuda.memcpy_htod(shape1_gpu, np.array(padded_shape1, dtype=np.int32))
+            cuda.memcpy_htod(shape2_gpu, np.array(padded_shape2, dtype=np.int32))
+            cuda.memcpy_htod(out_shape_gpu, np.array(output_shape_tuple, dtype=np.int32))
             getattr(lib, f"launch_{actual_op}_{kernel_func_name}")(
                 c_void_p(int(gpu_allocs[arg1])),
                 c_void_p(int(gpu_allocs[arg2])),
@@ -166,12 +168,126 @@ class ExecutionMixin:
                 c_int(ndim),
                 c_int(total_elements),
             )
+            shape1_gpu.free()
+            shape2_gpu.free()
+            out_shape_gpu.free()
             self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
             return
 
+        # ================================================================
+        # N-D special cases with shape arrays
+        # ================================================================
+
+        if op_type == "matmul_batched":
+            (_, kernel_func_name, arg1, arg2, m, n, p, batch_count) = kernel_info
+            tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
+            getattr(lib, f"launch_matmul_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(m), c_int(n), c_int(p), c_int(batch_count),
+            )
+            self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+
+        if op_type == "softmax_nd":
+            (_, kernel_func_name, tensor_name_src, _, total_elements, ndim, axis, input_shape) = kernel_info
+            tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
+            in_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            cuda.memcpy_htod(in_shape_gpu, np.array(input_shape, dtype=np.int32))
+            getattr(lib, f"launch_softmax_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[tensor_name_src])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_void_p(int(in_shape_gpu)),
+                c_int(ndim), c_int(axis), c_int(total_elements),
+            )
+            in_shape_gpu.free()
+            self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+
+        if op_type == "slice_nd":
+            (_, kernel_func_name, tensor_name_src, _, in_ndim, out_ndim, total_output,
+             input_shape, output_shape, offsets, is_index, fixed_vals) = kernel_info
+            tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
+            in_shape_gpu = cuda.mem_alloc(in_ndim * np.int32().nbytes)
+            out_shape_gpu = cuda.mem_alloc(max(out_ndim, 1) * np.int32().nbytes)
+            offsets_gpu = cuda.mem_alloc(in_ndim * np.int32().nbytes)
+            is_index_gpu = cuda.mem_alloc(in_ndim * np.int32().nbytes)
+            fixed_vals_gpu = cuda.mem_alloc(in_ndim * np.int32().nbytes)
+            cuda.memcpy_htod(in_shape_gpu, np.array(input_shape, dtype=np.int32))
+            cuda.memcpy_htod(out_shape_gpu, np.array(output_shape if output_shape else [1], dtype=np.int32))
+            cuda.memcpy_htod(offsets_gpu, np.array(offsets, dtype=np.int32))
+            cuda.memcpy_htod(is_index_gpu, np.array(is_index, dtype=np.int32))
+            cuda.memcpy_htod(fixed_vals_gpu, np.array(fixed_vals, dtype=np.int32))
+            getattr(lib, f"launch_slice_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[tensor_name_src])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_void_p(int(in_shape_gpu)), c_void_p(int(out_shape_gpu)),
+                c_void_p(int(offsets_gpu)), c_void_p(int(is_index_gpu)), c_void_p(int(fixed_vals_gpu)),
+                c_int(in_ndim), c_int(out_ndim), c_int(total_output),
+            )
+            in_shape_gpu.free(); out_shape_gpu.free(); offsets_gpu.free()
+            is_index_gpu.free(); fixed_vals_gpu.free()
+            self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+
+        if op_type == "concat_nd":
+            (_, kernel_func_name, t1, t2, ndim, total_output,
+             shape1, shape2, output_shape, axis, size1_axis) = kernel_info
+            tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
+            shape1_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            shape2_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            out_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            cuda.memcpy_htod(shape1_gpu, np.array(shape1, dtype=np.int32))
+            cuda.memcpy_htod(shape2_gpu, np.array(shape2, dtype=np.int32))
+            cuda.memcpy_htod(out_shape_gpu, np.array(output_shape, dtype=np.int32))
+            getattr(lib, f"launch_concat_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[t1])), c_void_p(int(gpu_allocs[t2])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_void_p(int(shape1_gpu)), c_void_p(int(shape2_gpu)), c_void_p(int(out_shape_gpu)),
+                c_int(ndim), c_int(axis), c_int(size1_axis), c_int(total_output),
+            )
+            shape1_gpu.free(); shape2_gpu.free(); out_shape_gpu.free()
+            self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+
+        if op_type.endswith("_axis_nd"):
+            (_, kernel_func_name, tensor_name_src, _, num_outputs, axis_size, axis, ndim, input_shape) = kernel_info
+            tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
+            in_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            cuda.memcpy_htod(in_shape_gpu, np.array(input_shape, dtype=np.int32))
+            op_base = op_type.split("_")[0]
+            getattr(lib, f"launch_{op_base}_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[tensor_name_src])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_void_p(int(in_shape_gpu)),
+                c_int(ndim), c_int(axis), c_int(num_outputs), c_int(axis_size),
+            )
+            in_shape_gpu.free()
+            self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+
+        if op_type == "layer_norm_nd":
+            (_, kernel_func_name, tensor_name_src, _, total_elements, ndim, axis, axis_size, num_lines, eps, input_shape) = kernel_info
+            tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
+            in_shape_gpu = cuda.mem_alloc(ndim * np.int32().nbytes)
+            cuda.memcpy_htod(in_shape_gpu, np.array(input_shape, dtype=np.int32))
+            getattr(lib, f"launch_layer_norm_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[tensor_name_src])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_void_p(int(in_shape_gpu)),
+                c_int(ndim), c_int(axis), c_int(axis_size), c_int(num_lines), c_float(eps),
+            )
+            in_shape_gpu.free()
+            self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
+            return
+
+        # ================================================================
+        # Generic unpacking for standard kernel_info layouts
+        # ================================================================
+
         op_type, kernel_func_name, arg1, arg2, *dims = kernel_info
         tensor_name = self._kernel_name_map.get(kernel_func_name, kernel_func_name)
-        shape = tuple(int(dim) for dim in env[tensor_name]["shape"])
 
         if op_type == "matmul":
             m, n, p = dims
@@ -373,6 +489,21 @@ class ExecutionMixin:
                 c_int(batch_size), c_int(in_features), c_int(out_features),
             )
 
+        elif op_type == "linear_nd":
+            input_name = arg1
+            weight_name = arg2
+            bias_name = dims[0]
+            batch_size = dims[1]
+            in_features = dims[2]
+            out_features = dims[3]
+            getattr(lib, f"launch_linear_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[input_name])),
+                c_void_p(int(gpu_allocs[weight_name])),
+                c_void_p(int(gpu_allocs[bias_name])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(batch_size), c_int(in_features), c_int(out_features),
+            )
+
         elif op_type in ("layer_norm_2d", "layer_norm_axis0"):
             rows, cols, eps = dims
             getattr(lib, f"launch_layer_norm_{kernel_func_name}")(
@@ -451,8 +582,32 @@ class ExecutionMixin:
                 c_int(batch_size), c_int(num_features), c_float(eps),
             )
 
+        elif op_type == "batch_norm_nd":
+            running_mean_name = arg2
+            batch_size = dims[0]
+            num_features = dims[1]
+            eps = dims[2]
+            running_var_name = dims[3]
+            getattr(lib, f"launch_batch_norm_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[running_mean_name])),
+                c_void_p(int(gpu_allocs[running_var_name])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(batch_size), c_int(num_features), c_float(eps),
+            )
+
         elif op_type == "instance_norm_2d":
             batch_size, num_features, eps = dims[-3], dims[-2], dims[-1]
+            getattr(lib, f"launch_instance_norm_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(batch_size), c_int(num_features), c_float(eps),
+            )
+
+        elif op_type == "instance_norm_nd":
+            batch_size = dims[1]
+            num_features = dims[2]
+            eps = dims[3]
             getattr(lib, f"launch_instance_norm_{kernel_func_name}")(
                 c_void_p(int(gpu_allocs[arg1])),
                 c_void_p(int(gpu_allocs[tensor_name])),
@@ -634,7 +789,6 @@ class ExecutionMixin:
                             gpu_allocs[grad_tensor_name] = cuda.mem_alloc(grad_tensor.nbytes)
                             cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
 
-                        # Use the parameter's dtype for the gradient
                         param_dtype = self._tl_dtype(env, grad_name)
                         env[grad_tensor_name] = {
                             "dtype": param_dtype,
@@ -681,7 +835,6 @@ class ExecutionMixin:
 
                 src_name = src_expr["name"]
 
-                # Guard 1: shape stability
                 if target in env and src_name in env:
                     if tuple(env[target]["shape"]) != tuple(env[src_name]["shape"]):
                         self.tensorlang.print(
@@ -708,8 +861,6 @@ class ExecutionMixin:
             gpu_allocs.update(pending_gpu)
             tensors.update(pending_tensors)
 
-            # Re-resolve alias lets now that rebinds have been applied,
-            # so `let y = w` tracks the rebound storage within the same iteration.
             for node in body:
                 if (node.get("type") == "let"
                         and isinstance(node.get("expr"), dict)
