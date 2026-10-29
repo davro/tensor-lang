@@ -4,7 +4,7 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.0 (mixed precision + N-D complete). Core suite: 145/145 tests passing.
+> **Status:** v0.5.0 (mixed precision + N-D complete). Core suite: 152/152 tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
 > **Current focus:** v0.5.1 — loss scaling and autograd coverage expansion.
 
@@ -68,11 +68,11 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 ### Implemented and working
 
 * Tensor declarations with explicit shapes: `Tensor[f32, (batch, features)]`, `Tensor[f16, (batch, features)]`, and N-D: `Tensor[f32, (batch, channels, height, width)]`
-* Element-wise arithmetic with broadcasting (N-D aware)
+* Element-wise arithmetic with broadcasting (N-D aware, NumPy-style)
 * Matrix multiplication (`matmul`) — cuBLAS-backed (FP32 and FP16 tensor core path), including batched N-D
 * Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish` (N-D aware)
 * Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax` (N-D aware, arbitrary axis)
-* Comparisons: `greater`, `less`, `equal`
+* Comparisons: `greater`, `less`, `equal` (N-D broadcasting)
 * Slicing, reshape, transpose, concat (N-D aware)
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
@@ -96,8 +96,8 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**. Targeted post-v0.5.
 * **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
-* **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)). `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons are targeted for v0.5.
-* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.
+* **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)). `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons are targeted for v0.5.1.
+* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.1.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters.
 * **Dev mode hot reload** is not implemented.
@@ -396,7 +396,7 @@ The following operations may be present in the language but are **not currently 
 * `argmax`, `argmin`
 * `greater`, `less`, `equal`
 
-`reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, and `argmin` gradients are targeted for v0.5.
+`reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, and `argmin` gradients are targeted for v0.5.1.
 
 ### Autograd Notes
 
@@ -484,7 +484,7 @@ Loop bodies currently support:
 * `let` bindings and rebinds
 * `backward()`
 
-They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.
+They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.1.
 
 ### Rebinding
 
