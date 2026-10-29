@@ -480,6 +480,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("greater", name, [arg1, arg2])
 
                         elif expr.get("type") == "less":
                             arg1, arg2 = expr["args"]
@@ -490,6 +491,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("less", name, [arg1, arg2])
 
                         elif expr.get("type") == "equal":
                             arg1, arg2 = expr["args"]
@@ -500,6 +502,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("equal", name, [arg1, arg2])
 
                         elif expr.get("type") == "sum":
                             tensor_name = expr["tensor"]
@@ -529,6 +532,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("slice", name, [tensor_name], metadata={"specs": slice_specs})
 
                         elif expr.get("type") == "max":
                             tensor_name = expr["tensor"]
@@ -537,6 +541,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.max(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("max", name, [tensor_name], metadata={"axis": axis})
 
                         elif expr.get("type") == "min":
                             tensor_name = expr["tensor"]
@@ -545,6 +550,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.min(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("min", name, [tensor_name], metadata={"axis": axis})
 
                         elif expr.get("type") == "argmax":
                             tensor_name = expr["tensor"]
@@ -553,6 +559,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.argmax(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("argmax", name, [tensor_name], metadata={"axis": axis})
 
                         elif expr.get("type") == "argmin":
                             tensor_name = expr["tensor"]
@@ -561,6 +568,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.argmin(expr["type"], name, tensor_name, axis, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("argmin", name, [tensor_name], metadata={"axis": axis})
 
                         elif expr.get("type") == "linear":
                             input_name, weight_name, bias_name = expr["args"]
@@ -621,6 +629,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.transpose(expr["type"], name, input_shape, tensor_name, axes, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("transpose", name, [tensor_name], metadata={"axes": axes})
 
                         elif expr.get("type") == "reshape":
                             tensor_name = expr["tensor"]
@@ -629,6 +638,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.reshape(expr["type"], name, tensor_name, total_elements, dtype=env[tensor_name].get("dtype", "f32"))
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("reshape", name, [tensor_name])
 
                         elif expr.get("type") == "concat":
                             tensor_names = expr["tensors"]
@@ -639,6 +649,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernel, kernel_info = generator.concat(expr["type"], name, tensor_names, axis, env, dtype=concat_dtype)
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("concat", name, tensor_names, metadata={"axis": axis})
 
                         elif expr.get("type") == "batch_norm":
                             tensor_name = expr["tensor"]
@@ -652,6 +663,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("batch_norm", name, [tensor_name, running_mean_name, running_var_name], metadata={"eps": eps})
 
                         elif expr.get("type") == "instance_norm":
                             tensor_name = expr["tensor"]
@@ -662,6 +674,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
+                            self._record_operation("instance_norm", name, [tensor_name], metadata={"eps": eps})
 
                 if kernels or cuda_code.strip():
                     if self.debug_mode:

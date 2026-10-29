@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.0 (mixed precision + N-D complete). Core suite: 152/152 tests passing.
+> **Status:** v0.5.1 (mixed precision + N-D + autograd coverage complete). Core suite: 162/162 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.1 — loss scaling and autograd coverage expansion.
+> **Current focus:** v0.5.2 — loss scaling, for-loop body parity, and FP16 master weights.
 
 ---
 
@@ -46,7 +46,7 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **cuBLAS-accelerated matmul** — matrix multiplication dispatches to cuBLAS for performance, including batched N-D
 * **Type safety** — compile-time tensor shape and broadcasting checks (N-D aware)
 * **ML-first design** — built specifically for neural network operations
-* **Automatic differentiation** — reverse-mode autograd for a defined subset of operations
+* **Automatic differentiation** — reverse-mode autograd for a broad set of operations (FP32 and FP16)
 * **Training loops** — `for` loops with `backward()`, pointer-swap weight rebinding, nested loops, and `save()` inside loops
 * **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state
 * **Elementwise kernel fusion** — fuses elementwise chains (e.g. `add → relu`), including broadcasting cases, into a single CUDA kernel
@@ -77,7 +77,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
 * Linear layers: `linear` (N-D aware)
-* Reverse-mode autograd for a defined subset of operations (FP32 and FP16)
+* Reverse-mode autograd for a broad set of operations (FP32 and FP16)
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes, N-D aware)
@@ -90,21 +90,24 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Shared app toolkit (`apps/tlkit/`)
 * **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cast-based kernels; cuBLAS tensor-core matmul path; f16 autograd and training loops
 * **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
+* **Autograd coverage expansion** — gradients now wired for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons (zero gradient for non-differentiable ops)
 
 ### Known limitations
 
 * **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**. Targeted post-v0.5.
 * **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
-* **Autograd coverage is limited** (see [Automatic Differentiation](#automatic-differentiation)). `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons are targeted for v0.5.1.
-* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.1.
+* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.2.
 * **Axis support is limited** for several normalisations.
-* **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters.
+* **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
+* **`instance_norm`** N-D uses simplified spatial-dim flattening.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
 * **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
-* **Loss scaling** for FP16 training is not implemented (deferred to v0.5.1).
+* **Loss scaling** for FP16 training is not implemented (deferred to v0.5.2).
 * **FP16 master weights in optimizer** — Adam uses FP16 state; FP32 master weights deferred.
+* **Single backward pass per compilation** — multiple `backward()` statements in one file are not supported.
+* **Autograd N-D limitations** — `matmul` gradients are 2D only; `batch_norm`/`instance_norm` gradients are simplified.
 
 ---
 
@@ -360,49 +363,53 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 
 ### Supported Gradient Operations
 
-| Operation | Gradient |
-|---|---|
-| `matmul(A, B)` | 2D only |
-| `add(A, B)` | Broadcast-aware reduction |
-| `minus(A, B)` | Broadcast-aware reduction |
-| `mult(A, B)` | Broadcast-aware reduction |
-| `div(A, B)` | Broadcast-aware reduction |
-| `relu` | Yes |
-| `sigmoid` | Yes |
-| `tanh` | Yes |
-| `softmax` | Yes (any axis, N-D) |
-| `sum` | Yes |
-| `mean` | Yes |
-| `mse_loss` | Yes |
-| `linear` | Yes (N-D) |
-| `layer_norm` | Yes (N-D, any axis) |
-| `cross_entropy` | Yes (probability inputs, class-index targets) |
-| `gelu` | Yes |
-| `swish` | Yes |
+| Operation | Gradient | Notes |
+|---|---|---|
+| `matmul(A, B)` | Yes | 2D operands |
+| `add(A, B)` | Yes | Broadcast-aware reduction |
+| `minus(A, B)` | Yes | Broadcast-aware reduction |
+| `mult(A, B)` | Yes | Broadcast-aware reduction |
+| `div(A, B)` | Yes | Broadcast-aware reduction |
+| `relu` | Yes | |
+| `sigmoid` | Yes | |
+| `tanh` | Yes | |
+| `softmax` | Yes | Any axis, N-D |
+| `sum` | Yes | Any axis, N-D |
+| `mean` | Yes | Any axis, N-D |
+| `mse_loss` | Yes | N-D |
+| `linear` | Yes | N-D (operates on last dim) |
+| `layer_norm` | Yes | N-D, any axis |
+| `cross_entropy` | Yes | Probability inputs, class-index targets |
+| `gelu` | Yes | |
+| `swish` | Yes | |
+| `reshape` | Yes | N-D (gradient reshaped to input shape) |
+| `transpose` | Yes | N-D (inverse permutation) |
+| `slice` | Yes | N-D (gradient scattered into zeros) |
+| `concat` | Yes | N-D (gradient split along concat axis) |
+| `max` | Yes | Full and axis reduction; gradient flows to all extrema |
+| `min` | Yes | Full and axis reduction; gradient flows to all extrema |
+| `argmax` | Yes | Full and axis reduction; gradient is one-hot at index |
+| `argmin` | Yes | Full and axis reduction; gradient is one-hot at index |
+| `greater` | Yes (zero) | Non-differentiable; gradient is zero |
+| `less` | Yes (zero) | Non-differentiable; gradient is zero |
+| `equal` | Yes (zero) | Non-differentiable; gradient is zero |
 
 Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computation uses NumPy's type promotion (may upcast to f32 internally).
 
 ### Not Currently Wired into Autograd
 
-The following operations may be present in the language but are **not currently recorded for gradient computation**:
+The following operations are present in the language but are **not currently recorded for gradient computation**:
 
 * `batch_norm`
 * `instance_norm`
-* `concat`
-* `reshape`
-* `transpose`
-* `slice`
-* `max`, `min`
-* `argmax`, `argmin`
-* `greater`, `less`, `equal`
-
-`reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, and `argmin` gradients are targeted for v0.5.1.
 
 ### Autograd Notes
 
-* `matmul` gradients assume 2D operands.
+* `matmul` gradients assume 2D operands (batched N-D matmul gradients not yet wired).
 * Broadcast-aware gradient reduction is implemented via `_unbroadcast()`.
 * `cross_entropy` expects probability tensors, not logits.
+* `argmax`/`argmin` gradients use one-hot scatter (non-standard but useful for hard selection).
+* `max`/`min` reduction gradients flow to all tied extrema (not divided).
 
 ---
 
@@ -484,7 +491,7 @@ Loop bodies currently support:
 * `let` bindings and rebinds
 * `backward()`
 
-They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.1.
+They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.2.
 
 ### Rebinding
 
@@ -730,7 +737,7 @@ The suite covers:
 * Linear layers, MLP, neural nets
 * Normalisations (layer/batch/instance, N-D)
 * Losses (mse, cross-entropy, N-D)
-* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish)
+* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
 * Functions, pipelines, portfolio-style examples
 * Load/save
@@ -836,18 +843,20 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.1 (next)
+### v0.5.2 (next)
 
 * **Loss scaling** for FP16 training (static or dynamic).
 * **FP16 master weights in optimizer** (Adam with FP32 master weights).
-* **Autograd coverage expansion:** gradients for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons.
 * **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
+* **Autograd wiring for batch_norm and instance_norm.**
+* **Batched matmul gradients** (N-D matmul backward).
 
 ### Short Term
 
 * Improve shape-mismatch error messages
 * Implement or remove `if`, `any()`, and `all()` (targeted post-v0.5)
 * `batch_norm` gamma/beta affine parameters
+* Single backward pass limitation (support multiple `backward()` statements)
 
 ### Medium Term
 

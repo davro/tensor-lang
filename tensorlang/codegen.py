@@ -225,6 +225,7 @@ class CodegenMixin:
 
         if expr.get("type") in ("greater", "less", "equal"):
             arg1, arg2 = expr["args"]
+            self._record_operation(expr["type"], name, [arg1, arg2])
             shape1, shape2 = env[arg1]["shape"], env[arg2]["shape"]
             output_shape = env[name]["shape"]
             if expr.get("type") == "greater":
@@ -246,6 +247,7 @@ class CodegenMixin:
         if expr.get("type") == "slice":
             tensor_name = expr["tensor"]
             slice_specs = expr["specs"]
+            self._record_operation("slice", name, [tensor_name], metadata={"specs": slice_specs})
             input_shape = env[tensor_name]["shape"]
             output_shape = env[name]["shape"]
             result_dtype = env[tensor_name].get("dtype", "f32")
@@ -254,6 +256,7 @@ class CodegenMixin:
         if expr.get("type") == "max":
             tensor_name = expr["tensor"]
             axis = expr.get("axis")
+            self._record_operation("max", name, [tensor_name], metadata={"axis": axis})
             input_shape = env[tensor_name]["shape"]
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.max(expr["type"], kernel_name, tensor_name, axis, input_shape, dtype=result_dtype)
@@ -261,6 +264,7 @@ class CodegenMixin:
         if expr.get("type") == "min":
             tensor_name = expr["tensor"]
             axis = expr.get("axis")
+            self._record_operation("min", name, [tensor_name], metadata={"axis": axis})
             input_shape = env[tensor_name]["shape"]
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.min(expr["type"], kernel_name, tensor_name, axis, input_shape, dtype=result_dtype)
@@ -268,6 +272,7 @@ class CodegenMixin:
         if expr.get("type") == "argmax":
             tensor_name = expr["tensor"]
             axis = expr.get("axis")
+            self._record_operation("argmax", name, [tensor_name], metadata={"axis": axis})
             input_shape = env[tensor_name]["shape"]
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.argmax(expr["type"], kernel_name, tensor_name, axis, input_shape, dtype=result_dtype)
@@ -275,6 +280,7 @@ class CodegenMixin:
         if expr.get("type") == "argmin":
             tensor_name = expr["tensor"]
             axis = expr.get("axis")
+            self._record_operation("argmin", name, [tensor_name], metadata={"axis": axis})
             input_shape = env[tensor_name]["shape"]
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.argmin(expr["type"], kernel_name, tensor_name, axis, input_shape, dtype=result_dtype)
@@ -302,6 +308,7 @@ class CodegenMixin:
             tensor_name = expr["tensor"]
             input_shape = env[tensor_name]["shape"]
             axes = expr.get("axes")
+            self._record_operation("transpose", name, [tensor_name], metadata={"axes": axes})
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.transpose(expr["type"], kernel_name, input_shape, tensor_name, axes, dtype=result_dtype)
 
@@ -309,12 +316,14 @@ class CodegenMixin:
             tensor_name = expr["tensor"]
             input_shape = env[tensor_name]["shape"]
             total_elements = int(np.prod([int(d) for d in input_shape]))
+            self._record_operation("reshape", name, [tensor_name])
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.reshape(expr["type"], kernel_name, tensor_name, total_elements, dtype=result_dtype)
 
         if expr.get("type") == "concat":
             tensor_names = expr["tensors"]
             axis = expr["axis"]
+            self._record_operation("concat", name, tensor_names, metadata={"axis": axis})
             # Promote across all concat inputs
             concat_dtype = env[tensor_names[0]].get("dtype", "f32")
             for tn in tensor_names[1:]:
@@ -327,6 +336,7 @@ class CodegenMixin:
             running_var_name = expr["running_var"]
             eps = expr.get("eps", 1e-5)
             input_shape = env[tensor_name]["shape"]
+            self._record_operation("batch_norm", name, [tensor_name, running_mean_name, running_var_name], metadata={"eps": eps})
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.batch_norm(expr["type"], kernel_name, input_shape, tensor_name, running_mean_name, eps, running_var_name, dtype=result_dtype)
 
@@ -334,6 +344,7 @@ class CodegenMixin:
             tensor_name = expr["tensor"]
             eps = expr.get("eps", 1e-5)
             input_shape = env[tensor_name]["shape"]
+            self._record_operation("instance_norm", name, [tensor_name], metadata={"eps": eps})
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.instance_norm(expr["type"], kernel_name, tensor_name, input_shape, eps, dtype=result_dtype)
 

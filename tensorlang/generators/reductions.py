@@ -1031,30 +1031,30 @@ extern "C" void launch_min_{name}(
 struct ArgMaxValIdx_{name} {{ float val; int idx; }};
 
 __global__ void argmax_full_kernel_{name}({ctype}* input, float* output, int size) {{
-    extern __shared__ ArgMaxValIdx_{name} sdata[];
+    extern __shared__ ArgMaxValIdx_{name} sdata_amx[];
     int tid = threadIdx.x;
 
-    sdata[tid].val = -FLT_MAX;
-    sdata[tid].idx = -1;
+    sdata_amx[tid].val = -FLT_MAX;
+    sdata_amx[tid].idx = -1;
 
     for (int i = tid; i < size; i += blockDim.x) {{
         float v = {inp_read("i")};
-        if (v > sdata[tid].val) {{
-            sdata[tid].val = v;
-            sdata[tid].idx = i;
+        if (v > sdata_amx[tid].val) {{
+            sdata_amx[tid].val = v;
+            sdata_amx[tid].idx = i;
         }}
     }}
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
-        if (tid < s && sdata[tid + s].val > sdata[tid].val) {{
-            sdata[tid] = sdata[tid + s];
+        if (tid < s && sdata_amx[tid + s].val > sdata_amx[tid].val) {{
+            sdata_amx[tid] = sdata_amx[tid + s];
         }}
         __syncthreads();
     }}
 
     if (tid == 0) {{
-        output[0] = (float)sdata[0].idx;
+        output[0] = (float)sdata_amx[0].idx;
     }}
 }}
 extern "C" void launch_argmax_{name}({ctype}* input, float* output, int size) {{
@@ -1223,30 +1223,30 @@ extern "C" void launch_argmax_{name}(
 struct ArgMinValIdx_{name} {{ float val; int idx; }};
 
 __global__ void argmin_full_kernel_{name}({ctype}* input, float* output, int size) {{
-    extern __shared__ ArgMinValIdx_{name} sdata[];
+    extern __shared__ ArgMinValIdx_{name} sdata_amin[];
     int tid = threadIdx.x;
 
-    sdata[tid].val = FLT_MAX;
-    sdata[tid].idx = -1;
+    sdata_amin[tid].val = FLT_MAX;
+    sdata_amin[tid].idx = -1;
 
     for (int i = tid; i < size; i += blockDim.x) {{
         float v = {inp_read("i")};
-        if (v < sdata[tid].val) {{
-            sdata[tid].val = v;
-            sdata[tid].idx = i;
+        if (v < sdata_amin[tid].val) {{
+            sdata_amin[tid].val = v;
+            sdata_amin[tid].idx = i;
         }}
     }}
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
-        if (tid < s && sdata[tid + s].val < sdata[tid].val) {{
-            sdata[tid] = sdata[tid + s];
+        if (tid < s && sdata_amin[tid + s].val < sdata_amin[tid].val) {{
+            sdata_amin[tid] = sdata_amin[tid + s];
         }}
         __syncthreads();
     }}
 
     if (tid == 0) {{
-        output[0] = (float)sdata[0].idx;
+        output[0] = (float)sdata_amin[0].idx;
     }}
 }}
 extern "C" void launch_argmin_{name}({ctype}* input, float* output, int size) {{
