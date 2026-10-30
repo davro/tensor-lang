@@ -52,19 +52,37 @@ class ComputationGraph:
 
     def zero_grad(self):
         for name in self.requires_grad:
-            self.gradients[name] = np.zeros_like(self.tensors[name])
+            if name in self.gradients:
+                self.gradients[name] = np.zeros_like(self.gradients[name])
+            else:
+                self.gradients[name] = np.zeros_like(self.tensors[name])
 
-    def backward(self, loss_name: str):
+    def backward(self, loss_name: str, scale: float = 1.0):
         if loss_name not in self.tensors:
             raise ValueError(f"Loss tensor '{loss_name}' not found in graph")
 
-        loss_shape = self.tensors[loss_name].shape
+        loss_tensor = self.tensors[loss_name]
+        loss_shape = loss_tensor.shape
         if loss_shape not in [(), (1,)]:
             self.tensorlang.print(message=f"[AUTOGRAD] Warning: Loss should be scalar, got shape {loss_shape}")
 
         if self.debug_mode:
-            self.tensorlang.print(message=f"[AUTOGRAD] Starting backward pass from '{loss_name}'")
+            self.tensorlang.print(message=f"[AUTOGRAD] Starting backward pass from '{loss_name}' (scale={scale})")
             self.tensorlang.print(message=f"[AUTOGRAD] -> Graph has {len(self.nodes)} operations")
+
+        # Determine gradient dtype: upcast FP16 when scale would overflow
+        if np.issubdtype(loss_tensor.dtype, np.floating):
+            if loss_tensor.dtype == np.float16:
+                finfo = np.finfo(np.float16)
+                if abs(scale) > float(finfo.max):
+                    grad_dtype = np.float32
+                else:
+                    grad_dtype = loss_tensor.dtype
+            else:
+                grad_dtype = loss_tensor.dtype
+        else:
+            grad_dtype = np.result_type(loss_tensor.dtype, np.float32)
+
 
         tensors_needing_gradients = set()
         tensors_needing_gradients.update(self.requires_grad)
@@ -75,14 +93,16 @@ class ComputationGraph:
 
         for tensor_name in tensors_needing_gradients:
             if tensor_name in self.tensors:
-                self.gradients[tensor_name] = np.zeros_like(self.tensors[tensor_name])
+                self.gradients[tensor_name] = np.zeros_like(
+                    self.tensors[tensor_name], dtype=grad_dtype)
                 if self.debug_mode:
                     self.tensorlang.print(message=f"[AUTOGRAD] Initialized gradient for '{tensor_name}' to zero")
 
-        self.gradients[loss_name] = np.ones_like(self.tensors[loss_name])
+        self.gradients[loss_name] = np.ones_like(loss_tensor, dtype=grad_dtype) * scale
 
         if self.debug_mode:
-            self.tensorlang.print(message="[AUTOGRAD] Set loss gradient to 1.0")
+            self.tensorlang.print(message=f"[AUTOGRAD] Set loss gradient to {scale}")
+
 
         for node in reversed(self.nodes):
             if self.debug_mode:
@@ -205,7 +225,9 @@ class ComputationGraph:
         if tensor_name not in self.gradients:
             if tensor_name not in self.tensors:
                 return
-            self.gradients[tensor_name] = np.zeros_like(self.tensors[tensor_name])
+            t = self.tensors[tensor_name]
+            dtype = np.float32 if (np.issubdtype(t.dtype, np.floating) and t.dtype == np.float16) else t.dtype
+            self.gradients[tensor_name] = np.zeros_like(t, dtype=dtype)
 
         input_shape = self.tensors[tensor_name].shape
         grad_shape = np.asarray(grad).shape
@@ -366,9 +388,11 @@ class ComputationGraph:
         keepdims = node.metadata.get('keepdims', False)
         og = np.asarray(output_grad)
 
+        grad_dtype = np.result_type(x.dtype, np.float32)
         if axis is None:
             scalar = og.item() if og.size == 1 else og
-            grad = np.full(x.shape, scalar, dtype=x.dtype if np.issubdtype(x.dtype, np.floating) else np.float32)
+            grad = np.full(x.shape, scalar, dtype=grad_dtype)
+
         else:
             axes = self._as_tuple_axis(axis, x.ndim)
             grad = og
@@ -386,10 +410,12 @@ class ComputationGraph:
         keepdims = node.metadata.get('keepdims', False)
         og = np.asarray(output_grad)
 
+        grad_dtype = np.result_type(x.dtype, np.float32)
         if axis is None:
             count = x.size if x.size > 0 else 1
             scalar = (og.item() if og.size == 1 else og) / count
-            grad = np.full(x.shape, scalar, dtype=x.dtype if np.issubdtype(x.dtype, np.floating) else np.float32)
+            grad = np.full(x.shape, scalar, dtype=grad_dtype)
+
         else:
             axes = self._as_tuple_axis(axis, x.ndim)
             count = int(np.prod([x.shape[a] for a in axes])) or 1

@@ -74,3 +74,20 @@ def dtype_include(dtype_name: str) -> str:
 # Kernel launch defaults
 # ---------------------------------------------------------------------------
 DEFAULT_BLOCK_SIZE = 256
+
+# ---------------------------------------------------------------------------
+# Loss scaling (mixed precision)
+# ---------------------------------------------------------------------------
+# Default static loss scale factors.  FP32 training uses 1.0 (no scaling).
+# FP16 uses 2^16 = 65536 to prevent gradient underflow.  When the scale
+# exceeds the FP16 max (~65504) the autograd engine automatically upcasts
+# gradients to FP32.
+DEFAULT_LOSS_SCALE_FP32 = 1.0
+DEFAULT_LOSS_SCALE_FP16 = 65536.0  # 2^16
+
+
+def default_loss_scale(dtype_name: str) -> float:
+    """Return the default loss scale for a given dtype name."""
+    if dtype_name == "f16":
+        return DEFAULT_LOSS_SCALE_FP16
+    return DEFAULT_LOSS_SCALE_FP32

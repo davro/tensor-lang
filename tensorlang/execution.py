@@ -766,20 +766,27 @@ class ExecutionMixin:
                     requires_grad = tname in self.requires_grad_tensors
                     self.comp_graph.register_tensor(tname, tval, requires_grad)
 
+                scale = self._loss_scale if getattr(self, "_loss_scale", None) is not None else 1.0
+
                 self.comp_graph.gradients = {}
-                self.comp_graph.backward(loss_name)
+                self.comp_graph.backward(loss_name, scale=scale)
 
                 if self.debug_mode:
                     loss_val = tensors.get(loss_name)
                     if loss_val is not None:
                         self.tensorlang.print(
                             message=f"[COMPILER] for loop iter {i + 1}: "
-                                    f"loss={float(np.asarray(loss_val).reshape(-1)[0]):.6f}"
+                                    f"loss={float(np.asarray(loss_val).reshape(-1)[0]):.6f} "
+                                    f"(scale={scale})"
                         )
 
                 for grad_name in self.comp_graph.requires_grad:
                     if grad_name in self.comp_graph.gradients:
                         grad_tensor = self.comp_graph.gradients[grad_name]
+                        # Unscale gradients before optimizer step
+                        if scale != 1.0 and scale != 0.0:
+                            grad_tensor = grad_tensor / scale
+                        self.comp_graph.gradients[grad_name] = grad_tensor
                         grad_tensor_name = f"{grad_name}_grad"
                         tensors[grad_tensor_name] = grad_tensor
 
@@ -789,10 +796,16 @@ class ExecutionMixin:
                             gpu_allocs[grad_tensor_name] = cuda.mem_alloc(grad_tensor.nbytes)
                             cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
 
-                        param_dtype = self._tl_dtype(env, grad_name)
+                        # Use actual gradient dtype, not forward tensor dtype
+                        if grad_tensor.dtype == np.float16:
+                            grad_dtype_name = "f16"
+                        elif grad_tensor.dtype == np.float64:
+                            grad_dtype_name = "f64"
+                        else:
+                            grad_dtype_name = "f32"
                         env[grad_tensor_name] = {
-                            "dtype": param_dtype,
-                            "shape": grad_tensor.shape,
+                            "dtype": grad_dtype_name,
+                            "shape": tuple(int(d) for d in grad_tensor.shape),
                         }
 
                 if bw_list_pos is not None:

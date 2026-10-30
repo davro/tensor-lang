@@ -25,7 +25,10 @@ import pycuda.driver as cuda
 from tensorlang.ast_builder import build_ast
 from tensorlang.autograd import AutogradContext, ComputationGraph
 from tensorlang.codegen import CodegenMixin
-from tensorlang.constants import OPTIMIZER_NAMES, dtype_numpy, promote_dtype
+# from tensorlang.constants import OPTIMIZER_NAMES, dtype_numpy, promote_dtype
+from tensorlang.constants import (OPTIMIZER_NAMES, dtype_numpy, promote_dtype,
+                                 DEFAULT_LOSS_SCALE_FP32, DEFAULT_LOSS_SCALE_FP16)
+
 from tensorlang.execution import ExecutionMixin
 from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.io import IOMixin
@@ -38,7 +41,8 @@ OPTIMIZER_NAMES = {"sgd", "adam", "sgd_update", "adam_update"}
 
 
 class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
-    def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False):
+    def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False, loss_scale=1.0):
+
         self.debug_mode = debug_mode
         self.debug_info = debug_info
         self.debug_ast = debug_ast
@@ -52,6 +56,11 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
         self._loop_scope_counter = 0
         self._kernel_name_map = {}
         self.optimizer_state = {}
+        self.loss_scale = loss_scale
+        self._loss_scale = None  # resolved during compile_and_execute
+        self._loss_scale_auto = False
+
+
 
     def compile_and_execute(self, tensorlang_file):
         if self.debug_mode:
@@ -112,6 +121,23 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                 code = f.read()
                 if self.debug_mode:
                     self.tensorlang.print(type="[COMPILER]", message=f"Loaded TensorLang file: {file_path}")
+
+            # Parse loss scale pragma: "# loss_scale: 65536" or "# loss_scale: auto"
+            import re
+            scale_match = re.search(r'#\s*loss_scale:\s*(\S+)', code)
+            if scale_match:
+                scale_str = scale_match.group(1).lower()
+                if scale_str == "auto":
+                    self._loss_scale_auto = True
+                else:
+                    try:
+                        self.loss_scale = float(scale_str)
+                    except ValueError:
+                        self.tensorlang.print(message=f"[COMPILER] Warning: invalid loss_scale pragma '{scale_str}', using default")
+            # Strip pragma lines from code before parsing
+            code = re.sub(r'#\s*loss_scale:\s*\S+\n?', '', code)
+
+
         except FileNotFoundError:
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] Missing TensorLang file: {file_path}")
@@ -159,6 +185,22 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             self.env = env
             self.env = env
 
+            # Resolve loss scale: pragma "auto", explicit value, or default 1.0
+            if getattr(self, "_loss_scale_auto", False):
+                has_fp16 = any(
+                    isinstance(v, dict) and v.get("dtype") == "f16"
+                    for v in env.values()
+                )
+                self._loss_scale = (DEFAULT_LOSS_SCALE_FP16 if has_fp16
+                                    else DEFAULT_LOSS_SCALE_FP32)
+            else:
+                self._loss_scale = float(self.loss_scale)
+            if self.debug_mode:
+                self.tensorlang.print(
+                    message=f"[COMPILER] Loss scale resolved to {self._loss_scale}"
+                )
+
+
             if self.debug_mode:
                 self.tensorlang.print(message=f"[COMPILER] TYPE CHECKER ENV:\n{env}")
 
@@ -177,7 +219,12 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         grad_name = f"{node['name']}_grad"
                         source_shape = env[node["name"]]["shape"]
                         source_dtype = env[node["name"]].get("dtype", "f32")
-                        env[grad_name] = {"dtype": source_dtype, "shape": source_shape}
+                        if source_dtype == "f16" and self._loss_scale > 65504.0:
+                            grad_dtype = "f32"
+                        else:
+                            grad_dtype = source_dtype
+                        env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
+
                         if self.debug_mode:
                             self.tensorlang.print(
                                 message=f"[COMPILER] Pre-registered gradient shape: "
@@ -190,7 +237,11 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 if body_node["name"] in env:
                                     source_shape = env[body_node["name"]]["shape"]
                                     source_dtype = env[body_node["name"]].get("dtype", "f32")
-                                    env[grad_name] = {"dtype": source_dtype, "shape": source_shape}
+                                    if source_dtype == "f16" and self._loss_scale > 65504.0:
+                                        grad_dtype = "f32"
+                                    else:
+                                        grad_dtype = source_dtype
+                                    env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
 
                 generator = KernelGenerator(self.debug_mode)
                 kernels = []
@@ -856,16 +907,17 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         for node in ast:
                             if node.get("type") == "backward":
                                 loss_name = node["loss_tensor"]
+                                scale = self._loss_scale if self._loss_scale is not None else 1.0
                                 print(f"\n{'=' * 80}")
-                                print(f"BACKWARD PASS from '{loss_name}'")
+                                print(f"BACKWARD PASS from '{loss_name}' (loss_scale={scale})")
                                 print("=" * 80)
                                 try:
-                                    self.comp_graph.backward(loss_name)
+                                    self.comp_graph.backward(loss_name, scale=scale)
                                     for grad_name in self.comp_graph.requires_grad:
                                         if grad_name not in self.comp_graph.gradients:
                                             continue
                                         grad_tensor = self.comp_graph.gradients[grad_name]
-                                        print(f"\nGradient {grad_name}.grad:\n{grad_tensor}")
+                                        print(f"\nGradient {grad_name}.grad (scaled):\n{grad_tensor}")
                                         if self.cache_layers:
                                             grad_cache_path = cache_file_dir / f"{grad_name}.grad.npy"
                                             np.save(grad_cache_path, grad_tensor)
@@ -873,6 +925,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     for grad_name in self.comp_graph.requires_grad:
                                         if grad_name in self.comp_graph.gradients:
                                             grad_tensor = self.comp_graph.gradients[grad_name]
+                                            # Unscale gradients before optimizer step
+                                            if scale != 1.0 and scale != 0.0:
+                                                grad_tensor = grad_tensor / scale
+                                            self.comp_graph.gradients[grad_name] = grad_tensor
                                             grad_tensor_name = f"{grad_name}_grad"
                                             tensors[grad_tensor_name] = grad_tensor
                                             if grad_tensor_name in gpu_allocs:
@@ -882,9 +938,15 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                             else:
                                                 if self.debug_mode:
                                                     self.tensorlang.print(message=f"[COMPILER] [Autograd] Warning: {grad_tensor_name} not in GPU allocations")
-                                            grad_dtype = env.get(grad_name, {}).get("dtype", "f32")
+                                            # Use actual gradient dtype, not forward tensor dtype
+                                            if grad_tensor.dtype == np.float16:
+                                                grad_dtype_name = "f16"
+                                            elif grad_tensor.dtype == np.float64:
+                                                grad_dtype_name = "f64"
+                                            else:
+                                                grad_dtype_name = "f32"
                                             env[grad_tensor_name] = {
-                                                "dtype": grad_dtype,
+                                                "dtype": grad_dtype_name,
                                                 "shape": tuple(int(d) for d in grad_tensor.shape),
                                             }
                                             if self.debug_mode:
@@ -896,6 +958,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
                                     if self.debug_mode:
                                         traceback.print_exc()
+
 
                         if backward_index is not None:
                             for ast_idx in range(backward_index + 1, len(ast)):
