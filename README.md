@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.2 (loss scaling + mixed precision + N-D + autograd coverage complete). Core suite: 166/166 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.2 (loss scaling + dynamic scaling + FP16 master weights + mixed precision + N-D + autograd coverage complete). Core suite: 169/169 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.2 — for-loop body parity and FP16 master weights.
+> **Current focus:** v0.5.3 — for-loop body parity and control flow.
 
 ---
 
@@ -49,14 +49,15 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **ML-first design** — built specifically for neural network operations
 * **Automatic differentiation** — reverse-mode autograd for a broad set of operations (FP32 and FP16)
 * **Training loops** — `for` loops with `backward()`, pointer-swap weight rebinding, nested loops, and `save()` inside loops
-* **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state
+* **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state, FP32 master weights for FP16 params
 * **Elementwise kernel fusion** — fuses elementwise chains (e.g. `add → relu`), including broadcasting cases, into a single CUDA kernel
 * **Inline expressions** — nested binary/unary calls are flattened into synthetic bindings
 * **Scoped kernel names** — loop-local CUDA symbols prevent name collisions when tensor names are reused
 * **NumPy zero-copy interop** — share CPU buffers between TensorLang tensors and NumPy arrays without copying
 * **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cuBLAS tensor-core matmul path; cast-based elementwise/activation/reduction kernels
 * **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
-* **Loss scaling** — static loss scaling for FP16 training stability; auto-detect or explicit scale via pragma; gradients upcast to FP32 when scale overflows FP16 max
+* **Loss scaling** — static and dynamic loss scaling for FP16 training stability; auto-detect or explicit scale via pragma; gradients upcast to FP32 when scale overflows FP16 max; overflow detection with automatic scale reduction
+* **FP16 master weights** — Adam/SGD with FP32 master weights for FP16 params; optimizer computes in FP32, casts to FP16 for forward pass
 * **Extensible architecture** — clean separation of parsing, type checking, and code generation (codegen, execution, interop, and per-category kernel generators)
 
 **Important framing:** Python is the host/compiler language. Tensor operations run as native CUDA kernels, but the compiler, runtime orchestration, and test runner are Python-based.
@@ -81,7 +82,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Linear layers: `linear` (N-D aware)
 * Reverse-mode autograd for a broad set of operations (FP32 and FP16)
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
-* Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter)
+* Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter, FP32 master weights for FP16 params)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes, N-D aware)
 * Scoped kernel names for loop bodies
 * User-defined functions
@@ -93,24 +94,25 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cast-based kernels; cuBLAS tensor-core matmul path; f16 autograd and training loops
 * **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
 * **Autograd coverage expansion** — gradients now wired for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons (zero gradient for non-differentiable ops)
-* **Loss scaling** — static loss scaling for FP16 training stability; configurable via `# loss_scale: <value>` pragma or `# loss_scale: auto`; gradients upcast to FP32 when scale overflows FP16 max; unscale before optimizer step
+* **Loss scaling** — static and dynamic loss scaling for FP16 training stability; configurable via `# loss_scale: <value|auto|dynamic>` pragma; gradients upcast to FP32 when scale overflows FP16 max; overflow detection with automatic scale reduction (halve on overflow, double after N successful steps); unscale before optimizer step
+* **FP16 master weights** — Adam/SGD with FP32 master weights for FP16 params; optimizer computes in FP32 (m, v buffers in FP32), casts to FP16 for forward pass; automatic for FP16 params with grad
+* **Batched matmul gradients** — N-D (batched) matmul backward via NumPy batched matmul + `_unbroadcast` for broadcast dims
 
 ### Known limitations
 
 * **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**. Targeted post-v0.5.
 * **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
-* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.2.
+* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.3.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
 * **`instance_norm`** N-D uses simplified spatial-dim flattening.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
 * **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
-* **FP16 master weights in optimizer** — Adam uses FP16 state; FP32 master weights deferred.
 * **Single backward pass per compilation** — multiple `backward()` statements in one file are not supported.
-* **Autograd N-D limitations** — `matmul` gradients are 2D only; `batch_norm`/`instance_norm` gradients are simplified.
-* **Dynamic loss scaling** — only static scaling is implemented; overflow detection and automatic scale adjustment deferred.
+* **Autograd N-D limitations** — `batch_norm`/`instance_norm` gradients are simplified.
+* **Dynamic loss scaling** — overflow detection works but scale growth interval defaults to 2000 steps; may need tuning for short training runs.
 
 ---
 
@@ -180,9 +182,9 @@ tensor-lang/
 ├── tensorlang/                # Core package
 │   ├── app_runner.py          # Application discovery and execution
 │   ├── ast_builder.py         # AST construction and inlining
-│   ├── autograd.py            # NumPy reference autograd
+│   ├── autograd.py            # NumPy reference autograd (scale + overflow detection)
 │   ├── codegen.py             # Code generation orchestration
-│   ├── compiler.py            # Orchestration, execution, caching, scoped kernel names
+│   ├── compiler.py            # Orchestration, execution, caching, scoped kernel names, loss scale
 │   ├── constants.py           # Shared constants (dtype registry, promotion, loss scale)
 │   ├── execution.py           # Runtime execution, loops, rebinding
 │   ├── fusion.py              # Elementwise kernel fusion (broadcasting-aware)
@@ -191,7 +193,7 @@ tensor-lang/
 │   │   ├── comparisons.py     # greater, less, equal
 │   │   ├── elementwise.py     # add, minus, mult, div, fill, fused
 │   │   ├── nn.py             # matmul, linear, norms, losses
-│   │   ├── optimizers.py     # sgd_update, adam_update
+│   │   ├── optimizers.py     # sgd_update, adam_update (master weights)
 │   │   ├── reductions.py     # sum, mean, min, max, argmin, argmax, softmax
 │   │   ├── shapes.py         # reshape, transpose, slice, concat
 │   │   └── unary.py          # relu, sigmoid, tanh, gelu, swish
@@ -368,7 +370,7 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 
 | Operation | Gradient | Notes |
 |---|---|---|
-| `matmul(A, B)` | Yes | 2D operands |
+| `matmul(A, B)` | Yes | 2D and batched N-D operands |
 | `add(A, B)` | Yes | Broadcast-aware reduction |
 | `minus(A, B)` | Yes | Broadcast-aware reduction |
 | `mult(A, B)` | Yes | Broadcast-aware reduction |
@@ -408,7 +410,7 @@ The following operations are present in the language but are **not currently rec
 
 ### Autograd Notes
 
-* `matmul` gradients assume 2D operands (batched N-D matmul gradients not yet wired).
+* `matmul` gradients support 2D and batched N-D operands (broadcast dims handled via `_unbroadcast`).
 * Broadcast-aware gradient reduction is implemented via `_unbroadcast()`.
 * `cross_entropy` expects probability tensors, not logits.
 * `argmax`/`argmin` gradients use one-hot scatter (non-standard but useful for hard selection).
@@ -418,7 +420,7 @@ The following operations are present in the language but are **not currently rec
 
 ## Loss Scaling
 
-TensorLang supports **static loss scaling** for mixed-precision (FP16) training stability. Loss scaling prevents gradient underflow by scaling the loss (and thus all gradients) by a large factor during backward, then unscaling before the optimizer step.
+TensorLang supports **static and dynamic loss scaling** for mixed-precision (FP16) training stability. Loss scaling prevents gradient underflow by scaling the loss (and thus all gradients) by a large factor during backward, then unscaling before the optimizer step.
 
 ### How It Works
 
@@ -426,6 +428,7 @@ TensorLang supports **static loss scaling** for mixed-precision (FP16) training 
 2. All gradients are scaled by `scale` during backpropagation
 3. Before the optimizer step, gradients are divided by `scale` (unscaled)
 4. If the scale exceeds FP16 max (~65504), gradients are automatically upcast to FP32
+5. **Dynamic mode:** overflow (inf/nan in gradients) is detected after backward; scale is halved and optimizer step is skipped; after N successful steps, scale is doubled
 
 ### Configuration
 
@@ -439,7 +442,7 @@ let loss = sum(y)
 backward(loss)
 ```
 
-**Via auto-detect:**
+**Auto-detect:**
 
 ```text
 # loss_scale: auto
@@ -447,10 +450,19 @@ backward(loss)
 
 Auto-detect checks if any tensor in the graph is FP16 and selects `65536.0`; otherwise uses `1.0`.
 
+**Dynamic scaling:**
+
+```text
+# loss_scale: dynamic [init_scale] [patience]
+```
+
+Enables dynamic scaling with optional initial scale (default: auto-detected) and patience (default: 2000 successful steps before doubling).
+
 **Via Python API:**
 
 ```python
 compiler = TensorCompiler(loss_scale=65536.0)
+compiler = TensorCompiler(dynamic_loss_scale=True, loss_scale_patience=100)
 compiler.compile_and_execute("model.tl")
 ```
 
@@ -481,9 +493,47 @@ for epoch in range(10) {
 
 ### Limitations
 
-* **Static scaling only** — dynamic scaling (overflow detection + automatic adjustment) is deferred.
 * **Single backward pass** — multiple `backward()` statements in one file are not supported.
-* **FP16 master weights** — Adam uses FP16 state; FP32 master weights deferred to a future release.
+* **FP16 master weights** — ✅ now supported (see below).
+
+---
+
+## FP16 Master Weights
+
+TensorLang supports **FP32 master weights** for FP16 parameters. When an FP16 tensor has `with grad`, the compiler automatically allocates an FP32 master weight buffer. The optimizer (Adam/SGD) computes updates in FP32 (m, v buffers in FP32) and casts the result back to FP16 for the forward pass.
+
+### How It Works
+
+1. When an FP16 tensor is declared with `with grad`, an FP32 master weight buffer (`{name}_master`) is allocated
+2. Master is initialized from the FP16 param (cast FP16 → FP32)
+3. During `opt.step()`, the optimizer updates the master weight (FP32) with FP32 m/v buffers
+4. After update, master is cast to FP16 and written to the param buffer
+5. The forward pass uses the FP16 param as before
+
+### Usage
+
+No configuration needed — master weights are automatic for FP16 params with grad:
+
+```text
+let w: Tensor[f16, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
+let opt = adam([w], lr=0.01)
+
+for epoch in range(100) {
+    let y = matmul(x, w)
+    let loss = mse_loss(y, y_true)
+    backward(loss)
+    opt.step()  // updates master (FP32), casts to w (FP16)
+}
+```
+
+FP32 params continue to use the original (non-master) code path. No extra memory or overhead for FP32 training.
+
+### Benefits
+
+* **Better precision** — optimizer state (m, v) computed in FP32 instead of FP16
+* **No underflow** — weight updates in FP32 prevent FP16 underflow in small gradients
+* **Transparent** — no API changes; automatic for FP16 params with grad
+* **Compatible with loss scaling** — works with both static and dynamic loss scaling
 
 ---
 
@@ -541,6 +591,7 @@ Both compile to the same CUDA kernels. Inline expressions are flattened into syn
 * **Shape-stability guard** — rebinds with mismatched shapes are skipped with a diagnostic
 * **Kernel symbols** generated inside loop bodies are scoped with a `loopN_` prefix, so the same tensor name can be reused across loop iterations, multiple loops, and top-level code without CUDA symbol collisions
 * **Loss scaling** — works inside loops via `# loss_scale` pragma
+* **FP16 master weights** — works inside loops; master buffer persists across iterations
 
 ### Training Loop Constraints
 
@@ -566,7 +617,7 @@ Loop bodies currently support:
 * `let` bindings and rebinds
 * `backward()`
 
-They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.2.
+They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.3.
 
 ### Rebinding
 
@@ -607,6 +658,7 @@ let opt = sgd([w], lr=0.01)
 * **Multi-parameter** — a single optimizer can update several parameters at once
 * **Reuses pointer-swap rebinding** — parameter updates swap GPU buffer pointers (no copy)
 * **Gradient zeroing / accumulation semantics** supported
+* **FP32 master weights** — for FP16 params, optimizer computes in FP32 with FP32 m/v buffers, casts to FP16 for forward pass
 
 ### Optimizer Names
 
@@ -717,7 +769,7 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 1. **Lexing & Parsing** — Lark grammar (`tensorlang.lark`)
 2. **AST Construction** — flatten inline expressions; inline user-defined functions; build nested loop bodies
 3. **Type Checking** — validate tensor shapes, broadcasting rules, gradient tensor pre-registration, dtype propagation and promotion (N-D aware)
-4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting and N-D); dtype-aware kernel generation (f16/f32); stride-based N-D indexing; loss scaling (pragma-parsed, scale passed to backward, unscale before optimizer)
+4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting and N-D); dtype-aware kernel generation (f16/f32); stride-based N-D indexing; loss scaling (pragma-parsed, scale passed to backward, unscale before optimizer); FP16 master weights (master buffer allocation, init, mixed-type optimizer kernels)
 5. **Compilation** — `nvcc` to shared library
 6. **Execution** — PyCUDA kernel launching, memory management, loop iteration with pointer-swap rebinding, nested loop recursion, `save()` per iteration
 
@@ -727,10 +779,10 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 * `tensorlang/type_checker.py` — shape and broadcasting checks (N-D aware)
 * `tensorlang/kernel_generator.py` — CUDA kernel generation
 * `tensorlang/codegen.py` — code generation orchestration
-* `tensorlang/compiler.py` — orchestration, execution, caching, scoped kernel names, loss scale resolution
+* `tensorlang/compiler.py` — orchestration, execution, caching, scoped kernel names, loss scale resolution, master weight allocation
 * `tensorlang/execution.py` — runtime execution, loops, rebinding
 * `tensorlang/interop.py` — NumPy zero-copy interop (`InteropMixin`)
-* `tensorlang/autograd.py` — NumPy reference autograd implementation (supports `scale` param)
+* `tensorlang/autograd.py` — NumPy reference autograd implementation (supports `scale` param, overflow detection)
 * `tensorlang/fusion.py` — elementwise kernel fusion (broadcasting-aware, N-D aware)
 * `tensorlang/generators/` — per-category CUDA kernel generators (base, comparisons, elementwise, nn, optimizers, reductions, shapes, unary) — all dtype-aware and N-D aware
 * `tensorlang/test_runner.py` — test discovery and execution
@@ -812,13 +864,14 @@ The suite covers:
 * Linear layers, MLP, neural nets
 * Normalisations (layer/batch/instance, N-D)
 * Losses (mse, cross-entropy, N-D)
-* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater)
+* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
 * Functions, pipelines, portfolio-style examples
 * Load/save
 * Mixed precision (f16 basic, matmul, autograd, training)
 * N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
-* Loss scaling (basic, FP16 upcast, auto-detect, training loop)
+* Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
+* FP16 master weights (Adam optimizer)
 
 Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
 
@@ -919,20 +972,19 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.2 (remaining)
+### v0.5.3 (next)
 
-* **FP16 master weights in optimizer** (Adam with FP32 master weights).
 * **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
+* **Control flow:** implement `if`/`elif`/`else` AST construction and execution.
 * **Autograd wiring for batch_norm and instance_norm.**
-* **Batched matmul gradients** (N-D matmul backward).
-* **Dynamic loss scaling** — overflow detection and automatic scale adjustment.
+* **Single backward pass limitation:** support multiple `backward()` statements in one file.
 
 ### Short Term
 
 * Improve shape-mismatch error messages
 * Implement or remove `if`, `any()`, and `all()` (targeted post-v0.5)
 * `batch_norm` gamma/beta affine parameters
-* Single backward pass limitation (support multiple `backward()` statements)
+* Dynamic loss scaling tuning (growth interval, overflow threshold)
 
 ### Medium Term
 

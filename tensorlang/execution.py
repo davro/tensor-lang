@@ -12,7 +12,7 @@ from ctypes import c_float, c_int, c_void_p
 from pathlib import Path
 
 from tensorlang.tensor_lang import TensorLang
-from tensorlang.constants import dtype_numpy
+from tensorlang.constants import dtype_numpy, OPTIMIZER_NAMES
 
 
 class ExecutionMixin:
@@ -102,45 +102,76 @@ class ExecutionMixin:
             param_name = kernel_info[2]
             grad_name = kernel_info[3]
             size = int(kernel_info[4])
+            master_name = kernel_info[5]  # None or string
 
             param_ptr = int(self._ensure_gpu_alloc(param_name, env, tensors, gpu_allocs, cuda))
             grad_ptr = int(self._ensure_gpu_alloc(grad_name, env, tensors, gpu_allocs, cuda))
 
-            if op_type == "sgd_update":
-                lr_value = self._eval_scalar(kernel_info[5], env, tensors, 0.0)
-                getattr(lib, f"launch_sgd_update_{kernel_func_name}")(
-                    c_void_p(param_ptr),
-                    c_void_p(grad_ptr),
-                    c_float(lr_value),
-                    c_int(size),
-                )
+            if master_name is not None:
+                master_ptr = int(self._ensure_gpu_alloc(master_name, env, tensors, gpu_allocs, cuda))
             else:
-                lr_value = self._eval_scalar(kernel_info[5], env, tensors, 0.01)
-                beta1 = self._eval_scalar(kernel_info[6], env, tensors, 0.9)
-                beta2 = self._eval_scalar(kernel_info[7], env, tensors, 0.999)
-                eps = self._eval_scalar(kernel_info[8], env, tensors, 1e-8)
+                master_ptr = 0
 
+            if op_type == "sgd_update":
+                lr_value = self._eval_scalar(kernel_info[6], env, tensors, 0.0)
+                if master_name is not None:
+                    getattr(lib, f"launch_sgd_update_{kernel_func_name}")(
+                        c_void_p(param_ptr),
+                        c_void_p(grad_ptr),
+                        c_void_p(master_ptr),
+                        c_float(lr_value),
+                        c_int(size),
+                    )
+                else:
+                    getattr(lib, f"launch_sgd_update_{kernel_func_name}")(
+                        c_void_p(param_ptr),
+                        c_void_p(grad_ptr),
+                        c_float(lr_value),
+                        c_int(size),
+                    )
+            else:
+                lr_value = self._eval_scalar(kernel_info[6], env, tensors, 0.01)
+                beta1 = self._eval_scalar(kernel_info[7], env, tensors, 0.9)
+                beta2 = self._eval_scalar(kernel_info[8], env, tensors, 0.999)
+                eps = self._eval_scalar(kernel_info[9], env, tensors, 1e-8)
+
+                state_dtype = "f32" if master_name is not None else self._tl_dtype(env, param_name)
                 state = self.optimizer_state.setdefault(param_name, {
                     "m": self._allocate_zeros(env[param_name]["shape"], cuda,
-                                             dtype_name=self._tl_dtype(env, param_name)),
+                                             dtype_name=state_dtype),
                     "v": self._allocate_zeros(env[param_name]["shape"], cuda,
-                                             dtype_name=self._tl_dtype(env, param_name)),
+                                             dtype_name=state_dtype),
                     "t": 0,
                 })
                 state["t"] += 1
 
-                getattr(lib, f"launch_adam_update_{kernel_func_name}")(
-                    c_void_p(param_ptr),
-                    c_void_p(grad_ptr),
-                    c_void_p(int(state["m"])),
-                    c_void_p(int(state["v"])),
-                    c_float(lr_value),
-                    c_float(beta1),
-                    c_float(beta2),
-                    c_float(eps),
-                    c_int(state["t"]),
-                    c_int(size),
-                )
+                if master_name is not None:
+                    getattr(lib, f"launch_adam_update_{kernel_func_name}")(
+                        c_void_p(param_ptr),
+                        c_void_p(grad_ptr),
+                        c_void_p(master_ptr),
+                        c_void_p(int(state["m"])),
+                        c_void_p(int(state["v"])),
+                        c_float(lr_value),
+                        c_float(beta1),
+                        c_float(beta2),
+                        c_float(eps),
+                        c_int(state["t"]),
+                        c_int(size),
+                    )
+                else:
+                    getattr(lib, f"launch_adam_update_{kernel_func_name}")(
+                        c_void_p(param_ptr),
+                        c_void_p(grad_ptr),
+                        c_void_p(int(state["m"])),
+                        c_void_p(int(state["v"])),
+                        c_float(lr_value),
+                        c_float(beta1),
+                        c_float(beta2),
+                        c_float(eps),
+                        c_int(state["t"]),
+                        c_int(size),
+                    )
 
             tensor_name = self._kernel_name_map.get(kernel_func_name, param_name)
             self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
@@ -766,10 +797,25 @@ class ExecutionMixin:
                     requires_grad = tname in self.requires_grad_tensors
                     self.comp_graph.register_tensor(tname, tval, requires_grad)
 
-                scale = self._loss_scale if getattr(self, "_loss_scale", None) is not None else 1.0
+                scale = self._current_scale if getattr(self, "_current_scale", None) is not None else (self._loss_scale if getattr(self, "_loss_scale", None) is not None else 1.0)
 
                 self.comp_graph.gradients = {}
                 self.comp_graph.backward(loss_name, scale=scale)
+
+                # Overflow detection
+                overflow = self.comp_graph.overflow_detected
+                if overflow:
+                    old_scale = self._current_scale
+                    self._current_scale = max(self._current_scale / 2.0, 1.0)
+                    self._scale_growth_counter = 0
+                    self._skip_optimizer = True
+                    if self.debug_mode:
+                        self.tensorlang.print(
+                            message=f"[COMPILER] for loop iter {i + 1}: overflow detected — "
+                                    f"scale {old_scale} -> {self._current_scale}, skipping optimizer step"
+                        )
+                else:
+                    self._skip_optimizer = False
 
                 if self.debug_mode:
                     loss_val = tensors.get(loss_name)
@@ -780,33 +826,47 @@ class ExecutionMixin:
                                     f"(scale={scale})"
                         )
 
-                for grad_name in self.comp_graph.requires_grad:
-                    if grad_name in self.comp_graph.gradients:
-                        grad_tensor = self.comp_graph.gradients[grad_name]
-                        # Unscale gradients before optimizer step
-                        if scale != 1.0 and scale != 0.0:
-                            grad_tensor = grad_tensor / scale
-                        self.comp_graph.gradients[grad_name] = grad_tensor
-                        grad_tensor_name = f"{grad_name}_grad"
-                        tensors[grad_tensor_name] = grad_tensor
+                if not overflow:
+                    for grad_name in self.comp_graph.requires_grad:
+                        if grad_name in self.comp_graph.gradients:
+                            grad_tensor = self.comp_graph.gradients[grad_name]
+                            # Unscale gradients before optimizer step
+                            if scale != 1.0 and scale != 0.0:
+                                grad_tensor = grad_tensor / scale
+                            self.comp_graph.gradients[grad_name] = grad_tensor
+                            grad_tensor_name = f"{grad_name}_grad"
+                            tensors[grad_tensor_name] = grad_tensor
 
-                        if grad_tensor_name in gpu_allocs:
-                            cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
-                        else:
-                            gpu_allocs[grad_tensor_name] = cuda.mem_alloc(grad_tensor.nbytes)
-                            cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                            if grad_tensor_name in gpu_allocs:
+                                cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                            else:
+                                gpu_allocs[grad_tensor_name] = cuda.mem_alloc(grad_tensor.nbytes)
+                                cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
 
-                        # Use actual gradient dtype, not forward tensor dtype
-                        if grad_tensor.dtype == np.float16:
-                            grad_dtype_name = "f16"
-                        elif grad_tensor.dtype == np.float64:
-                            grad_dtype_name = "f64"
-                        else:
-                            grad_dtype_name = "f32"
-                        env[grad_tensor_name] = {
-                            "dtype": grad_dtype_name,
-                            "shape": tuple(int(d) for d in grad_tensor.shape),
-                        }
+                            # Use actual gradient dtype, not forward tensor dtype
+                            if grad_tensor.dtype == np.float16:
+                                grad_dtype_name = "f16"
+                            elif grad_tensor.dtype == np.float64:
+                                grad_dtype_name = "f64"
+                            else:
+                                grad_dtype_name = "f32"
+                            env[grad_tensor_name] = {
+                                "dtype": grad_dtype_name,
+                                "shape": tuple(int(d) for d in grad_tensor.shape),
+                            }
+
+                    # Dynamic scale growth
+                    if getattr(self, "dynamic_loss_scale", False) and not overflow:
+                        self._scale_growth_counter = getattr(self, "_scale_growth_counter", 0) + 1
+                        patience = getattr(self, "loss_scale_patience", 2000)
+                        if self._scale_growth_counter >= patience:
+                            old = self._current_scale
+                            self._current_scale *= 2.0
+                            self._scale_growth_counter = 0
+                            if self.debug_mode:
+                                self.tensorlang.print(
+                                    message=f"[COMPILER] for loop iter {i + 1}: scale grown {old} -> {self._current_scale}"
+                                )
 
                 if bw_list_pos is not None:
                     for pos, (local_idx, node) in enumerate(for_node["_flat_items"]):
@@ -828,6 +888,13 @@ class ExecutionMixin:
 
                         if local_idx is None:
                             continue
+                        _is_opt = (node.get("type", "") in OPTIMIZER_NAMES or
+                                   (node.get("type", "") == "call" and node.get("name", "") in OPTIMIZER_NAMES))
+                        if _is_opt and getattr(self, "_skip_optimizer", False):
+                            if self.debug_mode:
+                                self.tensorlang.print(message="[COMPILER] for loop: skipping optimizer step (overflow)")
+                            continue
+
                         self._execute_single_kernel(
                             loop_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
                         )

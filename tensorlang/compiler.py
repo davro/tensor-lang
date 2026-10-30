@@ -25,7 +25,6 @@ import pycuda.driver as cuda
 from tensorlang.ast_builder import build_ast
 from tensorlang.autograd import AutogradContext, ComputationGraph
 from tensorlang.codegen import CodegenMixin
-# from tensorlang.constants import OPTIMIZER_NAMES, dtype_numpy, promote_dtype
 from tensorlang.constants import (OPTIMIZER_NAMES, dtype_numpy, promote_dtype,
                                  DEFAULT_LOSS_SCALE_FP32, DEFAULT_LOSS_SCALE_FP16)
 
@@ -37,11 +36,8 @@ from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.type_checker import _is_scalar_shape, type_checker
 
-OPTIMIZER_NAMES = {"sgd", "adam", "sgd_update", "adam_update"}
-
-
 class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
-    def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False, loss_scale=1.0):
+    def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False, loss_scale=1.0, dynamic_loss_scale=False, loss_scale_patience=2000):
 
         self.debug_mode = debug_mode
         self.debug_info = debug_info
@@ -59,6 +55,12 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
         self.loss_scale = loss_scale
         self._loss_scale = None  # resolved during compile_and_execute
         self._loss_scale_auto = False
+        self.dynamic_loss_scale = dynamic_loss_scale
+        self.loss_scale_patience = loss_scale_patience
+        self._current_scale = None
+        self._scale_growth_counter = 0
+        self._overflow_detected = False
+        self._skip_optimizer = False
 
 
 
@@ -122,20 +124,34 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                 if self.debug_mode:
                     self.tensorlang.print(type="[COMPILER]", message=f"Loaded TensorLang file: {file_path}")
 
-            # Parse loss scale pragma: "# loss_scale: 65536" or "# loss_scale: auto"
+            # Parse loss scale pragma: "# loss_scale: 65536", "# loss_scale: auto",
+            # or "# loss_scale: dynamic [init_scale] [patience]"
             import re
-            scale_match = re.search(r'#\s*loss_scale:\s*(\S+)', code)
+            scale_match = re.search(r'#\s*loss_scale:\s*(.+)', code)
             if scale_match:
-                scale_str = scale_match.group(1).lower()
-                if scale_str == "auto":
+                scale_parts = scale_match.group(1).strip().split()
+                scale_keyword = scale_parts[0].lower()
+                if scale_keyword == "auto":
                     self._loss_scale_auto = True
+                elif scale_keyword == "dynamic":
+                    self.dynamic_loss_scale = True
+                    if len(scale_parts) > 1:
+                        try:
+                            self.loss_scale = float(scale_parts[1])
+                        except ValueError:
+                            pass
+                    if len(scale_parts) > 2:
+                        try:
+                            self.loss_scale_patience = int(scale_parts[2])
+                        except ValueError:
+                            pass
                 else:
                     try:
-                        self.loss_scale = float(scale_str)
+                        self.loss_scale = float(scale_parts[0])
                     except ValueError:
-                        self.tensorlang.print(message=f"[COMPILER] Warning: invalid loss_scale pragma '{scale_str}', using default")
+                        self.tensorlang.print(message=f"[COMPILER] Warning: invalid loss_scale pragma '{scale_parts[0]}', using default")
             # Strip pragma lines from code before parsing
-            code = re.sub(r'#\s*loss_scale:\s*\S+\n?', '', code)
+            code = re.sub(r'#\s*loss_scale:\s*.+\n?', '', code)
 
 
         except FileNotFoundError:
@@ -191,13 +207,17 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                     isinstance(v, dict) and v.get("dtype") == "f16"
                     for v in env.values()
                 )
-                self._loss_scale = (DEFAULT_LOSS_SCALE_FP16 if has_fp16
-                                    else DEFAULT_LOSS_SCALE_FP32)
+                resolved = (DEFAULT_LOSS_SCALE_FP16 if has_fp16
+                            else DEFAULT_LOSS_SCALE_FP32)
             else:
-                self._loss_scale = float(self.loss_scale)
+                resolved = float(self.loss_scale)
+
+            self._loss_scale = resolved
+            self._current_scale = resolved
             if self.debug_mode:
+                mode = "dynamic" if self.dynamic_loss_scale else "static"
                 self.tensorlang.print(
-                    message=f"[COMPILER] Loss scale resolved to {self._loss_scale}"
+                    message=f"[COMPILER] Loss scale resolved to {self._current_scale} ({mode})"
                 )
 
 
@@ -224,6 +244,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         else:
                             grad_dtype = source_dtype
                         env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
+                        # Register FP32 master weight for FP16 params
+                        if source_dtype == "f16":
+                            master_name = f"{node['name']}_master"
+                            env[master_name] = {"dtype": "f32", "shape": source_shape}
 
                         if self.debug_mode:
                             self.tensorlang.print(
@@ -242,6 +266,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     else:
                                         grad_dtype = source_dtype
                                     env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
+                                    if source_dtype == "f16":
+                                        master_name = f"{body_node['name']}_master"
+                                        env[master_name] = {"dtype": "f32", "shape": source_shape}
 
                 generator = KernelGenerator(self.debug_mode)
                 kernels = []
@@ -824,6 +851,30 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 zeros = np.zeros(shape if shape else (1,), dtype=np_dtype)
                                 cuda.memcpy_htod(gpu_allocs[name], zeros)
 
+                        # Pre-allocate master weight tensors (FP32 copies of FP16 params)
+                        for name, info in env.items():
+                            if name.endswith("_master"):
+                                shape = tuple(int(dim) for dim in info["shape"])
+                                np_dtype = dtype_numpy("f32")
+                                size_bytes = int(np.prod(shape) * np_dtype.itemsize) if shape else np_dtype.itemsize
+                                if size_bytes == 0:
+                                    size_bytes = np_dtype.itemsize
+                                gpu_allocs[name] = cuda.mem_alloc(size_bytes)
+                                zeros = np.zeros(shape if shape else (1,), dtype=np_dtype)
+                                cuda.memcpy_htod(gpu_allocs[name], zeros)
+
+                        # Initialize master weights from FP16 params (before forward pass)
+                        for name, info in env.items():
+                            if name.endswith("_master"):
+                                param_name = name[:-7]
+                                if param_name in tensors:
+                                    param_arr = np.ascontiguousarray(tensors[param_name], dtype=dtype_numpy(env[param_name].get("dtype", "f16")))
+                                    master_arr = param_arr.astype(np.float32)
+                                    cuda.memcpy_htod(gpu_allocs[name], master_arr)
+                                    tensors[name] = master_arr
+                                    if self.debug_mode:
+                                        self.tensorlang.print(message=f"[COMPILER] [Autograd] Initialized master weight '{name}' from '{param_name}'")
+
                         ast_to_kernel_map = {}
                         kernel_idx = 0
                         for ast_idx, node in enumerate(ast):
@@ -904,10 +955,12 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             if self.debug_mode and requires_grad:
                                 self.tensorlang.print(message=f"[COMPILER] [Autograd] CUDA Execute: registered '{name}' with gradient tracking")
 
+
                         for node in ast:
                             if node.get("type") == "backward":
                                 loss_name = node["loss_tensor"]
-                                scale = self._loss_scale if self._loss_scale is not None else 1.0
+                                scale = self._current_scale if getattr(self, "_current_scale", None) is not None else 1.0
+                                self._skip_optimizer = False
                                 print(f"\n{'=' * 80}")
                                 print(f"BACKWARD PASS from '{loss_name}' (loss_scale={scale})")
                                 print("=" * 80)
@@ -922,38 +975,63 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                             grad_cache_path = cache_file_dir / f"{grad_name}.grad.npy"
                                             np.save(grad_cache_path, grad_tensor)
                                     print("=" * 80)
-                                    for grad_name in self.comp_graph.requires_grad:
-                                        if grad_name in self.comp_graph.gradients:
-                                            grad_tensor = self.comp_graph.gradients[grad_name]
-                                            # Unscale gradients before optimizer step
-                                            if scale != 1.0 and scale != 0.0:
-                                                grad_tensor = grad_tensor / scale
-                                            self.comp_graph.gradients[grad_name] = grad_tensor
-                                            grad_tensor_name = f"{grad_name}_grad"
-                                            tensors[grad_tensor_name] = grad_tensor
-                                            if grad_tensor_name in gpu_allocs:
-                                                cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                                    # Overflow detection
+                                    self._overflow_detected = self.comp_graph.overflow_detected
+
+                                    if self._overflow_detected:
+                                        # Reduce scale, skip optimizer step
+                                        old_scale = self._current_scale
+                                        self._current_scale = max(self._current_scale / 2.0, 1.0)
+                                        self._scale_growth_counter = 0
+                                        self._skip_optimizer = True
+                                        print(f"[COMPILER] Overflow detected — scale {old_scale} -> {self._current_scale}, skipping optimizer step")
+                                    else:
+                                        self._skip_optimizer = False
+                                        for grad_name in self.comp_graph.requires_grad:
+                                            if grad_name in self.comp_graph.gradients:
+                                                grad_tensor = self.comp_graph.gradients[grad_name]
+                                                # Unscale
+                                                if scale != 1.0 and scale != 0.0:
+                                                    grad_tensor = grad_tensor / scale
+                                                self.comp_graph.gradients[grad_name] = grad_tensor
+                                                grad_tensor_name = f"{grad_name}_grad"
+                                                tensors[grad_tensor_name] = grad_tensor
+                                                if grad_tensor_name in gpu_allocs:
+                                                    cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                                                    if self.debug_mode:
+                                                        self.tensorlang.print(message=f"[COMPILER] [Autograd] Copied gradient {grad_tensor_name} to GPU")
+                                                else:
+                                                    if self.debug_mode:
+                                                        self.tensorlang.print(message=f"[COMPILER] [Autograd] Warning: {grad_tensor_name} not in GPU allocations")
+                                                # Use actual gradient dtype, not forward tensor dtype
+                                                if grad_tensor.dtype == np.float16:
+                                                    grad_dtype_name = "f16"
+                                                elif grad_tensor.dtype == np.float64:
+                                                    grad_dtype_name = "f64"
+                                                else:
+                                                    grad_dtype_name = "f32"
+                                                env[grad_tensor_name] = {
+                                                    "dtype": grad_dtype_name,
+                                                    "shape": tuple(int(d) for d in grad_tensor.shape),
+                                                }
                                                 if self.debug_mode:
-                                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Copied gradient {grad_tensor_name} to GPU")
-                                            else:
+                                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Made gradient accessible: {grad_tensor_name}")
+                                                if self.cache_layers:
+                                                    grad_var_cache_path = cache_file_dir / f"{grad_tensor_name}.npy"
+                                                    np.save(grad_var_cache_path, grad_tensor)
+
+                                        # Dynamic scale growth
+                                        if self.dynamic_loss_scale and not self._overflow_detected:
+                                            self._scale_growth_counter += 1
+                                            if self._scale_growth_counter >= self.loss_scale_patience:
+                                                old_scale = self._current_scale
+                                                self._current_scale *= 2.0
+                                                self._scale_growth_counter = 0
                                                 if self.debug_mode:
-                                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Warning: {grad_tensor_name} not in GPU allocations")
-                                            # Use actual gradient dtype, not forward tensor dtype
-                                            if grad_tensor.dtype == np.float16:
-                                                grad_dtype_name = "f16"
-                                            elif grad_tensor.dtype == np.float64:
-                                                grad_dtype_name = "f64"
-                                            else:
-                                                grad_dtype_name = "f32"
-                                            env[grad_tensor_name] = {
-                                                "dtype": grad_dtype_name,
-                                                "shape": tuple(int(d) for d in grad_tensor.shape),
-                                            }
-                                            if self.debug_mode:
-                                                self.tensorlang.print(message=f"[COMPILER] [Autograd] Made gradient accessible: {grad_tensor_name}")
-                                            if self.cache_layers:
-                                                grad_var_cache_path = cache_file_dir / f"{grad_tensor_name}.npy"
-                                                np.save(grad_var_cache_path, grad_tensor)
+                                                    self.tensorlang.print(
+                                                        message=f"[COMPILER] Scale grown {old_scale} -> {self._current_scale} after {self.loss_scale_patience} successful steps"
+                                                    )
+
                                 except (RuntimeError, ValueError, KeyError, OSError, TypeError) as e:
                                     self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
                                     if self.debug_mode:
@@ -962,6 +1040,17 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                         if backward_index is not None:
                             for ast_idx in range(backward_index + 1, len(ast)):
+                                # Skip optimizer steps on overflow
+                                node = ast[ast_idx]
+                                is_optimizer = (node.get("type") in OPTIMIZER_NAMES or
+                                                (node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES))
+                                if is_optimizer and getattr(self, "_skip_optimizer", False):
+                                    if self.debug_mode:
+                                        self.tensorlang.print(
+                                            message=f"[COMPILER] Skipping optimizer step (overflow)"
+                                        )
+                                    continue
+
                                 if ast_idx in ast_to_kernel_map:
                                     k_idx = ast_to_kernel_map[ast_idx]
                                     if k_idx < len(kernels):

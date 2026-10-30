@@ -36,6 +36,7 @@ class ComputationGraph:
         self.requires_grad: set[str] = set()
         self.tensorlang = TensorLang()
         self.debug_mode = debug_mode
+        self.overflow_detected = False
 
     def register_tensor(self, name: str, value: np.ndarray, requires_grad: bool = False):
         self.tensors[name] = value
@@ -122,9 +123,23 @@ class ComputationGraph:
 
             self._backward_node(node)
 
+        # Check for overflow (inf/nan in any gradient)
+        self.overflow_detected = False
+        for name in self.gradients:
+            grad = self.gradients[name]
+            if not np.all(np.isfinite(grad)):
+                self.overflow_detected = True
+                if self.debug_mode:
+                    self.tensorlang.print(
+                        message=f"[AUTOGRAD] Overflow detected in gradient '{name}'"
+                    )
+                break
+
         if self.debug_mode:
             self.tensorlang.print(message="[AUTOGRAD] Backward pass complete")
             self.tensorlang.print(message=f"[AUTOGRAD] Gradients computed for {len(self.gradients)} tensors")
+            if self.overflow_detected:
+                self.tensorlang.print(message="[AUTOGRAD] *** OVERFLOW DETECTED ***")
             for name in sorted(self.requires_grad):
                 if name in self.gradients:
                     grad = self.gradients[name]

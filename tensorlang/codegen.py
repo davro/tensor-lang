@@ -75,16 +75,24 @@ class CodegenMixin:
 
         size = int(np.prod([int(d) for d in env[param_name]["shape"]]))
         opt_dtype = env[param_name].get("dtype", "f32")
+        grad_dtype = env[grad_name].get("dtype", "f32")
+        use_master = (opt_dtype == "f16")
 
         if opt_name in ("sgd", "sgd_update"):
             kernel_str, kernel_info = generator.sgd_update(
-                "sgd_update", kernel_name, param_name, grad_name, size, dtype=opt_dtype
+                "sgd_update", kernel_name, param_name, grad_name, size,
+                dtype=opt_dtype, grad_dtype=grad_dtype, master=use_master
             )
+            # kernel_info: (op, name, param, grad, size, master_name_or_None)
+            # Append lr_arg
             kernel_info = kernel_info + (lr_arg,)
         else:
             kernel_str, kernel_info = generator.adam_update(
-                "adam_update", kernel_name, param_name, grad_name, size, dtype=opt_dtype
+                "adam_update", kernel_name, param_name, grad_name, size,
+                dtype=opt_dtype, grad_dtype=grad_dtype, master=use_master
             )
+            # kernel_info: (op, name, param, grad, size, master_name_or_None)
+            # Append lr, beta1, beta2, eps
             kernel_info = kernel_info + (lr_arg, beta1_arg, beta2_arg, eps_arg)
 
         self._kernel_name_map[kernel_name] = param_name
