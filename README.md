@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.2 (loss scaling + dynamic scaling + FP16 master weights + mixed precision + N-D + autograd coverage complete). Core suite: 169/169 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.3 in progress (for-loop body parity complete; control-flow syntax/AST staged). Core suite: 170/170 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.3 — for-loop body parity and control flow.
+> **Current focus:** v0.5.3 — control-flow execution and remaining parity items.
 
 ---
 
@@ -95,15 +95,16 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
 * **Autograd coverage expansion** — gradients now wired for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons (zero gradient for non-differentiable ops)
 * **Loss scaling** — static and dynamic loss scaling for FP16 training stability; configurable via `# loss_scale: <value|auto|dynamic>` pragma; gradients upcast to FP32 when scale overflows FP16 max; overflow detection with automatic scale reduction (halve on overflow, double after N successful steps); unscale before optimizer step
-* **FP16 master weights** — Adam/SGD with FP32 master weights for FP16 params; optimizer computes in FP32 (m, v buffers in FP32), casts to FP16 for forward pass; automatic for FP16 params with grad
+* **FP16 master weights** — Adam/SGD with FP32 master weights for FP16 params; optimizer computes in FP32 with FP32 m/v buffers, casts to FP16 for forward pass; automatic for FP16 params with grad
 * **Batched matmul gradients** — N-D (batched) matmul backward via NumPy batched matmul + `_unbroadcast` for broadcast dims
+* **For-loop body parity** — normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions now execute in loop bodies
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` is present in the grammar but is **not currently built into the AST or executed**. Targeted post-v0.5.
+* **Control flow:** `if` / `elif` / `else` is present in the grammar and AST construction, but is **not currently executed**. Targeted for v0.5.3.
 * **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
-* **For-loop bodies support a subset of operations** (see [Training Loops](#training-loops)). Operation parity with top-level is targeted for v0.5.3.
+* **For-loop bodies:** broad operation parity with top-level is now implemented; remaining gaps are user-defined functions and file I/O other than `save()`.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
 * **`instance_norm`** N-D uses simplified spatial-dim flattening.
@@ -596,28 +597,29 @@ Both compile to the same CUDA kernels. Inline expressions are flattened into syn
 ### Training Loop Constraints
 
 * Loop counts must be integer literals: `range(5)`, not `range(n)`.
-* Loop bodies support a subset of operations (see below).
 * Rebinding requires a name on the right-hand side: `w = w_updated`, not `w = minus(w, step)`.
 
 ### Operations Supported in Loop Bodies
 
-Loop bodies currently support:
+Loop bodies now have broad operation parity with top-level, including:
 
 * `add`, `minus`, `mult`, `div`
 * `matmul`
 * `relu`, `sigmoid`, `tanh`, `gelu`, `swish`
 * `softmax`
-* `mse_loss`
-* `cross_entropy`
+* `mse_loss`, `cross_entropy`
 * `linear`
-* `sum`, `mean`
+* `sum`, `mean`, `min`, `max`, `argmin`, `argmax`
+* `layer_norm`, `batch_norm`, `instance_norm`
+* `greater`, `less`, `equal`
+* slicing, `reshape`, `transpose`, `concat`
 * `fill`
 * `save()`
-* Nested `for` loops
+* nested `for` loops
 * `let` bindings and rebinds
 * `backward()`
 
-They do not currently support normalisations, comparisons, slicing, reshape, transpose, concat, reductions other than `sum`/`mean`, file I/O other than `save()`, `if` statements, or user-defined functions. Parity with top-level operation coverage is targeted for v0.5.3.
+Remaining loop-body gaps are user-defined functions and file I/O other than `save()`.
 
 ### Rebinding
 
@@ -872,6 +874,7 @@ The suite covers:
 * N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
 * Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
 * FP16 master weights (Adam optimizer)
+* For-loop body parity (`for_loop_body_parity.tl`)
 
 Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
 
@@ -893,7 +896,7 @@ python3 verify.py path/to/file.tl
 python3 tensorlang.py --list-gpus
 python3 tensorlang.py --test
 python3 tensorlang.py --test --gpu 1
-python3 tensorlang.py --test --no-gpu-pinning
+python3 tensorlang.py --no-gpu-pinning
 ```
 
 This is process-level pinning only. A single TensorLang program does not span multiple GPUs. Round-robin pinning is real but modest on the small/fast correctness suite; heavier concurrent GPU workloads are the better use case.
@@ -972,12 +975,12 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.3 (next)
+### v0.5.3 (in progress)
 
-* **For-loop body parity:** bring normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions into loop bodies.
-* **Control flow:** implement `if`/`elif`/`else` AST construction and execution.
-* **Autograd wiring for batch_norm and instance_norm.**
+* **Control flow execution:** implement execution for the staged `if`/`elif`/`else` AST.
+* **Autograd wiring for `batch_norm` and `instance_norm`.**
 * **Single backward pass limitation:** support multiple `backward()` statements in one file.
+* **Remaining loop-body gaps:** user-defined functions and file I/O other than `save()`.
 
 ### Short Term
 

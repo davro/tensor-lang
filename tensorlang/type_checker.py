@@ -106,6 +106,10 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
     # PASS 1: Type check all statements
     # ================================================================
     for node in ast:
+        if node.get("type") == "if":
+            tensorlang.print(message="[TYPE CHECKER] error: Control flow (if/elif/else) is not implemented yet")
+            return False, env
+
         if node.get("type") == "rebind":
             continue
 

@@ -359,7 +359,7 @@ class ExecutionMixin:
                 c_int(rows), c_int(cols),
             )
 
-        elif op_type in ("relu", "sigmoid", "tanh"):
+        elif op_type in ("relu", "sigmoid", "tanh", "gelu", "swish"):
             op_name = op_type.split("_")[0]
             size = dims[0]
             getattr(lib, f"launch_{op_name}_{kernel_func_name}")(
@@ -601,6 +601,15 @@ class ExecutionMixin:
                 c_void_p(int(gpu_allocs[arg2])),
                 c_void_p(int(gpu_allocs[tensor_name])),
                 c_int(rows), c_int(cols1), c_int(cols2),
+            )
+
+        elif op_type == "concat_1d":
+            size1, size2 = dims
+            getattr(lib, f"launch_concat_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(size1), c_int(size2),
             )
 
         elif op_type == "batch_norm_2d":

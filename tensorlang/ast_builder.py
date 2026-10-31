@@ -128,6 +128,12 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False, source_code=None) 
                     if save_node:
                         ast.append(save_node)
 
+                # If statement (staged: parsed into AST, execution not implemented)
+                elif stmt.data == 'if_statement':
+                    if_node = build_if_statement(stmt, DEBUG_MODE, DEBUG_INFO)
+                    if if_node:
+                        ast.append(if_node)
+
                 # Let binding
                 elif stmt.data == 'let_binding':
                     let_node = build_let_binding(stmt, DEBUG_MODE, DEBUG_INFO)
@@ -1055,6 +1061,11 @@ def build_for_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict 
                 if node:
                     body_nodes.append(node)
 
+            elif inner.data == 'if_statement':
+                node = build_if_statement(inner, DEBUG_MODE, DEBUG_INFO)
+                if node:
+                    body_nodes.append(node)
+
             elif inner.data == 'expr':
                 expr_node = build_expression(inner, DEBUG_MODE, DEBUG_INFO)
                 if expr_node and expr_node.get('type') in OPTIMIZER_NAMES:
@@ -1138,3 +1149,155 @@ def _set_source_code(code):
 
 def _get_source_code():
     return getattr(_tls, 'source_code', None)
+
+
+# === CONTROL FLOW AST (STAGED) ===
+
+def build_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
+    """Build one statement node for use inside if/elif/else bodies."""
+    if tree is None:
+        return []
+
+    if tree.data == 'let_binding':
+        node = build_let_binding(tree, DEBUG_MODE, DEBUG_INFO)
+        if not node or not node.get('expr'):
+            return []
+        synthetic_nodes = []
+        node['expr'] = flatten_expr_args(node['expr'], synthetic_nodes, DEBUG_MODE)
+        return synthetic_nodes + [node]
+
+    if tree.data == 'rebind_statement':
+        node = build_rebind_statement(tree, DEBUG_MODE, DEBUG_INFO)
+        return [node] if node else []
+
+    if tree.data == 'backward_statement':
+        node = build_backward_statement(tree, DEBUG_MODE, DEBUG_INFO)
+        return [node] if node else []
+
+    if tree.data == 'save_statement':
+        node = build_save_statement(tree, DEBUG_MODE, DEBUG_INFO)
+        return [node] if node else []
+
+    if tree.data == 'for_statement':
+        node = build_for_statement(tree, DEBUG_MODE, DEBUG_INFO)
+        return [node] if node else []
+
+    if tree.data == 'if_statement':
+        node = build_if_statement(tree, DEBUG_MODE, DEBUG_INFO)
+        return [node] if node else []
+
+    if tree.data == 'expr':
+        expr_node = build_expression(tree.children[0] if tree.children else tree, DEBUG_MODE, DEBUG_INFO)
+        if expr_node and expr_node.get('type') in OPTIMIZER_NAMES:
+            return [{'type': expr_node['type'], 'args': expr_node.get('args', []), 'tree': None}]
+        if expr_node and expr_node.get('type') == 'user_function_call' and expr_node.get('func_name') in OPTIMIZER_NAMES:
+            return [{'type': expr_node['func_name'], 'args': expr_node.get('args', []), 'tree': None}]
+        if expr_node:
+            return [expr_node]
+        return []
+
+    return []
+
+
+def build_if_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
+    """Parse: if condition { ... } (elif condition { ... })* (else { ... })?"""
+    if tree.data != 'if_statement':
+        return None
+
+    condition = None
+    then_body = []
+    elifs = []
+    else_body = None
+
+    for child in tree.children:
+        if child.data == 'condition':
+            condition = build_condition(child, DEBUG_MODE, DEBUG_INFO)
+        elif child.data == 'elif_clause':
+            elifs.append(build_elif_clause(child, DEBUG_MODE, DEBUG_INFO))
+        elif child.data == 'else_clause':
+            else_body = build_block_from_clause(child, DEBUG_MODE, DEBUG_INFO)
+        elif child.data == 'statement':
+            inner = child.children[0] if child.children else child
+            then_body.extend(build_statement(inner, DEBUG_MODE, DEBUG_INFO))
+
+    return {
+        'type': 'if',
+        'condition': condition,
+        'then': then_body,
+        'elifs': elifs,
+        'else': else_body,
+    }
+
+
+def build_elif_clause(tree, DEBUG_MODE=False, DEBUG_INFO=False):
+    if tree.data != 'elif_clause':
+        return None
+
+    condition = None
+    body = []
+
+    for child in tree.children:
+        if child.data == 'condition':
+            condition = build_condition(child, DEBUG_MODE, DEBUG_INFO)
+        elif child.data == 'statement':
+            inner = child.children[0] if child.children else child
+            body.extend(build_statement(inner, DEBUG_MODE, DEBUG_INFO))
+
+    return {
+        'type': 'elif',
+        'condition': condition,
+        'body': body,
+    }
+
+
+def build_block_from_clause(tree, DEBUG_MODE=False, DEBUG_INFO=False):
+    body = []
+    for child in tree.children:
+        if child.data == 'statement':
+            inner = child.children[0] if child.children else child
+            body.extend(build_statement(inner, DEBUG_MODE, DEBUG_INFO))
+    return body
+
+
+def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
+    if tree.data == 'condition' and tree.children:
+        tree = tree.children[0]
+
+    if isinstance(tree, Token):
+        if tree.type == 'NAME':
+            return {'type': 'name', 'name': tree.value}
+        if tree.value in ('true', 'false'):
+            return {'type': 'bool', 'value': tree.value == 'true'}
+        return {'type': 'name', 'name': str(tree.value)}
+
+    if tree.data == 'comparison_expr':
+        expr_children = [c for c in tree.children if c.data == 'expr']
+        op_child = None
+        for c in tree.children:
+            if c.data == 'comp_op':
+                op_child = c
+                break
+            if isinstance(c, Token) and c.value in ('>', '<', '>=', '<=', '==', '!='):
+                op_child = c
+                break
+
+        if op_child is None:
+            op = None
+        elif isinstance(op_child, Token):
+            op = op_child.value
+        elif op_child.children:
+            op = op_child.children[0].value
+        else:
+            op = None
+
+        left = build_expression(expr_children[0], DEBUG_MODE, DEBUG_INFO) if len(expr_children) > 0 else None
+        right = build_expression(expr_children[1], DEBUG_MODE, DEBUG_INFO) if len(expr_children) > 1 else None
+
+        return {
+            'type': 'comparison',
+            'op': op,
+            'left': left,
+            'right': right,
+        }
+
+    return build_expression(tree, DEBUG_MODE, DEBUG_INFO)

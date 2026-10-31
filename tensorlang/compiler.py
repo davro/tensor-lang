@@ -235,6 +235,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                 self.gpu_allocs = gpu_allocs
 
                 for node in ast:
+                    if node.get("type") == "if":
+                        raise NotImplementedError("Control flow (if/elif/else) is not implemented yet")
+
                     if node.get("type") == "let" and node.get("requires_grad", False):
                         grad_name = f"{node['name']}_grad"
                         source_shape = env[node["name"]]["shape"]
