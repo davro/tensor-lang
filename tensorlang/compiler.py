@@ -234,44 +234,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                 self.tensors = tensors
                 self.gpu_allocs = gpu_allocs
 
-                for node in ast:
-                    if node.get("type") == "if":
-                        raise NotImplementedError("Control flow (if/elif/else) is not implemented yet")
-
-                    if node.get("type") == "let" and node.get("requires_grad", False):
-                        grad_name = f"{node['name']}_grad"
-                        source_shape = env[node["name"]]["shape"]
-                        source_dtype = env[node["name"]].get("dtype", "f32")
-                        if source_dtype == "f16" and self._loss_scale > 65504.0:
-                            grad_dtype = "f32"
-                        else:
-                            grad_dtype = source_dtype
-                        env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
-                        # Register FP32 master weight for FP16 params
-                        if source_dtype == "f16":
-                            master_name = f"{node['name']}_master"
-                            env[master_name] = {"dtype": "f32", "shape": source_shape}
-
-                        if self.debug_mode:
-                            self.tensorlang.print(
-                                message=f"[COMPILER] Pre-registered gradient shape: "
-                                        f"{grad_name} -> {source_shape}"
-                            )
-                    if node.get("type") == "for":
-                        for body_node in node.get("body", []):
-                            if body_node.get("type") == "let" and body_node.get("requires_grad", False):
-                                grad_name = f"{body_node['name']}_grad"
-                                if body_node["name"] in env:
-                                    source_shape = env[body_node["name"]]["shape"]
-                                    source_dtype = env[body_node["name"]].get("dtype", "f32")
-                                    if source_dtype == "f16" and self._loss_scale > 65504.0:
-                                        grad_dtype = "f32"
-                                    else:
-                                        grad_dtype = source_dtype
-                                    env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
-                                    if source_dtype == "f16":
-                                        master_name = f"{body_node['name']}_master"
-                                        env[master_name] = {"dtype": "f32", "shape": source_shape}
+                _register_requires_grad_nodes(ast, env, self._loss_scale)
 
                 generator = KernelGenerator(self.debug_mode)
                 kernels = []
@@ -291,6 +254,14 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         continue
 
                     if node.get("type") == "rebind":
+                        continue
+
+                    if node.get("type") == "if":
+                        if_kernels, if_cuda, if_flat = self._generate_kernels_for_nodes(
+                            [node], env, generator, scope_prefix=None
+                        )
+                        kernels.extend(if_kernels)
+                        cuda_code += if_cuda
                         continue
 
                     if node.get("type") == "for":
@@ -881,7 +852,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         ast_to_kernel_map = {}
                         kernel_idx = 0
                         for ast_idx, node in enumerate(ast):
-                            if node.get("type") == "for":
+                            if node.get("type") == "if":
+                                kernel_idx += len(node.get("_kernels", []))
+                            elif node.get("type") == "for":
                                 kernel_idx += len([
                                     fi for fi, _ in node.get("_flat_items", [])
                                     if fi is not None
@@ -903,6 +876,21 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     message=f"[COMPILER] CUDA Execute: {len([k for a, k in ast_to_kernel_map.items() if a < backward_index])} kernels before backward"
                                 )
                             for ast_idx in range(backward_index):
+                                node = ast[ast_idx]
+                                if node.get("type") == "if":
+                                    for k in node.get("_condition_kernels", []):
+                                        self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                                    selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
+                                        node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
+                                    )
+                                    if selected_nodes is not None:
+                                        self._execute_if_branch(
+                                            selected_nodes, selected_flat, selected_kernels,
+                                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                                        )
+                                    node["_selected_branch_flat_items"] = selected_flat
+                                    node["_selected_branch_kernels"] = selected_kernels
+                                    continue
                                 if ast_idx in ast_to_kernel_map:
                                     k_idx = ast_to_kernel_map[ast_idx]
                                     if k_idx < len(kernels):
@@ -922,6 +910,20 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     self._resolve_alias_inline(ast[ast_idx], gpu_allocs, tensors)
                         else:
                             for ast_idx, node in enumerate(ast):
+                                if node.get("type") == "if":
+                                    for k in node.get("_condition_kernels", []):
+                                        self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                                    selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
+                                        node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
+                                    )
+                                    if selected_nodes is not None:
+                                        self._execute_if_branch(
+                                            selected_nodes, selected_flat, selected_kernels,
+                                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                                        )
+                                    node["_selected_branch_flat_items"] = selected_flat
+                                    node["_selected_branch_kernels"] = selected_kernels
+                                    continue
                                 if node.get("type") == "for":
                                     self._execute_for_loop(
                                         node, kernels, ast_to_kernel_map,
@@ -1043,8 +1045,16 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                         if backward_index is not None:
                             for ast_idx in range(backward_index + 1, len(ast)):
-                                # Skip optimizer steps on overflow
                                 node = ast[ast_idx]
+                                if node.get("type") == "if":
+                                    selected_flat = node.get("_selected_branch_flat_items")
+                                    selected_kernels = node.get("_selected_branch_kernels")
+                                    if selected_flat is not None:
+                                        self._execute_if_branch_post(
+                                            selected_flat, selected_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                                        )
+                                    continue
+
                                 is_optimizer = (node.get("type") in OPTIMIZER_NAMES or
                                                 (node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES))
                                 if is_optimizer and getattr(self, "_skip_optimizer", False):
@@ -1175,3 +1185,27 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
         else:
             raise ValueError(f"Unsupported file format: {suffix}")
+
+
+def _register_requires_grad_nodes(nodes, env, loss_scale):
+    for node in nodes:
+        if node.get("type") == "let" and node.get("requires_grad", False):
+            grad_name = f"{node['name']}_grad"
+            source_shape = env[node["name"]]["shape"]
+            source_dtype = env[node["name"]].get("dtype", "f32")
+            if source_dtype == "f16" and loss_scale > 65504.0:
+                grad_dtype = "f32"
+            else:
+                grad_dtype = source_dtype
+            env[grad_name] = {"dtype": grad_dtype, "shape": source_shape}
+            if source_dtype == "f16":
+                master_name = f"{node['name']}_master"
+                env[master_name] = {"dtype": "f32", "shape": source_shape}
+        elif node.get("type") == "for":
+            _register_requires_grad_nodes(node.get("body", []), env, loss_scale)
+        elif node.get("type") == "if":
+            _register_requires_grad_nodes(node.get("then", []), env, loss_scale)
+            for elif_node in node.get("elifs", []):
+                _register_requires_grad_nodes(elif_node.get("body", []), env, loss_scale)
+            if node.get("else") is not None:
+                _register_requires_grad_nodes(node["else"], env, loss_scale)

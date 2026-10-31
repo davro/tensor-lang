@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.3 in progress (for-loop body parity complete; control-flow syntax/AST staged). Core suite: 170/170 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.3 in progress (for-loop body parity complete; scalar/single-element control-flow execution implemented). Core suite: 178/178 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.3 — control-flow execution and remaining parity items.
+> **Current focus:** v0.5.3 — tensor-valued control flow, `any()`/`all()`, and remaining parity items.
 
 ---
 
@@ -82,6 +82,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Linear layers: `linear` (N-D aware)
 * Reverse-mode autograd for a broad set of operations (FP32 and FP16)
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
+* Control flow: scalar/single-element `if` / `elif` / `else` (grammar, AST, and execution)
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter, FP32 master weights for FP16 params)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes, N-D aware)
 * Scoped kernel names for loop bodies
@@ -101,7 +102,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` is present in the grammar and AST construction, but is **not currently executed**. Targeted for v0.5.3.
+* **Control flow:** `if` / `elif` / `else` grammar, AST construction, and scalar/single-element execution are implemented. Tensor-valued branching, `>=`, `<=`, `!=`, and `backward()` inside branches remain unsupported. Targeted for v0.5.3.
 * **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
 * **For-loop bodies:** broad operation parity with top-level is now implemented; remaining gaps are user-defined functions and file I/O other than `save()`.
@@ -868,6 +869,7 @@ The suite covers:
 * Losses (mse, cross-entropy, N-D)
 * Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
+* Control flow (`control_flow_if_*`)
 * Functions, pipelines, portfolio-style examples
 * Load/save
 * Mixed precision (f16 basic, matmul, autograd, training)
@@ -977,7 +979,7 @@ App tests run sequentially.
 
 ### v0.5.3 (in progress)
 
-* **Control flow execution:** implement execution for the staged `if`/`elif`/`else` AST.
+* **Tensor-valued control flow:** extend `if`/`elif`/`else` beyond scalar/single-element conditions.
 * **Autograd wiring for `batch_norm` and `instance_norm`.**
 * **Single backward pass limitation:** support multiple `backward()` statements in one file.
 * **Remaining loop-body gaps:** user-defined functions and file I/O other than `save()`.

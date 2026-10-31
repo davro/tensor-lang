@@ -107,8 +107,89 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
     # ================================================================
     for node in ast:
         if node.get("type") == "if":
-            tensorlang.print(message="[TYPE CHECKER] error: Control flow (if/elif/else) is not implemented yet")
-            return False, env
+            for synth in node.get("_condition_synthetics", []):
+                success, env = type_checker([synth], env, DEBUG_INFO, DEBUG_MODE)
+                if not success:
+                    return False, env
+
+            for cond_node in [node] + node.get("elifs", []):
+                cond = cond_node.get("condition")
+                if isinstance(cond, dict) and cond.get("type") == "bool":
+                    cond_node["_condition_constant"] = bool(cond.get("value"))
+                    cond_node["_condition_shape"] = (1,)
+                elif isinstance(cond, dict) and cond.get("type") == "name":
+                    cond_name = cond["name"]
+                    if cond_name not in env:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined condition tensor '{cond_name}'")
+                        return False, env
+                    shape = env[cond_name]["shape"]
+                    if int(np.prod(shape) if shape else 1) != 1:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: if condition must be scalar/single-element, got shape {shape}")
+                        return False, env
+                    cond_node["_condition_name"] = cond_name
+                    cond_node["_condition_shape"] = shape
+                elif isinstance(cond, dict) and cond.get("type") == "comparison":
+                    left = cond.get("left")
+                    right = cond.get("right")
+                    if not (isinstance(left, dict) and left.get("type") == "name"):
+                        tensorlang.print(message="[TYPE CHECKER] error: if comparison left side must be a tensor name")
+                        return False, env
+                    if not (isinstance(right, dict) and right.get("type") == "name"):
+                        tensorlang.print(message="[TYPE CHECKER] error: if comparison right side must be a tensor name")
+                        return False, env
+                    left_name = left["name"]
+                    right_name = right["name"]
+                    if left_name not in env or right_name not in env:
+                        tensorlang.print(message="[TYPE CHECKER] error: Undefined tensor in if condition")
+                        return False, env
+                    op = cond.get("op")
+                    if op not in (">", "<", "=="):
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported if comparison operator '{op}'")
+                        return False, env
+                    try:
+                        out_shape = tuple(np.broadcast_shapes(env[left_name]["shape"], env[right_name]["shape"]))
+                    except ValueError:
+                        tensorlang.print(message="[TYPE CHECKER] error: Incompatible shapes in if condition")
+                        return False, env
+                    if int(np.prod(out_shape) if out_shape else 1) != 1:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: if condition must be scalar/single-element, got shape {out_shape}")
+                        return False, env
+                    synth_name = f"__if_cond_{len(env)}"
+                    env[synth_name] = {"dtype": "f32", "shape": out_shape}
+                    cond_node["_condition_name"] = synth_name
+                    cond_node["_condition_shape"] = out_shape
+                    cond_node["_condition_expr"] = {
+                        "type": {">": "greater", "<": "less", "==": "equal"}[op],
+                        "args": [left_name, right_name],
+                    }
+                else:
+                    tensorlang.print(message="[TYPE CHECKER] error: Unsupported if condition")
+                    return False, env
+
+            def _contains_backward(nodes):
+                for n in nodes:
+                    if n.get("type") == "backward":
+                        return True
+                    if n.get("type") == "for" and _contains_backward(n.get("body", [])):
+                        return True
+                    if n.get("type") == "if":
+                        if _contains_backward(n.get("then", [])):
+                            return True
+                        for e in n.get("elifs", []):
+                            if _contains_backward(e.get("body", [])):
+                                return True
+                        if n.get("else") is not None and _contains_backward(n.get("else", [])):
+                            return True
+                return False
+
+            for branch in [node.get("then", [])] + [e.get("body", []) for e in node.get("elifs", [])] + ([node.get("else")] if node.get("else") is not None else []):
+                if _contains_backward(branch):
+                    tensorlang.print(message="[TYPE CHECKER] error: backward() inside if/elif/else is not supported yet")
+                    return False, env
+                success, env = type_checker(branch, env, DEBUG_INFO, DEBUG_MODE)
+                if not success:
+                    return False, env
+            continue
 
         if node.get("type") == "rebind":
             continue

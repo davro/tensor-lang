@@ -27,6 +27,32 @@ def _reset_tmp_counter():
     """Call at the start of each compilation to reset the counter for this thread."""
     _tls.counter = 0
 
+def _flatten_expr_to_name(expr_node, synthetic_nodes: list, DEBUG_MODE=False) -> str:
+    """Flatten an arbitrary expression into a synthetic binding name."""
+    if isinstance(expr_node, str):
+        return expr_node
+    if isinstance(expr_node, Token):
+        if expr_node.type == "NAME":
+            return expr_node.value
+        return str(expr_node.value)
+    if isinstance(expr_node, dict) and expr_node.get("type") == "name":
+        return expr_node["name"]
+
+    expr_node = flatten_expr_args(expr_node, synthetic_nodes, DEBUG_MODE)
+    tmp_name = _next_tmp()
+    synthetic_nodes.append({
+        "type": "let",
+        "name": tmp_name,
+        "ty": None,
+        "expr": expr_node,
+        "requires_grad": False,
+        "tree": None,
+    })
+    if DEBUG_MODE:
+        tensorlang.print(message=f"[AST] Synthesised binding: {tmp_name} = {expr_node.get('type')}(...)")
+    return tmp_name
+
+
 def flatten_expr_args(expr_node: dict, synthetic_nodes: list, DEBUG_MODE=False) -> dict:
     """
     Recursively flatten a nested expression node so all args are name strings.
@@ -36,23 +62,49 @@ def flatten_expr_args(expr_node: dict, synthetic_nodes: list, DEBUG_MODE=False) 
     if expr_node is None:
         return expr_node
 
-    node_type = expr_node.get('type')
-
-    if node_type == 'name':
+    if isinstance(expr_node, Token):
+        if expr_node.type == "NAME":
+            return {"type": "name", "name": expr_node.value}
         return expr_node
 
-    if node_type in ('matmul', 'add', 'minus', 'mult', 'div',
-                     'relu', 'sigmoid', 'tanh', 'gelu', 'swish'):
+    if not isinstance(expr_node, dict):
+        return expr_node
+
+    node_type = expr_node.get("type")
+    if node_type == "name":
+        return expr_node
+
+    expr_node = dict(expr_node)
+
+    if "args" in expr_node and isinstance(expr_node["args"], list):
         new_args = []
-        for arg in expr_node.get('args', []):
+        for arg in expr_node["args"]:
             if isinstance(arg, str):
                 new_args.append(arg)
-            elif isinstance(arg, dict):
-                new_args.append(flatten_expr_arg(arg, synthetic_nodes, DEBUG_MODE))
+            elif isinstance(arg, dict) and arg.get("type") == "name":
+                new_args.append(arg["name"])
             else:
-                new_args.append(arg)
-        expr_node = dict(expr_node)
-        expr_node['args'] = new_args
+                new_args.append(_flatten_expr_to_name(arg, synthetic_nodes, DEBUG_MODE))
+        expr_node["args"] = new_args
+
+    if "tensor" in expr_node and isinstance(expr_node["tensor"], dict):
+        expr_node["tensor"] = _flatten_expr_to_name(expr_node["tensor"], synthetic_nodes, DEBUG_MODE)
+
+    if "tensors" in expr_node and isinstance(expr_node["tensors"], list):
+        new_tensors = []
+        for t in expr_node["tensors"]:
+            if isinstance(t, str):
+                new_tensors.append(t)
+            elif isinstance(t, dict) and t.get("type") == "name":
+                new_tensors.append(t["name"])
+            else:
+                new_tensors.append(_flatten_expr_to_name(t, synthetic_nodes, DEBUG_MODE))
+        expr_node["tensors"] = new_tensors
+
+    if "left" in expr_node and isinstance(expr_node["left"], dict):
+        expr_node["left"] = _flatten_expr_to_name(expr_node["left"], synthetic_nodes, DEBUG_MODE)
+    if "right" in expr_node and isinstance(expr_node["right"], dict):
+        expr_node["right"] = _flatten_expr_to_name(expr_node["right"], synthetic_nodes, DEBUG_MODE)
 
     return expr_node
 
@@ -1220,13 +1272,20 @@ def build_if_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
             inner = child.children[0] if child.children else child
             then_body.extend(build_statement(inner, DEBUG_MODE, DEBUG_INFO))
 
-    return {
-        'type': 'if',
-        'condition': condition,
-        'then': then_body,
-        'elifs': elifs,
-        'else': else_body,
+    synthetics = []
+    if isinstance(condition, dict) and condition.get("type") == "comparison":
+        condition["left"] = {"type": "name", "name": _flatten_expr_to_name(condition.get("left"), synthetics, DEBUG_MODE)}
+        condition["right"] = {"type": "name", "name": _flatten_expr_to_name(condition.get("right"), synthetics, DEBUG_MODE)}
+
+    node = {
+        "type": "if",
+        "condition": condition,
+        "then": then_body,
+        "elifs": elifs,
+        "else": else_body,
     }
+    node["_condition_synthetics"] = synthetics
+    return node
 
 
 def build_elif_clause(tree, DEBUG_MODE=False, DEBUG_INFO=False):
@@ -1260,8 +1319,16 @@ def build_block_from_clause(tree, DEBUG_MODE=False, DEBUG_INFO=False):
 
 
 def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
-    if tree.data == 'condition' and tree.children:
-        tree = tree.children[0]
+    if tree.data == 'condition':
+        if tree.children:
+            tree = tree.children[0]
+        else:
+            meta = getattr(tree, "meta", None)
+            source_code = _get_source_code()
+            if meta is not None and source_code is not None:
+                text = source_code[meta.start_pos:meta.end_pos].strip()
+                if text in ("true", "false"):
+                    return {"type": "bool", "value": text == "true"}
 
     if isinstance(tree, Token):
         if tree.type == 'NAME':
@@ -1270,25 +1337,33 @@ def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
             return {'type': 'bool', 'value': tree.value == 'true'}
         return {'type': 'name', 'name': str(tree.value)}
 
+    if getattr(tree, "data", None) in ("true", "false"):
+        return {"type": "bool", "value": tree.data == "true"}
+
     if tree.data == 'comparison_expr':
         expr_children = [c for c in tree.children if c.data == 'expr']
-        op_child = None
-        for c in tree.children:
-            if c.data == 'comp_op':
-                op_child = c
-                break
-            if isinstance(c, Token) and c.value in ('>', '<', '>=', '<=', '==', '!='):
-                op_child = c
-                break
+        def _collect_tokens(node):
+            if isinstance(node, Token):
+                yield node
+                return
+            for child in getattr(node, "children", []):
+                yield from _collect_tokens(child)
 
-        if op_child is None:
-            op = None
-        elif isinstance(op_child, Token):
-            op = op_child.value
-        elif op_child.children:
-            op = op_child.children[0].value
-        else:
-            op = None
+        op = None
+        for child in tree.children:
+            if getattr(child, "data", None) == "comp_op":
+                meta = getattr(child, "meta", None)
+                if meta is not None:
+                    source_code = _get_source_code()
+                    if source_code is not None:
+                        op = source_code[meta.start_pos:meta.end_pos].strip()
+                break
+        if op is None:
+            for tok in _collect_tokens(tree):
+                value = getattr(tok, "value", None)
+                if value in ('>', '<', '>=', '<=', '==', '!='):
+                    op = value
+                    break
 
         left = build_expression(expr_children[0], DEBUG_MODE, DEBUG_INFO) if len(expr_children) > 0 else None
         right = build_expression(expr_children[1], DEBUG_MODE, DEBUG_INFO) if len(expr_children) > 1 else None

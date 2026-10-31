@@ -8,7 +8,7 @@ from tensorlang.type_checker import type_checker
 def main(path):
     with open('tensorlang.lark') as f:
         grammar = f.read()
-    parser = Lark(grammar, start='program', parser='lalr')
+    parser = Lark(grammar, start='program', parser='lalr', propagate_positions=True)
 
     with open(path) as f:
         code = f.read()
@@ -18,7 +18,7 @@ def main(path):
     print("parse OK")
 
     print("--- building AST ---")
-    ast, output_tensor, functions = build_ast(tree, DEBUG_MODE=False, DEBUG_INFO=False)
+    ast, output_tensor, functions = build_ast(tree, DEBUG_MODE=False, DEBUG_INFO=False, source_code=code)
     print(f"AST OK: {len(ast)} top-level nodes, {len(functions)} function(s) defined, output_tensor={output_tensor}")
 
     print("--- type checking ---")

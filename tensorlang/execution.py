@@ -763,6 +763,21 @@ class ExecutionMixin:
                 if bw_list_pos is not None and pos >= bw_list_pos:
                     continue
 
+                if node.get("type") == "if":
+                    for k in node.get("_condition_kernels", []):
+                        self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                    selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
+                        node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
+                    )
+                    if selected_nodes is not None:
+                        self._execute_if_branch(
+                            selected_nodes, selected_flat, selected_kernels,
+                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                        )
+                    node["_selected_branch_flat_items"] = selected_flat
+                    node["_selected_branch_kernels"] = selected_kernels
+                    continue
+
                 if node.get("type") == "for":
                     self._execute_for_loop(node, kernels, ast_to_kernel_map,
                                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
@@ -884,6 +899,15 @@ class ExecutionMixin:
                         if pos <= bw_list_pos:
                             continue
 
+                        if node.get("type") == "if":
+                            selected_flat = node.get("_selected_branch_flat_items")
+                            selected_kernels = node.get("_selected_branch_kernels")
+                            if selected_flat is not None:
+                                self._execute_if_branch_post(
+                                    selected_flat, selected_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                                )
+                            continue
+
                         if node.get("type") == "for":
                             self._execute_for_loop(node, kernels, ast_to_kernel_map,
                                                    lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
@@ -964,3 +988,138 @@ class ExecutionMixin:
             self.tensorlang.print(
                 message=f"[COMPILER] for loop: completed {iterations} iterations"
             )
+
+    def _eval_if_condition(self, node, tensors, gpu_allocs, env, cuda):
+        if "_condition_constant" in node:
+            return bool(node["_condition_constant"])
+
+        name = node.get("_condition_name")
+        if name is None:
+            return False
+
+        if name not in tensors and name in gpu_allocs and name in env:
+            shape = tuple(int(d) for d in env[name]["shape"])
+            np_dtype = self._np_dtype(env, name)
+            arr = np.empty(shape if shape else (1,), dtype=np_dtype)
+            cuda.memcpy_dtoh(arr, gpu_allocs[name])
+            tensors[name] = arr
+
+        if name not in tensors:
+            raise KeyError(f"_eval_if_condition: missing tensor '{name}'")
+
+        arr = np.asarray(tensors[name]).reshape(-1)
+        if arr.size != 1:
+            raise ValueError(f"if condition must be scalar/single-element, got size {arr.size}")
+        return bool(arr[0] != 0)
+
+    def _select_if_branch(self, node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir):
+        if self._eval_if_condition(node, tensors, gpu_allocs, env, cuda):
+            return node.get("then", []), node.get("_then_kernels", []), node.get("_then_flat_items", [])
+
+        for elif_node in node.get("elifs", []):
+            for k in elif_node.get("_condition_kernels", []):
+                self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+            if self._eval_if_condition(elif_node, tensors, gpu_allocs, env, cuda):
+                return elif_node.get("body", []), elif_node.get("_body_kernels", []), elif_node.get("_body_flat_items", [])
+
+        if node.get("else") is not None:
+            return node["else"], node.get("_else_kernels", []), node.get("_else_flat_items", [])
+
+        return None, None, None
+
+    def _execute_if_branch(self, branch_nodes, branch_flat, branch_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
+        rebinds = [n for n in branch_nodes if n.get("type") == "rebind"]
+        exec_nodes = [n for n in branch_nodes if n.get("type") != "rebind"]
+
+        for node in exec_nodes:
+            if (
+                node.get("type") == "let"
+                and isinstance(node.get("expr"), dict)
+                and node["expr"].get("type") == "name"
+            ):
+                self._resolve_alias_inline(node, gpu_allocs, tensors)
+
+        for local_idx, branch_node in branch_flat:
+            if branch_node.get("type") in ("backward", "save", "rebind"):
+                continue
+            if branch_node.get("type") == "for":
+                self._execute_for_loop(branch_node, branch_kernels, None, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                continue
+            if branch_node.get("type") == "if":
+                self._execute_if_node(branch_node, branch_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                continue
+            if (
+                branch_node.get("type") == "let"
+                and isinstance(branch_node.get("expr"), dict)
+                and branch_node["expr"].get("type") == "name"
+            ):
+                self._resolve_alias_inline(branch_node, gpu_allocs, tensors)
+            if local_idx is None:
+                continue
+            self._execute_single_kernel(branch_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+
+        pending_gpu = {}
+        pending_tensors = {}
+        for rebind in rebinds:
+            target = rebind["name"]
+            src_expr = rebind["expr"]
+            if src_expr.get("type") != "name":
+                continue
+            src_name = src_expr["name"]
+            if src_name not in gpu_allocs:
+                continue
+            pending_gpu[target] = gpu_allocs[src_name]
+            if src_name in tensors:
+                pending_tensors[target] = tensors[src_name]
+        gpu_allocs.update(pending_gpu)
+        tensors.update(pending_tensors)
+
+        for node in branch_nodes:
+            if (
+                node.get("type") == "let"
+                and isinstance(node.get("expr"), dict)
+                and node["expr"].get("type") == "name"
+            ):
+                self._resolve_alias_inline(node, gpu_allocs, tensors)
+
+        for node in branch_nodes:
+            if node.get("type") == "save":
+                self._execute_save_statement(node, tensors, gpu_allocs, env, cache_file_dir, cuda)
+
+    def _execute_if_node(self, node, kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
+        for k in node.get("_condition_kernels", []):
+            self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+        selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
+            node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
+        )
+        if selected_nodes is not None:
+            self._execute_if_branch(
+                selected_nodes, selected_flat, selected_kernels,
+                lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+            )
+        node["_selected_branch_flat_items"] = selected_flat
+        node["_selected_branch_kernels"] = selected_kernels
+
+    def _execute_if_branch_post(self, branch_flat, branch_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
+        for local_idx, branch_node in branch_flat:
+            if branch_node.get("type") == "for":
+                continue
+            if branch_node.get("type") == "if":
+                selected_flat = branch_node.get("_selected_branch_flat_items")
+                selected_kernels = branch_node.get("_selected_branch_kernels")
+                if selected_flat is not None:
+                    self._execute_if_branch_post(
+                        selected_flat, selected_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                    )
+                continue
+            is_optimizer = (
+                branch_node.get("type") in OPTIMIZER_NAMES
+                or (branch_node.get("type") == "call" and branch_node.get("name") in OPTIMIZER_NAMES)
+            )
+            if not is_optimizer:
+                continue
+            if getattr(self, "_skip_optimizer", False):
+                continue
+            if local_idx is None:
+                continue
+            self._execute_single_kernel(branch_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda)

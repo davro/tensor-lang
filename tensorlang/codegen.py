@@ -364,6 +364,8 @@ class CodegenMixin:
         return None, None
 
     def _generate_kernels_for_nodes(self, nodes, env, generator, scope_prefix=None):
+        if not hasattr(self, "_if_scope_counter"):
+            self._if_scope_counter = 0
         nodes = fuse_elementwise_chains(nodes, env)
         kernels = []
         cuda_code = ""
@@ -388,6 +390,103 @@ class CodegenMixin:
                 node["_kernels"] = nested_kernels
                 node["_flat_items"] = nested_flat
                 cuda_code += nested_cuda
+                flat_items.append((None, node))
+                continue
+
+            if node.get("type") == "if":
+                if scope_prefix:
+                    if_scope = f"{scope_prefix}_if{self._if_scope_counter}"
+                else:
+                    if_scope = f"if{self._if_scope_counter}"
+                self._if_scope_counter += 1
+
+                synth_kernels = []
+                synth_cuda = ""
+                synth_flat = []
+                for synth in node.get("_condition_synthetics", []):
+                    sk, sc, sf = self._generate_kernels_for_nodes([synth], env, generator, scope_prefix=if_scope)
+                    synth_kernels.extend(sk)
+                    synth_cuda += sc
+                    synth_flat.extend(sf)
+
+                cond_kernels = []
+                cond_cuda = ""
+                if node.get("_condition_expr") is not None:
+                    cond_name = node["_condition_name"]
+                    if cond_name not in env:
+                        env[cond_name] = {"dtype": "f32", "shape": node.get("_condition_shape", (1,))}
+                    kernel_name = cond_name if scope_prefix is None else f"{if_scope}_{cond_name}"
+                    self._kernel_name_map[kernel_name] = cond_name
+                    kstr, kinfo = self._kernel_for_expr(cond_name, node["_condition_expr"], env, generator, kernel_name=kernel_name)
+                    if kstr is not None:
+                        cond_kernels.append(kinfo)
+                        cond_cuda += kstr
+                node["_condition_kernels"] = cond_kernels
+
+                then_kernels, then_cuda, then_flat = self._generate_kernels_for_nodes(node.get("then", []), env, generator, scope_prefix=if_scope)
+                node["_then_kernels"] = then_kernels
+                node["_then_flat_items"] = then_flat
+
+                elif_data = []
+                for elif_node in node.get("elifs", []):
+                    e_synth_kernels = []
+                    e_synth_cuda = ""
+                    e_synth_flat = []
+                    for synth in elif_node.get("_condition_synthetics", []):
+                        sk, sc, sf = self._generate_kernels_for_nodes([synth], env, generator, scope_prefix=if_scope)
+                        e_synth_kernels.extend(sk)
+                        e_synth_cuda += sc
+                        e_synth_flat.extend(sf)
+
+                    e_cond_kernels = []
+                    e_cond_cuda = ""
+                    if elif_node.get("_condition_expr") is not None:
+                        cond_name = elif_node["_condition_name"]
+                        if cond_name not in env:
+                            env[cond_name] = {"dtype": "f32", "shape": elif_node.get("_condition_shape", (1,))}
+                        kernel_name = cond_name if scope_prefix is None else f"{if_scope}_{cond_name}"
+                        self._kernel_name_map[kernel_name] = cond_name
+                        kstr, kinfo = self._kernel_for_expr(cond_name, elif_node["_condition_expr"], env, generator, kernel_name=kernel_name)
+                        if kstr is not None:
+                            e_cond_kernels.append(kinfo)
+                            e_cond_cuda += kstr
+                    elif_node["_condition_kernels"] = e_cond_kernels
+
+                    e_body_kernels, e_body_cuda, e_body_flat = self._generate_kernels_for_nodes(elif_node.get("body", []), env, generator, scope_prefix=if_scope)
+                    elif_node["_body_kernels"] = e_body_kernels
+                    elif_node["_body_flat_items"] = e_body_flat
+
+                    elif_data.append((elif_node, e_synth_kernels, e_cond_kernels, e_body_kernels, e_synth_cuda + e_cond_cuda + e_body_cuda))
+
+                else_kernels = []
+                else_cuda = ""
+                else_flat = []
+                if node.get("else") is not None:
+                    else_kernels, else_cuda, else_flat = self._generate_kernels_for_nodes(node["else"], env, generator, scope_prefix=if_scope)
+                    node["_else_kernels"] = else_kernels
+                    node["_else_flat_items"] = else_flat
+
+                kernels.extend(synth_kernels)
+                kernels.extend(cond_kernels)
+                kernels.extend(then_kernels)
+                for _, e_synth, e_cond, e_body, _ in elif_data:
+                    kernels.extend(e_synth)
+                    kernels.extend(e_cond)
+                    kernels.extend(e_body)
+                kernels.extend(else_kernels)
+
+                cuda_code += synth_cuda + cond_cuda + then_cuda
+                for _, _, _, _, e_cuda in elif_data:
+                    cuda_code += e_cuda
+                cuda_code += else_cuda
+
+                _if_combined = (
+                    synth_kernels + cond_kernels + then_kernels
+                    + [k for e in elif_data for k in (e[1] + e[2] + e[3])]
+                    + else_kernels
+                )
+                node["_kernels"] = _if_combined
+                node["_flat_items"] = [(None, node)]
                 flat_items.append((None, node))
                 continue
 
