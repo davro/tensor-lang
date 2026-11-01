@@ -215,6 +215,13 @@ class CodegenMixin:
                 input_shape, weight_shape, output_shape, dtype=result_dtype,
             )
 
+        if expr.get("type") in ("any", "all"):
+            tensor_name = expr["tensor"]
+            input_shape = env[tensor_name]["shape"]
+            size = int(np.prod([int(d) for d in input_shape])) if input_shape else 1
+            self._record_operation(expr["type"], name, [tensor_name])
+            return generator.any_all(expr["type"], kernel_name, tensor_name, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
+
         if expr.get("type") == "sum":
             tensor_name = expr["tensor"]
             axis = expr.get("axis")

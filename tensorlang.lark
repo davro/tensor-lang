@@ -97,6 +97,7 @@ expr: tensor_literal
     | reshape_call
     | concat_call
     | slice_expr
+    | reduction_call
     | user_function_call
     | NAME
     | NUMBER
@@ -110,13 +111,13 @@ if_statement: "if" condition "{" (statement)* "}" (elif_clause)* (else_clause)?
 elif_clause: "elif" condition "{" (statement)* "}"
 else_clause: "else" "{" (statement)* "}"
 
-condition: comparison_expr | NAME | "true" | "false"
+condition: comparison_expr | reduction_call | NAME | "true" | "false"
 
 comparison_expr: expr comp_op expr
 
 comp_op: ">" | "<" | ">=" | "<=" | "==" | "!="
 
-reduction_call: "any" "(" NAME ")" | "all" "(" NAME ")"
+reduction_call: ANY "(" NAME ")" | ALL "(" NAME ")"
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -271,3 +272,5 @@ STRING: /"[^"]*"/    // For file paths
 ////////////////////////////////////////////////////////////////////////////////
 %ignore /\/\/[^\n]*/         // Single-line comments
 %ignore /\/\*[\s\S]*?\*\//   // Multi-line comments
+ANY: "any"
+ALL: "all"

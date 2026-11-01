@@ -128,6 +128,30 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         return False, env
                     cond_node["_condition_name"] = cond_name
                     cond_node["_condition_shape"] = shape
+                elif isinstance(cond, dict) and cond.get("type") in ("any", "all"):
+                    tensor_name = cond["tensor"]
+                    tensor_type = _resolve_tensor_type(env, tensor_name)
+                    if tensor_type is None:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {cond['type']}")
+                        return False, env
+                    synth_name = f"__if_cond_{len(env)}"
+                    env[synth_name] = {"dtype": "f32", "shape": ()}
+                    cond_node["_condition_name"] = synth_name
+                    cond_node["_condition_shape"] = ()
+                    cond_node["_condition_expr"] = {"type": cond["type"], "tensor": tensor_name}
+
+                elif isinstance(cond, dict) and cond.get("type") in ("any", "all"):
+                    tensor_name = cond["tensor"]
+                    tensor_type = _resolve_tensor_type(env, tensor_name)
+                    if tensor_type is None:
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {cond['type']}")
+                        return False, env
+                    synth_name = f"__if_cond_{len(env)}"
+                    env[synth_name] = {"dtype": "f32", "shape": ()}
+                    cond_node["_condition_name"] = synth_name
+                    cond_node["_condition_shape"] = ()
+                    cond_node["_condition_expr"] = {"type": cond["type"], "tensor": tensor_name}
+
                 elif isinstance(cond, dict) and cond.get("type") == "comparison":
                     left = cond.get("left")
                     right = cond.get("right")
@@ -285,6 +309,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             "relu", "sigmoid", "tanh", "gelu", "swish", "softmax",
             "fill", "load", "save",
             "sum", "mean", "max", "min", "argmax", "argmin",
+            "any", "all",
             "greater", "less", "equal",
             "linear", "layer_norm", "batch_norm", "instance_norm",
             "cross_entropy", "mse_loss",
@@ -375,6 +400,17 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 except (OSError, UnicodeError, ValueError) as e:
                     tensorlang.print(message=f"[TYPE CHECKER] error: Could not infer shape from {file_path}: {e}")
                     return False, env
+                continue
+
+            if expr["type"] in ("any", "all"):
+                tensor_name = expr["tensor"]
+                tensor_type = _resolve_tensor_type(env, tensor_name)
+                if tensor_type is None:
+                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
+                    return False, env
+                env[name] = {"dtype": "f32", "shape": ()}
+                if DEBUG_INFO:
+                    print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue
 
             if expr["type"] in ("sum", "mean"):

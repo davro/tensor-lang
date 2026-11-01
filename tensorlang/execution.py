@@ -419,6 +419,15 @@ class ExecutionMixin:
                 c_int(start), c_int(out_size),
             )
 
+        elif op_type in ("any_full", "all_full"):
+            size = dims[0]
+            op_name = op_type.split("_")[0]
+            getattr(lib, f"launch_{op_name}_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(size),
+            )
+
         elif op_type == "sum_full":
             size = dims[0]
             getattr(lib, f"launch_sum_{kernel_func_name}")(

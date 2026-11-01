@@ -1395,3 +1395,56 @@ extern "C" void launch_argmin_{name}(
 """
             kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis, ndim, list(input_shape))
             return kernel, kernel_info
+
+
+    def any_all(self, op_type, name, tensor_name, input_shape, dtype="f32"):
+        size = int(np.prod([int(d) for d in input_shape])) if input_shape else 1
+        in_dtype = dtype
+        out_dtype = "f32"
+        in_ctype = self._ctype(in_dtype)
+        in_include = self._include(in_dtype)
+        inp_read = lambda idx: self._read(in_dtype, "input", idx)
+
+        if op_type == "any":
+            init = "0.0f"
+            combine = "fmaxf"
+            update = f"if ({inp_read('i')} != 0.0f) partial = 1.0f;"
+        else:
+            init = "1.0f"
+            combine = "fminf"
+            update = f"if ({inp_read('i')} == 0.0f) partial = 0.0f;"
+
+        kernel = in_include + f"""
+__global__ void {op_type}_full_kernel_{name}({in_ctype}* input, float* output, int size) {{
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+
+    float partial = {init};
+    for (int i = tid; i < size; i += blockDim.x) {{
+        {update}
+    }}
+    sdata[tid] = partial;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            sdata[tid] = {combine}(sdata[tid], sdata[tid + s]);
+        }}
+        __syncthreads();
+    }}
+
+    if (tid == 0) {{
+        output[0] = sdata[0];
+    }}
+}}
+extern "C" void launch_{op_type}_{name}({in_ctype}* input, float* output, int size) {{
+    dim3 block(256);
+    dim3 grid(1);
+    int shared_size = block.x * sizeof(float);
+    {op_type}_full_kernel_{name}<<<grid, block, shared_size>>>(input, output, size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        kernel_info = (f"{op_type}_full", name, tensor_name, None, size)
+        return kernel, kernel_info

@@ -229,6 +229,10 @@ class ComputationGraph:
                     'not_equal', 'gt', 'lt', 'eq', 'ge', 'le', 'ne'):
             self._backward_comparison(node, output_grad)
 
+        # any/all reductions (non-differentiable -> zero grad)
+        elif ot in ('any', 'all'):
+            self._backward_comparison(node, output_grad)
+
         else:
             if self.debug_mode:
                 self.tensorlang.print(message=f"[AUTOGRAD] Warning: No backward implemented for {node.op_type}")

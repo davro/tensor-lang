@@ -697,6 +697,23 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: tensor={tensor_name}, axis={axis}, eps={eps}")
         return {'type': 'layer_norm', 'tensor': tensor_name, 'axis': axis, 'eps': eps}
 
+    # any / all reductions
+    elif tree.data == 'reduction_call':
+        op = None
+        tensor_name = None
+        for child in tree.children:
+            if isinstance(child, Token) and child.value in ('any', 'all'):
+                op = child.value
+            elif isinstance(child, Token) and child.type == 'NAME':
+                tensor_name = child.value
+            elif isinstance(child, Tree) and child.data == 'expr':
+                inner = child.children[0] if child.children else child
+                if isinstance(inner, Token) and inner.type == 'NAME':
+                    tensor_name = inner.value
+        if op is None and tree.children and isinstance(tree.children[0], Token):
+            op = tree.children[0].value
+        return {'type': op, 'tensor': tensor_name}
+
     # Slice
     elif tree.data == 'slice_expr':
         tensor_name = None
@@ -1339,6 +1356,9 @@ def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
 
     if getattr(tree, "data", None) in ("true", "false"):
         return {"type": "bool", "value": tree.data == "true"}
+
+    if tree.data == 'reduction_call':
+        return build_expression(tree, DEBUG_MODE, DEBUG_INFO)
 
     if tree.data == 'comparison_expr':
         expr_children = [c for c in tree.children if c.data == 'expr']

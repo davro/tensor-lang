@@ -556,6 +556,15 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             cuda_code += kernel
                             self._record_operation("equal", name, [arg1, arg2])
 
+                        elif expr.get("type") in ("any", "all"):
+                            tensor_name = expr["tensor"]
+                            input_shape = env[tensor_name]["shape"]
+                            size = int(np.prod([int(dim) for dim in input_shape])) if input_shape else 1
+                            kernel, kernel_info = generator.any_all(expr["type"], name, tensor_name, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
+                            kernels.append(kernel_info)
+                            cuda_code += kernel
+                            self._record_operation(expr["type"], name, [tensor_name])
+
                         elif expr.get("type") == "sum":
                             tensor_name = expr["tensor"]
                             axis = expr.get("axis")
