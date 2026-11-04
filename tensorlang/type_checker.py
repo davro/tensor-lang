@@ -102,6 +102,25 @@ def _validate_optimizer_call(node_or_expr, env):
     return True
 
 def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
+    def _count_backward(nodes):
+        count = 0
+        for n in nodes:
+            if n.get("type") == "backward":
+                count += 1
+            if n.get("type") == "for":
+                count += _count_backward(n.get("body", []))
+            if n.get("type") == "if":
+                count += _count_backward(n.get("then", []))
+                for e in n.get("elifs", []):
+                    count += _count_backward(e.get("body", []))
+                if n.get("else") is not None:
+                    count += _count_backward(n.get("else", []))
+        return count
+
+    if _count_backward(ast) > 1:
+        tensorlang.print(message="[TYPE CHECKER] error: at most one backward() is supported per compilation")
+        return False, env
+
     # ================================================================
     # PASS 1: Type check all statements
     # ================================================================
@@ -123,9 +142,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         tensorlang.print(message=f"[TYPE CHECKER] error: Undefined condition tensor '{cond_name}'")
                         return False, env
                     shape = env[cond_name]["shape"]
-                    if int(np.prod(shape) if shape else 1) != 1:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: if condition must be scalar/single-element, got shape {shape}")
-                        return False, env
+                    # Tensor-valued conditions are allowed. Truthiness is all-nonzero.
                     cond_node["_condition_name"] = cond_name
                     cond_node["_condition_shape"] = shape
                 elif isinstance(cond, dict) and cond.get("type") in ("any", "all"):
@@ -167,7 +184,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         tensorlang.print(message="[TYPE CHECKER] error: Undefined tensor in if condition")
                         return False, env
                     op = cond.get("op")
-                    if op not in (">", "<", "=="):
+                    if op not in (">", "<", "==", ">=", "<=", "!="):
                         tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported if comparison operator '{op}'")
                         return False, env
                     try:
@@ -175,41 +192,22 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     except ValueError:
                         tensorlang.print(message="[TYPE CHECKER] error: Incompatible shapes in if condition")
                         return False, env
-                    if int(np.prod(out_shape) if out_shape else 1) != 1:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: if condition must be scalar/single-element, got shape {out_shape}")
-                        return False, env
+                    # Tensor-valued conditions are allowed. Truthiness is all-nonzero.
                     synth_name = f"__if_cond_{len(env)}"
                     env[synth_name] = {"dtype": "f32", "shape": out_shape}
                     cond_node["_condition_name"] = synth_name
                     cond_node["_condition_shape"] = out_shape
                     cond_node["_condition_expr"] = {
-                        "type": {">": "greater", "<": "less", "==": "equal"}[op],
+                        "type": {">": "greater", "<": "less", "==": "equal",
+                                 ">=": "greater_equal", "<=": "less_equal",
+                                 "!=": "not_equal"}[op],
                         "args": [left_name, right_name],
                     }
                 else:
                     tensorlang.print(message="[TYPE CHECKER] error: Unsupported if condition")
                     return False, env
 
-            def _contains_backward(nodes):
-                for n in nodes:
-                    if n.get("type") == "backward":
-                        return True
-                    if n.get("type") == "for" and _contains_backward(n.get("body", [])):
-                        return True
-                    if n.get("type") == "if":
-                        if _contains_backward(n.get("then", [])):
-                            return True
-                        for e in n.get("elifs", []):
-                            if _contains_backward(e.get("body", [])):
-                                return True
-                        if n.get("else") is not None and _contains_backward(n.get("else", [])):
-                            return True
-                return False
-
             for branch in [node.get("then", [])] + [e.get("body", []) for e in node.get("elifs", [])] + ([node.get("else")] if node.get("else") is not None else []):
-                if _contains_backward(branch):
-                    tensorlang.print(message="[TYPE CHECKER] error: backward() inside if/elif/else is not supported yet")
-                    return False, env
                 success, env = type_checker(branch, env, DEBUG_INFO, DEBUG_MODE)
                 if not success:
                     return False, env
@@ -408,7 +406,21 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 if tensor_type is None:
                     tensorlang.print(message=f"[TYPE CHECKER] error: Undefined tensor {tensor_name} for {expr['type']}")
                     return False, env
-                env[name] = {"dtype": "f32", "shape": ()}
+
+                input_shape = tensor_type["shape"]
+                axis = expr.get("axis")
+                if axis is None:
+                    output_shape = ()
+                else:
+                    axis = _normalize_axis(axis, len(input_shape))
+                    if axis < 0 or axis >= len(input_shape):
+                        tensorlang.print(message=f"[TYPE CHECKER] error: Axis {axis} out of bounds for tensor {tensor_name} with shape {input_shape}")
+                        return False, env
+                    output_shape = tuple(dim for i, dim in enumerate(input_shape) if i != axis)
+                    if not output_shape:
+                        output_shape = ()
+
+                env[name] = {"dtype": "f32", "shape": output_shape}
                 if DEBUG_INFO:
                     print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                 continue

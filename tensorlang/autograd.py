@@ -58,7 +58,13 @@ class ComputationGraph:
             else:
                 self.gradients[name] = np.zeros_like(self.tensors[name])
 
-    def backward(self, loss_name: str, scale: float = 1.0):
+
+    def _branch_path_compatible(self, node_branch, active_branch):
+        node_branch = tuple(node_branch or ())
+        active_branch = tuple(active_branch or ())
+        return active_branch[:len(node_branch)] == node_branch
+
+    def backward(self, loss_name: str, scale: float = 1.0, active_branch_path=None):
         if loss_name not in self.tensors:
             raise ValueError(f"Loss tensor '{loss_name}' not found in graph")
 
@@ -66,6 +72,8 @@ class ComputationGraph:
         loss_shape = loss_tensor.shape
         if loss_shape not in [(), (1,)]:
             self.tensorlang.print(message=f"[AUTOGRAD] Warning: Loss should be scalar, got shape {loss_shape}")
+
+        self.active_branch_path = tuple(active_branch_path or ())
 
         if self.debug_mode:
             self.tensorlang.print(message=f"[AUTOGRAD] Starting backward pass from '{loss_name}' (scale={scale})")
@@ -108,6 +116,13 @@ class ComputationGraph:
         for node in reversed(self.nodes):
             if self.debug_mode:
                 self.tensorlang.print(message=f"[AUTOGRAD] Processing: {node}")
+
+            node_branch = tuple(node.metadata.get("branch_path", ()) or ())
+            active_branch = tuple(getattr(self, "active_branch_path", ()) or ())
+            if active_branch and not self._branch_path_compatible(node_branch, active_branch):
+                if self.debug_mode:
+                    self.tensorlang.print(message=f"[AUTOGRAD] -> Skipping {node.output_name} - inactive branch")
+                continue
 
             if node.output_name not in self.gradients:
                 if self.debug_mode:
@@ -223,6 +238,15 @@ class ComputationGraph:
             self._backward_mse_loss(node, output_grad)
         elif ot in ('cross_entropy', 'ce', 'crossentropy'):
             self._backward_cross_entropy(node, output_grad)
+
+        # Identity / alias (differentiable)
+        elif ot in ("identity", "alias", "copy"):
+            if node.inputs:
+                inp = node.inputs[0]
+                if inp in self.gradients:
+                    self.gradients[inp] = self.gradients[inp] + output_grad
+                else:
+                    self.gradients[inp] = np.array(output_grad, copy=True)
 
         # Comparisons (non-differentiable -> zero grad)
         elif ot in ('greater', 'less', 'equal', 'greater_equal', 'less_equal',

@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.3 in progress (for-loop body parity complete; scalar/single-element control-flow execution implemented). Core suite: 178/178 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.3 released (tensor-valued control flow, `any()`/`all()`, comparison operators, and `backward()` inside branches complete). Core suite: 196/196 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.3 — tensor-valued control flow, `any()`/`all()`, and remaining parity items.
+> **Current focus:** v0.5.4 — remaining parity items.
 
 ---
 
@@ -76,13 +76,14 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish` (N-D aware)
 * Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax` (N-D aware, arbitrary axis)
 * Comparisons: `greater`, `less`, `equal` (N-D broadcasting)
+* Condition comparisons: `>`, `<`, `==`, `>=`, `<=`, `!=` (N-D broadcasting; output always f32)
 * Slicing, reshape, transpose, concat (N-D aware)
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
 * Linear layers: `linear` (N-D aware)
 * Reverse-mode autograd for a broad set of operations (FP32 and FP16)
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
-* Control flow: scalar/single-element `if` / `elif` / `else` (grammar, AST, and execution)
+* Control flow: scalar/single-element and tensor-valued `if` / `elif` / `else` (grammar, AST, and execution)
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter, FP32 master weights for FP16 params)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes, N-D aware)
 * Scoped kernel names for loop bodies
@@ -99,11 +100,14 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **FP16 master weights** — Adam/SGD with FP32 master weights for FP16 params; optimizer computes in FP32 with FP32 m/v buffers, casts to FP16 for forward pass; automatic for FP16 params with grad
 * **Batched matmul gradients** — N-D (batched) matmul backward via NumPy batched matmul + `_unbroadcast` for broadcast dims
 * **For-loop body parity** — normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions now execute in loop bodies
+* **`any()` / `all()` reductions** — full and axis reductions, N-D aware, f16 support, zero gradients for autograd
+* **Tensor-valued control flow** — `if` / `elif` / `else` conditions may be multi-element tensors; truthiness is all-nonzero
+* **Comparison operators in conditions** — `>`, `<`, `==`, `>=`, `<=`, `!=` with N-D broadcasting
+* **`backward()` inside branches** — supported in a selected branch, with branch-aware autograd and at most one backward pass per compilation
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` grammar, AST construction, and scalar/single-element execution are implemented. Tensor-valued branching, `>=`, `<=`, `!=`, and `backward()` inside branches remain unsupported. Targeted for v0.5.3.
-* **`any()` / `all()` reductions:** present in the grammar but **not implemented**. Targeted post-v0.5.
+* **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented. Branch shape/dtype consistency is not yet enforced. `backward()` inside branches is limited to at most one backward pass per compilation.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
 * **For-loop bodies:** broad operation parity with top-level is now implemented; remaining gaps are user-defined functions and file I/O other than `save()`.
 * **Axis support is limited** for several normalisations.
@@ -340,7 +344,8 @@ let w_updated = minus(w, __tmp_0)
 
 | Operation | Status | Notes |
 |---|---|---|
-| `greater`, `less`, `equal` | Partial | N-D broadcasting; output always f32 |
+| `greater`, `less`, `equal` | Supported | N-D broadcasting; output always f32 |
+| `>=`, `<=`, `!=` | Supported in conditions | N-D broadcasting; output always f32; used for tensor-valued branch conditions |
 
 ---
 
@@ -397,9 +402,9 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `min` | Yes | Full and axis reduction; gradient flows to all extrema |
 | `argmax` | Yes | Full and axis reduction; gradient is one-hot at index |
 | `argmin` | Yes | Full and axis reduction; gradient is one-hot at index |
-| `greater` | Yes (zero) | Non-differentiable; gradient is zero |
-| `less` | Yes (zero) | Non-differentiable; gradient is zero |
-| `equal` | Yes (zero) | Non-differentiable; gradient is zero |
+| `greater`, `less`, `equal` | Yes (zero) | Non-differentiable; gradient is zero |
+| `>=`, `<=`, `!=` | Yes (zero) | Non-differentiable; gradient is zero |
+| `any`, `all` | Yes (zero) | Non-differentiable; gradient is zero |
 
 Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computation uses NumPy's type promotion (may upcast to f32 internally).
 
@@ -869,7 +874,8 @@ The suite covers:
 * Losses (mse, cross-entropy, N-D)
 * Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
-* Control flow (`control_flow_if_*`)
+* Control flow (`control_flow_if_*`, including tensor-valued conditions, comparison operators, and branch backward)
+* `any()` / `all()` reductions (`any_all_*`)
 * Functions, pipelines, portfolio-style examples
 * Load/save
 * Mixed precision (f16 basic, matmul, autograd, training)
@@ -977,17 +983,18 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.3 (in progress)
+### v0.5.4 (planned)
 
-* **Tensor-valued control flow:** extend `if`/`elif`/`else` beyond scalar/single-element conditions.
+* **User-defined functions and file I/O in loop bodies:** support user-defined functions and file I/O other than `save()` inside `for` loops.
 * **Autograd wiring for `batch_norm` and `instance_norm`.**
-* **Single backward pass limitation:** support multiple `backward()` statements in one file.
-* **Remaining loop-body gaps:** user-defined functions and file I/O other than `save()`.
+* **Branch consistency checks:** enforce matching shapes/dtypes across `if` / `elif` / `else` branches.
+* **Multiple `backward()` statements:** support more than one backward pass per compilation where semantically valid.
+* **Comparison operators beyond conditions:** expose `>=`, `<=`, and `!=` as general tensor operations if desired.
+* **Additional control-flow edge cases:** mixed truthiness, nested branch backward, and loop-interaction cases.
 
 ### Short Term
 
 * Improve shape-mismatch error messages
-* Implement or remove `if`, `any()`, and `all()` (targeted post-v0.5)
 * `batch_norm` gamma/beta affine parameters
 * Dynamic loss scaling tuning (growth interval, overflow threshold)
 

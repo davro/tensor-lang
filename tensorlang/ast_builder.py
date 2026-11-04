@@ -1,5 +1,8 @@
-# File: tensorlang/ast_builder.py
-"""AST building - extracted from main()"""
+"""
+TensorLang AST Builder
+
+File: tensorlang/ast_builder.py
+"""
 
 from lark import Token, Tree
 from tensorlang.tensor_lang import TensorLang
@@ -701,18 +704,24 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
     elif tree.data == 'reduction_call':
         op = None
         tensor_name = None
+        axis = None
         for child in tree.children:
             if isinstance(child, Token) and child.value in ('any', 'all'):
                 op = child.value
             elif isinstance(child, Token) and child.type == 'NAME':
                 tensor_name = child.value
+            elif isinstance(child, Token) and child.type == 'NUMBER':
+                axis = int(float(child.value))
             elif isinstance(child, Tree) and child.data == 'expr':
                 inner = child.children[0] if child.children else child
                 if isinstance(inner, Token) and inner.type == 'NAME':
                     tensor_name = inner.value
+                elif isinstance(inner, Token) and inner.type == 'NUMBER':
+                    axis = int(float(inner.value))
         if op is None and tree.children and isinstance(tree.children[0], Token):
             op = tree.children[0].value
-        return {'type': op, 'tensor': tensor_name}
+        return {'type': op, 'tensor': tensor_name, 'axis': axis}
+
 
     # Slice
     elif tree.data == 'slice_expr':

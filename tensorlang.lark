@@ -11,9 +11,9 @@ program: (statement)*
 ////////////////////////////////////////////////////////////////////////////////
 // Statement Rule (doesn't return a value)
 ////////////////////////////////////////////////////////////////////////////////
-statement: function_def 
-         | let_binding 
-         | if_statement 
+statement: function_def
+         | let_binding
+         | if_statement
          | for_statement
          | rebind_statement
          | backward_statement
@@ -64,15 +64,15 @@ for_body_statement: let_binding
 ////////////////////////////////////////////////////////////////////////////////
 // Expressions (returns a value)
 ////////////////////////////////////////////////////////////////////////////////
-expr: tensor_literal 
-    | fill_call 
+expr: tensor_literal
+    | fill_call
     | load_call
-    | matmul_call 
-    | add_call 
+    | matmul_call
+    | add_call
     | minus_call
     | mult_call
     | div_call
-    | relu_call 
+    | relu_call
     | sigmoid_call
     | gelu_call
     | swish_call
@@ -117,7 +117,7 @@ comparison_expr: expr comp_op expr
 
 comp_op: ">" | "<" | ">=" | "<=" | "==" | "!="
 
-reduction_call: ANY "(" NAME ")" | ALL "(" NAME ")"
+reduction_call: (ANY | ALL) "(" NAME ["," "axis" "=" NUMBER] ")"
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -261,7 +261,7 @@ linear_call: "linear" "(" NAME "," NAME "," NAME ")"
 backward_statement: "backward" "(" NAME ")"
 
 ////////////////////////////////////////////////////////////////////////////////
-// Tokens 
+// Tokens
 ////////////////////////////////////////////////////////////////////////////////
 NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
 NUMBER: /-?\d+(\.\d+)?/

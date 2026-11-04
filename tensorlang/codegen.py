@@ -24,6 +24,8 @@ class CodegenMixin:
     def _record_operation(self, op_type, name, inputs, metadata=None):
         if not AutogradContext.is_enabled():
             return
+        metadata = dict(metadata or {})
+        metadata.setdefault("branch_path", getattr(self, "_branch_path", ()))
         if any(self._should_track_gradients(inp) for inp in inputs):
             self.comp_graph.add_operation(op_type, name, inputs, metadata)
             self.requires_grad_tensors.add(name)
@@ -220,7 +222,8 @@ class CodegenMixin:
             input_shape = env[tensor_name]["shape"]
             size = int(np.prod([int(d) for d in input_shape])) if input_shape else 1
             self._record_operation(expr["type"], name, [tensor_name])
-            return generator.any_all(expr["type"], kernel_name, tensor_name, input_shape, dtype=env[tensor_name].get("dtype", "f32"))
+            axis = expr.get("axis")
+            return generator.any_all(expr["type"], kernel_name, tensor_name, input_shape, axis=axis, dtype=env[tensor_name].get("dtype", "f32"))
 
         if expr.get("type") == "sum":
             tensor_name = expr["tensor"]
@@ -238,18 +241,25 @@ class CodegenMixin:
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.mean(expr["type"], kernel_name, tensor_name, axis, input_shape, dtype=result_dtype)
 
-        if expr.get("type") in ("greater", "less", "equal"):
+        if expr.get("type") in ("greater", "less", "equal", "greater_equal", "less_equal", "not_equal"):
             arg1, arg2 = expr["args"]
             self._record_operation(expr["type"], name, [arg1, arg2])
             shape1, shape2 = env[arg1]["shape"], env[arg2]["shape"]
             output_shape = env[name]["shape"]
+            size = int(np.prod([int(d) for d in output_shape])) if output_shape else 1
+
             if expr.get("type") == "greater":
-                size = int(np.prod([int(d) for d in output_shape]))
                 return generator.greater_broadcast(expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size, dtype="f32")
+            if expr.get("type") == "greater_equal":
+                return generator.greater_equal_broadcast(expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size, dtype="f32")
             if expr.get("type") == "less":
                 return generator.less_broadcast(expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype="f32")
+            if expr.get("type") == "less_equal":
+                return generator.less_equal_broadcast(expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size, dtype="f32")
             if expr.get("type") == "equal":
                 return generator.equal(expr["type"], name, arg1, arg2, shape1, shape2, output_shape, dtype="f32")
+            if expr.get("type") == "not_equal":
+                return generator.not_equal_broadcast(expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size, dtype="f32")
 
         if expr.get("type") == "softmax":
             tensor_name = expr["tensor"]
@@ -430,11 +440,16 @@ class CodegenMixin:
                         cond_cuda += kstr
                 node["_condition_kernels"] = cond_kernels
 
+                _prev_branch_path = getattr(self, "_branch_path", ())
+                self._branch_path = _prev_branch_path + (f"{if_scope}_then",)
                 then_kernels, then_cuda, then_flat = self._generate_kernels_for_nodes(node.get("then", []), env, generator, scope_prefix=if_scope)
                 node["_then_kernels"] = then_kernels
                 node["_then_flat_items"] = then_flat
+                node["_then_branch_path"] = self._branch_path
+                self._branch_path = _prev_branch_path
 
                 elif_data = []
+                node["_elif_branch_paths"] = []
                 for elif_node in node.get("elifs", []):
                     e_synth_kernels = []
                     e_synth_cuda = ""
@@ -459,9 +474,12 @@ class CodegenMixin:
                             e_cond_cuda += kstr
                     elif_node["_condition_kernels"] = e_cond_kernels
 
+                    self._branch_path = _prev_branch_path + (f"{if_scope}_elif{len(node['_elif_branch_paths'])}",)
                     e_body_kernels, e_body_cuda, e_body_flat = self._generate_kernels_for_nodes(elif_node.get("body", []), env, generator, scope_prefix=if_scope)
                     elif_node["_body_kernels"] = e_body_kernels
                     elif_node["_body_flat_items"] = e_body_flat
+                    node["_elif_branch_paths"].append(self._branch_path)
+                    self._branch_path = _prev_branch_path
 
                     elif_data.append((elif_node, e_synth_kernels, e_cond_kernels, e_body_kernels, e_synth_cuda + e_cond_cuda + e_body_cuda))
 
@@ -469,9 +487,12 @@ class CodegenMixin:
                 else_cuda = ""
                 else_flat = []
                 if node.get("else") is not None:
+                    self._branch_path = _prev_branch_path + (f"{if_scope}_else",)
                     else_kernels, else_cuda, else_flat = self._generate_kernels_for_nodes(node["else"], env, generator, scope_prefix=if_scope)
                     node["_else_kernels"] = else_kernels
                     node["_else_flat_items"] = else_flat
+                    node["_else_branch_path"] = self._branch_path
+                    self._branch_path = _prev_branch_path
 
                 kernels.extend(synth_kernels)
                 kernels.extend(cond_kernels)
@@ -533,7 +554,14 @@ class CodegenMixin:
                 flat_items.append((None, node))
                 continue
 
-            if expr.get("type") in ("name", "tensor_literal", "load"):
+            if expr.get("type") == "name":
+                source_name = expr["name"]
+                if source_name in self.requires_grad_tensors:
+                    self.requires_grad_tensors.add(name)
+                self._record_operation("identity", name, [source_name])
+                flat_items.append((None, node))
+                continue
+            if expr.get("type") in ("tensor_literal", "load"):
                 flat_items.append((None, node))
                 continue
 

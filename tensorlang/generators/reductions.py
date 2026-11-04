@@ -1397,7 +1397,7 @@ extern "C" void launch_argmin_{name}(
             return kernel, kernel_info
 
 
-    def any_all(self, op_type, name, tensor_name, input_shape, dtype="f32"):
+    def any_all(self, op_type, name, tensor_name, input_shape, axis=None, dtype="f32"):
         size = int(np.prod([int(d) for d in input_shape])) if input_shape else 1
         in_dtype = dtype
         out_dtype = "f32"
@@ -1405,16 +1405,17 @@ extern "C" void launch_argmin_{name}(
         in_include = self._include(in_dtype)
         inp_read = lambda idx: self._read(in_dtype, "input", idx)
 
-        if op_type == "any":
-            init = "0.0f"
-            combine = "fmaxf"
-            update = f"if ({inp_read('i')} != 0.0f) partial = 1.0f;"
-        else:
-            init = "1.0f"
-            combine = "fminf"
-            update = f"if ({inp_read('i')} == 0.0f) partial = 0.0f;"
+        if axis is None:
+            if op_type == "any":
+                init = "0.0f"
+                combine = "fmaxf"
+                update = f"if ({inp_read('i')} != 0.0f) partial = 1.0f;"
+            else:
+                init = "1.0f"
+                combine = "fminf"
+                update = f"if ({inp_read('i')} == 0.0f) partial = 0.0f;"
 
-        kernel = in_include + f"""
+            kernel = in_include + f"""
 __global__ void {op_type}_full_kernel_{name}({in_ctype}* input, float* output, int size) {{
     extern __shared__ float sdata[];
     int tid = threadIdx.x;
@@ -1446,5 +1447,79 @@ extern "C" void launch_{op_type}_{name}({in_ctype}* input, float* output, int si
     {self.cuda_debug()}
 }}
 """
-        kernel_info = (f"{op_type}_full", name, tensor_name, None, size)
+            kernel_info = (f"{op_type}_full", name, tensor_name, None, size)
+            return kernel, kernel_info
+
+        ndim = len(input_shape)
+        if axis < 0:
+            axis += ndim
+        if axis < 0 or axis >= ndim:
+            raise ValueError(f"Axis {axis} out of bounds for shape {input_shape}")
+
+        out_shape = [int(d) for i, d in enumerate(input_shape) if i != axis]
+        num_outputs = int(np.prod(out_shape)) if out_shape else 1
+        axis_size = int(input_shape[axis])
+        in_shape_str = ", ".join(str(int(d)) for d in input_shape)
+
+        if op_type == "any":
+            init = "0.0f"
+            update = "if (val != 0.0f) partial = 1.0f;"
+        else:
+            init = "1.0f"
+            update = "if (val == 0.0f) partial = 0.0f;"
+
+        val_read = self._read(in_dtype, "input", "in_idx")
+
+        kernel = in_include + f"""
+__global__ void {op_type}_axis_nd_kernel_{name}(
+    {in_ctype}* input, float* output,
+    int num_outputs, int axis, int axis_size) {{
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= num_outputs) return;
+
+    const int in_shape[16] = {{{in_shape_str}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    int in_stride[16];
+    int acc = 1;
+    for (int i = {ndim - 1}; i >= 0; --i) {{
+        in_stride[i] = acc;
+        acc *= in_shape[i];
+    }}
+
+    int out_coords[16];
+    int remaining = out_idx;
+    for (int d = {ndim - 2}; d >= 0; --d) {{
+        int out_dim = (d < axis) ? in_shape[d] : in_shape[d + 1];
+        out_coords[d] = remaining % out_dim;
+        remaining /= out_dim;
+    }}
+
+    int base = 0;
+    for (int i = 0; i < {ndim}; ++i) {{
+        int coord = 0;
+        if (i != axis) {{
+            coord = out_coords[i < axis ? i : i - 1];
+        }}
+        base += coord * in_stride[i];
+    }}
+
+    int axis_stride = in_stride[axis];
+    float partial = {init};
+    for (int k = 0; k < axis_size; ++k) {{
+        int in_idx = base + k * axis_stride;
+        float val = {val_read};
+        {update}
+    }}
+    output[out_idx] = partial;
+}}
+extern "C" void launch_{op_type}_axis_nd_{name}(
+    {in_ctype}* input, float* output,
+    int num_outputs, int axis, int axis_size) {{
+    dim3 block(256);
+    dim3 grid((num_outputs + block.x - 1) / block.x);
+    {op_type}_axis_nd_kernel_{name}<<<grid, block>>>(input, output, num_outputs, axis, axis_size);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        kernel_info = (f"{op_type}_axis_nd", name, tensor_name, None, num_outputs, axis_size, axis)
         return kernel, kernel_info

@@ -359,6 +359,16 @@ class ExecutionMixin:
                 c_int(rows), c_int(cols),
             )
 
+        elif op_type in ("greater_equal_broadcast", "less_equal_broadcast", "not_equal_broadcast"):
+            op_name = op_type[:-len("_broadcast")]
+            rows, cols = dims
+            getattr(lib, f"launch_{op_name}_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(rows), c_int(cols),
+            )
+
         elif op_type in ("relu", "sigmoid", "tanh", "gelu", "swish"):
             op_name = op_type.split("_")[0]
             size = dims[0]
@@ -368,7 +378,7 @@ class ExecutionMixin:
                 c_int(size),
             )
 
-        elif op_type in ("greater", "less", "equal"):
+        elif op_type in ("greater", "less", "equal", "greater_equal", "less_equal", "not_equal"):
             size = dims[0]
             getattr(lib, f"launch_{op_type}_{kernel_func_name}")(
                 c_void_p(int(gpu_allocs[arg1])),
@@ -1017,9 +1027,9 @@ class ExecutionMixin:
             raise KeyError(f"_eval_if_condition: missing tensor '{name}'")
 
         arr = np.asarray(tensors[name]).reshape(-1)
-        if arr.size != 1:
-            raise ValueError(f"if condition must be scalar/single-element, got size {arr.size}")
-        return bool(arr[0] != 0)
+        if arr.size == 0:
+            return False
+        return bool(np.all(arr != 0))
 
     def _select_if_branch(self, node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir):
         if self._eval_if_condition(node, tensors, gpu_allocs, env, cuda):
@@ -1036,7 +1046,7 @@ class ExecutionMixin:
 
         return None, None, None
 
-    def _execute_if_branch(self, branch_nodes, branch_flat, branch_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
+    def _execute_if_branch(self, branch_nodes, branch_flat, branch_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda, branch_path=None):
         rebinds = [n for n in branch_nodes if n.get("type") == "rebind"]
         exec_nodes = [n for n in branch_nodes if n.get("type") != "rebind"]
 
@@ -1066,6 +1076,15 @@ class ExecutionMixin:
             if local_idx is None:
                 continue
             self._execute_single_kernel(branch_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+
+        backward_node = next((n for n in branch_nodes if n.get("type") == "backward"), None)
+        if backward_node is not None:
+            sync_names = set(tensors.keys()) | self._collect_executed_output_names(branch_flat)
+            self.comp_graph.active_branch_path = tuple(branch_path or ())
+            self._execute_backward_pass(
+                backward_node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda,
+                sync_names=sync_names, active_branch_path=branch_path or (),
+            )
 
         pending_gpu = {}
         pending_tensors = {}
@@ -1101,10 +1120,25 @@ class ExecutionMixin:
         selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
             node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
         )
+
+        branch_path = None
+        if selected_nodes is node.get("then", []):
+            branch_path = node.get("_then_branch_path")
+        elif selected_nodes is node.get("else", []):
+            branch_path = node.get("_else_branch_path")
+        else:
+            for i, elif_node in enumerate(node.get("elifs", [])):
+                if selected_nodes is elif_node.get("body", []):
+                    paths = node.get("_elif_branch_paths", [])
+                    branch_path = paths[i] if i < len(paths) else None
+                    break
+
+        node["_selected_branch_path"] = branch_path
         if selected_nodes is not None:
             self._execute_if_branch(
                 selected_nodes, selected_flat, selected_kernels,
-                lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                lib, gpu_allocs, env, tensors, cache_file_dir, cuda,
+                branch_path=branch_path,
             )
         node["_selected_branch_flat_items"] = selected_flat
         node["_selected_branch_kernels"] = selected_kernels
@@ -1132,3 +1166,113 @@ class ExecutionMixin:
             if local_idx is None:
                 continue
             self._execute_single_kernel(branch_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+
+    def _collect_executed_output_names(self, flat_items):
+        names = set()
+        for _, node in flat_items or []:
+            if node.get("type") == "let":
+                names.add(node["name"])
+            elif node.get("type") == "rebind":
+                names.add(node["name"])
+            elif node.get("type") == "for":
+                names |= self._collect_executed_output_names(node.get("_flat_items", []))
+            elif node.get("type") == "if":
+                names |= self._collect_executed_output_names(node.get("_selected_branch_flat_items", []))
+        return names
+
+    def _execute_backward_pass(self, loss_name, tensors, gpu_allocs, env, cache_file_dir, cuda, sync_names=None, active_branch_path=None):
+        if sync_names is None:
+            names_to_sync = set(gpu_allocs.keys()) & set(env.keys())
+        else:
+            names_to_sync = set(sync_names)
+        names_to_sync |= set(tensors.keys())
+
+        for name in names_to_sync:
+            if name in gpu_allocs and name in env:
+                shape = tuple(int(d) for d in env[name]["shape"])
+                np_dtype = self._np_dtype(env, name)
+                arr = np.empty(shape if shape else (1,), dtype=np_dtype)
+                cuda.memcpy_dtoh(arr, gpu_allocs[name])
+                tensors[name] = arr
+
+        for name, value in list(tensors.items()):
+            requires_grad = name in self.requires_grad_tensors
+            self.comp_graph.register_tensor(name, value, requires_grad)
+
+        scale = self._current_scale if getattr(self, "_current_scale", None) is not None else 1.0
+        self.comp_graph.active_branch_path = tuple(active_branch_path or ())
+        self._skip_optimizer = False
+
+        try:
+            self.comp_graph.gradients = {}
+            self.comp_graph.backward(loss_name, scale=scale, active_branch_path=self.comp_graph.active_branch_path)
+
+            for grad_name in self.comp_graph.requires_grad:
+                if grad_name not in self.comp_graph.gradients:
+                    continue
+                grad_tensor = self.comp_graph.gradients[grad_name]
+                if self.debug_mode:
+                    self.tensorlang.print(message=f"\nGradient {grad_name}.grad (scaled):\n{grad_tensor}")
+                if self.cache_layers:
+                    grad_cache_path = cache_file_dir / f"{grad_name}.grad.npy"
+                    np.save(grad_cache_path, grad_tensor)
+
+            self._overflow_detected = self.comp_graph.overflow_detected
+
+            if self._overflow_detected:
+                old_scale = self._current_scale
+                self._current_scale = max(self._current_scale / 2.0, 1.0)
+                self._scale_growth_counter = 0
+                self._skip_optimizer = True
+                if self.debug_mode:
+                    self.tensorlang.print(
+                        message=f"[COMPILER] Overflow detected — scale {old_scale} -> {self._current_scale}, skipping optimizer step"
+                    )
+            else:
+                self._skip_optimizer = False
+                for grad_name in self.comp_graph.requires_grad:
+                    if grad_name not in self.comp_graph.gradients:
+                        continue
+                    grad_tensor = self.comp_graph.gradients[grad_name]
+                    if scale != 1.0 and scale != 0.0:
+                        grad_tensor = grad_tensor / scale
+                    self.comp_graph.gradients[grad_name] = grad_tensor
+                    grad_tensor_name = f"{grad_name}_grad"
+                    tensors[grad_tensor_name] = grad_tensor
+                    if grad_tensor_name in gpu_allocs:
+                        cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                    else:
+                        gpu_allocs[grad_tensor_name] = cuda.mem_alloc(grad_tensor.nbytes)
+                        cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
+                    if grad_tensor.dtype == np.float16:
+                        grad_dtype_name = "f16"
+                    elif grad_tensor.dtype == np.float64:
+                        grad_dtype_name = "f64"
+                    else:
+                        grad_dtype_name = "f32"
+                    env[grad_tensor_name] = {
+                        "dtype": grad_dtype_name,
+                        "shape": tuple(int(d) for d in grad_tensor.shape),
+                    }
+                    if self.cache_layers:
+                        grad_var_cache_path = cache_file_dir / f"{grad_tensor_name}.npy"
+                        np.save(grad_var_cache_path, grad_tensor)
+
+                if getattr(self, "dynamic_loss_scale", False) and not self._overflow_detected:
+                    self._scale_growth_counter = getattr(self, "_scale_growth_counter", 0) + 1
+                    patience = getattr(self, "loss_scale_patience", 2000)
+                    if self._scale_growth_counter >= patience:
+                        old_scale = self._current_scale
+                        self._current_scale *= 2.0
+                        self._scale_growth_counter = 0
+                        if self.debug_mode:
+                            self.tensorlang.print(
+                                message=f"[COMPILER] Scale grown {old_scale} -> {self._current_scale} after {patience} successful steps"
+                            )
+
+        except (RuntimeError, ValueError, KeyError, OSError, TypeError) as e:
+            self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
+            import traceback
+            if self.debug_mode:
+                traceback.print_exc()
+

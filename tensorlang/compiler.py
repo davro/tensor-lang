@@ -297,6 +297,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         expr = node["expr"]
 
                         if expr.get("type") == "name":
+                            source_name = expr["name"]
+                            if source_name in self.requires_grad_tensors:
+                                self.requires_grad_tensors.add(name)
+                            self._record_operation("identity", name, [source_name])
                             continue
 
                         if self.debug_mode:
@@ -972,85 +976,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                         for node in ast:
                             if node.get("type") == "backward":
-                                loss_name = node["loss_tensor"]
-                                scale = self._current_scale if getattr(self, "_current_scale", None) is not None else 1.0
-                                self._skip_optimizer = False
-                                print(f"\n{'=' * 80}")
-                                print(f"BACKWARD PASS from '{loss_name}' (loss_scale={scale})")
-                                print("=" * 80)
-                                try:
-                                    self.comp_graph.backward(loss_name, scale=scale)
-                                    for grad_name in self.comp_graph.requires_grad:
-                                        if grad_name not in self.comp_graph.gradients:
-                                            continue
-                                        grad_tensor = self.comp_graph.gradients[grad_name]
-                                        print(f"\nGradient {grad_name}.grad (scaled):\n{grad_tensor}")
-                                        if self.cache_layers:
-                                            grad_cache_path = cache_file_dir / f"{grad_name}.grad.npy"
-                                            np.save(grad_cache_path, grad_tensor)
-                                    print("=" * 80)
-                                    # Overflow detection
-                                    self._overflow_detected = self.comp_graph.overflow_detected
-
-                                    if self._overflow_detected:
-                                        # Reduce scale, skip optimizer step
-                                        old_scale = self._current_scale
-                                        self._current_scale = max(self._current_scale / 2.0, 1.0)
-                                        self._scale_growth_counter = 0
-                                        self._skip_optimizer = True
-                                        print(f"[COMPILER] Overflow detected — scale {old_scale} -> {self._current_scale}, skipping optimizer step")
-                                    else:
-                                        self._skip_optimizer = False
-                                        for grad_name in self.comp_graph.requires_grad:
-                                            if grad_name in self.comp_graph.gradients:
-                                                grad_tensor = self.comp_graph.gradients[grad_name]
-                                                # Unscale
-                                                if scale != 1.0 and scale != 0.0:
-                                                    grad_tensor = grad_tensor / scale
-                                                self.comp_graph.gradients[grad_name] = grad_tensor
-                                                grad_tensor_name = f"{grad_name}_grad"
-                                                tensors[grad_tensor_name] = grad_tensor
-                                                if grad_tensor_name in gpu_allocs:
-                                                    cuda.memcpy_htod(gpu_allocs[grad_tensor_name], grad_tensor)
-                                                    if self.debug_mode:
-                                                        self.tensorlang.print(message=f"[COMPILER] [Autograd] Copied gradient {grad_tensor_name} to GPU")
-                                                else:
-                                                    if self.debug_mode:
-                                                        self.tensorlang.print(message=f"[COMPILER] [Autograd] Warning: {grad_tensor_name} not in GPU allocations")
-                                                # Use actual gradient dtype, not forward tensor dtype
-                                                if grad_tensor.dtype == np.float16:
-                                                    grad_dtype_name = "f16"
-                                                elif grad_tensor.dtype == np.float64:
-                                                    grad_dtype_name = "f64"
-                                                else:
-                                                    grad_dtype_name = "f32"
-                                                env[grad_tensor_name] = {
-                                                    "dtype": grad_dtype_name,
-                                                    "shape": tuple(int(d) for d in grad_tensor.shape),
-                                                }
-                                                if self.debug_mode:
-                                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Made gradient accessible: {grad_tensor_name}")
-                                                if self.cache_layers:
-                                                    grad_var_cache_path = cache_file_dir / f"{grad_tensor_name}.npy"
-                                                    np.save(grad_var_cache_path, grad_tensor)
-
-                                        # Dynamic scale growth
-                                        if self.dynamic_loss_scale and not self._overflow_detected:
-                                            self._scale_growth_counter += 1
-                                            if self._scale_growth_counter >= self.loss_scale_patience:
-                                                old_scale = self._current_scale
-                                                self._current_scale *= 2.0
-                                                self._scale_growth_counter = 0
-                                                if self.debug_mode:
-                                                    self.tensorlang.print(
-                                                        message=f"[COMPILER] Scale grown {old_scale} -> {self._current_scale} after {self.loss_scale_patience} successful steps"
-                                                    )
-
-                                except (RuntimeError, ValueError, KeyError, OSError, TypeError) as e:
-                                    self.tensorlang.print(message=f"[COMPILER] [Autograd] Error during backward pass: {e}")
-                                    if self.debug_mode:
-                                        traceback.print_exc()
-
+                                self._execute_backward_pass(node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda)
+                                continue
 
                         if backward_index is not None:
                             for ast_idx in range(backward_index + 1, len(ast)):
