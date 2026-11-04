@@ -799,14 +799,6 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                     try:
                         lib = cdll.LoadLibrary(os.path.abspath(str(kernel_so_path)))
 
-                        backward_index = None
-                        for i, node in enumerate(ast):
-                            if node.get("type") == "backward":
-                                backward_index = i
-                                if self.debug_mode:
-                                    self.tensorlang.print(message=f"[COMPILER] CUDA Execute: found backward() at AST index {i}")
-                                break
-
                         for name, info in env.items():
                             if name.endswith("_grad"):
                                 continue
@@ -883,77 +875,61 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     ast_to_kernel_map[ast_idx] = kernel_idx
                                     kernel_idx += 1
 
-                        if backward_index is not None:
-                            if self.debug_mode:
-                                self.tensorlang.print(
-                                    message=f"[COMPILER] CUDA Execute: {len([k for a, k in ast_to_kernel_map.items() if a < backward_index])} kernels before backward"
+                        # Execute statements in source order.  backward() is handled
+                        # inline, so more than one backward pass is supported.
+                        for ast_idx, node in enumerate(ast):
+                            if node.get("type") == "if":
+                                for k in node.get("_condition_kernels", []):
+                                    self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
+                                selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
+                                    node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
                                 )
-                            for ast_idx in range(backward_index):
-                                node = ast[ast_idx]
-                                if node.get("type") == "if":
-                                    for k in node.get("_condition_kernels", []):
-                                        self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
-                                    selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
-                                        node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
-                                    )
-                                    if selected_nodes is not None:
-                                        self._execute_if_branch(
-                                            selected_nodes, selected_flat, selected_kernels,
-                                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                        )
-                                    node["_selected_branch_flat_items"] = selected_flat
-                                    node["_selected_branch_kernels"] = selected_kernels
-                                    continue
-                                if ast_idx in ast_to_kernel_map:
-                                    k_idx = ast_to_kernel_map[ast_idx]
-                                    if k_idx < len(kernels):
-                                        self._execute_single_kernel(
-                                            kernels[k_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                        )
-                                elif ast[ast_idx].get("type") == "for":
-                                    self._execute_for_loop(
-                                        ast[ast_idx], kernels, ast_to_kernel_map,
+                                if selected_nodes is not None:
+                                    self._execute_if_branch(
+                                        selected_nodes, selected_flat, selected_kernels,
                                         lib, gpu_allocs, env, tensors, cache_file_dir, cuda
                                     )
-                                elif (
-                                    ast[ast_idx].get("type") == "let"
-                                    and isinstance(ast[ast_idx].get("expr"), dict)
-                                    and ast[ast_idx]["expr"].get("type") == "name"
-                                ):
-                                    self._resolve_alias_inline(ast[ast_idx], gpu_allocs, tensors)
-                        else:
-                            for ast_idx, node in enumerate(ast):
-                                if node.get("type") == "if":
-                                    for k in node.get("_condition_kernels", []):
-                                        self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
-                                    selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
-                                        node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
-                                    )
-                                    if selected_nodes is not None:
-                                        self._execute_if_branch(
-                                            selected_nodes, selected_flat, selected_kernels,
-                                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                        )
-                                    node["_selected_branch_flat_items"] = selected_flat
-                                    node["_selected_branch_kernels"] = selected_kernels
-                                    continue
-                                if node.get("type") == "for":
-                                    self._execute_for_loop(
-                                        node, kernels, ast_to_kernel_map,
-                                        lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                    )
-                                elif ast_idx in ast_to_kernel_map:
-                                    k_idx = ast_to_kernel_map[ast_idx]
-                                    if k_idx < len(kernels):
-                                        self._execute_single_kernel(
-                                            kernels[k_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                        )
-                                elif (
-                                    node.get("type") == "let"
+                                node["_selected_branch_flat_items"] = selected_flat
+                                node["_selected_branch_kernels"] = selected_kernels
+                                continue
+
+                            if node.get("type") == "for":
+                                self._execute_for_loop(
+                                    node, kernels, ast_to_kernel_map,
+                                    lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                                )
+                                continue
+
+                            if node.get("type") == "backward":
+                                self._execute_backward_pass(
+                                    node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda
+                                )
+                                continue
+
+                            if (node.get("type") == "let"
                                     and isinstance(node.get("expr"), dict)
-                                    and node["expr"].get("type") == "name"
-                                ):
-                                    self._resolve_alias_inline(node, gpu_allocs, tensors)
+                                    and node["expr"].get("type") == "name"):
+                                self._resolve_alias_inline(node, gpu_allocs, tensors)
+                                continue
+
+                            if (node.get("type") == "let"
+                                    and isinstance(node.get("expr"), dict)
+                                    and node["expr"].get("type") in ("tensor_literal", "load")):
+                                continue
+
+                            if ast_idx in ast_to_kernel_map:
+                                k_idx = ast_to_kernel_map[ast_idx]
+                                if k_idx < len(kernels):
+                                    is_optimizer = (node.get("type") in OPTIMIZER_NAMES
+                                                    or (node.get("type") == "call"
+                                                        and node.get("name") in OPTIMIZER_NAMES))
+                                    if is_optimizer and getattr(self, "_skip_optimizer", False):
+                                        if self.debug_mode:
+                                            self.tensorlang.print(message="[COMPILER] Skipping optimizer step (overflow)")
+                                        continue
+                                    self._execute_single_kernel(
+                                        kernels[k_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
+                                    )
 
                         for node in ast:
                             if node.get("type") == "let" and isinstance(node.get("expr"), dict) and node["expr"].get("type") == "name":
@@ -974,44 +950,6 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 self.tensorlang.print(message=f"[COMPILER] [Autograd] CUDA Execute: registered '{name}' with gradient tracking")
 
 
-                        for node in ast:
-                            if node.get("type") == "backward":
-                                self._execute_backward_pass(node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda)
-                                continue
-
-                        if backward_index is not None:
-                            for ast_idx in range(backward_index + 1, len(ast)):
-                                node = ast[ast_idx]
-                                if node.get("type") == "if":
-                                    selected_flat = node.get("_selected_branch_flat_items")
-                                    selected_kernels = node.get("_selected_branch_kernels")
-                                    if selected_flat is not None:
-                                        self._execute_if_branch_post(
-                                            selected_flat, selected_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                        )
-                                    continue
-
-                                is_optimizer = (node.get("type") in OPTIMIZER_NAMES or
-                                                (node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES))
-                                if is_optimizer and getattr(self, "_skip_optimizer", False):
-                                    if self.debug_mode:
-                                        self.tensorlang.print(
-                                            message=f"[COMPILER] Skipping optimizer step (overflow)"
-                                        )
-                                    continue
-
-                                if ast_idx in ast_to_kernel_map:
-                                    k_idx = ast_to_kernel_map[ast_idx]
-                                    if k_idx < len(kernels):
-                                        self._execute_single_kernel(
-                                            kernels[k_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                        )
-                                elif (
-                                    ast[ast_idx].get("type") == "let"
-                                    and isinstance(ast[ast_idx].get("expr"), dict)
-                                    and ast[ast_idx]["expr"].get("type") == "name"
-                                ):
-                                    self._resolve_alias_inline(ast[ast_idx], gpu_allocs, tensors)
 
                         save_count = sum(1 for n in ast if n.get("type") == "save")
                         if save_count > 0:

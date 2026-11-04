@@ -4,6 +4,8 @@ TensorLang Type Checker
 File: tensorlang/type_checker.py
 """
 
+import copy
+import copy
 import numpy as np
 
 from tensorlang.tensor_lang import TensorLang
@@ -117,10 +119,6 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     count += _count_backward(n.get("else", []))
         return count
 
-    if _count_backward(ast) > 1:
-        tensorlang.print(message="[TYPE CHECKER] error: at most one backward() is supported per compilation")
-        return False, env
-
     # ================================================================
     # PASS 1: Type check all statements
     # ================================================================
@@ -207,10 +205,41 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensorlang.print(message="[TYPE CHECKER] error: Unsupported if condition")
                     return False, env
 
-            for branch in [node.get("then", [])] + [e.get("body", []) for e in node.get("elifs", [])] + ([node.get("else")] if node.get("else") is not None else []):
-                success, env = type_checker(branch, env, DEBUG_INFO, DEBUG_MODE)
+            branch_specs = [node.get("then", [])] + [e.get("body", []) for e in node.get("elifs", [])]
+            if node.get("else") is not None:
+                branch_specs.append(node.get("else"))
+
+            branch_envs = []
+            for branch in branch_specs:
+                branch_env = copy.deepcopy(env)
+                success, branch_env = type_checker(branch, branch_env, DEBUG_INFO, DEBUG_MODE)
                 if not success:
                     return False, env
+                branch_envs.append(branch_env)
+
+            # Enforce matching shapes/dtypes for names appearing in multiple branches.
+            all_names = set()
+            for branch_env in branch_envs:
+                all_names.update(branch_env.keys())
+            for name in all_names:
+                present = [branch_env[name] for branch_env in branch_envs if name in branch_env]
+                if len(present) > 1:
+                    first = present[0]
+                    for other in present[1:]:
+                        if (other.get("dtype") != first.get("dtype")
+                                or tuple(other.get("shape", ())) != tuple(first.get("shape", ()))):
+                            tensorlang.print(
+                                message=f"[TYPE CHECKER] error: branch shape/dtype mismatch for '{name}': "
+                                        f"{first} vs {other}"
+                            )
+                            return False, env
+
+            # Merge branch results into the enclosing environment.
+            for name in all_names:
+                for branch_env in branch_envs:
+                    if name in branch_env:
+                        env[name] = branch_env[name]
+                        break
             continue
 
         if node.get("type") == "rebind":

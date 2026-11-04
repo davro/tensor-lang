@@ -319,6 +319,12 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False, source_code=None) 
                     if for_node:
                         ast.append(for_node)
 
+    # Inline user-defined functions that appear in for/if bodies.
+    ast = _inline_user_functions_in_nodes(ast, functions, [0])
+
+    # Inline user-defined functions that appear in for/if bodies.
+    ast = _inline_user_functions_in_nodes(ast, functions, [0])
+
     # Default to last tensor if no explicit output
     if not output_tensor and ast:
         # Find the last 'let' statement (skip backward statements)
@@ -1405,3 +1411,106 @@ def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
         }
 
     return build_expression(tree, DEBUG_MODE, DEBUG_INFO)
+
+
+def _inline_user_functions_in_nodes(nodes, functions, counter):
+    """Inline user-defined function calls that remain in for/if bodies."""
+    if not isinstance(nodes, list):
+        return nodes
+
+    result = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            result.append(node)
+            continue
+
+        if (node.get("type") == "let"
+                and isinstance(node.get("expr"), dict)
+                and node["expr"].get("type") == "user_function_call"):
+            func_name = node["expr"].get("func_name")
+            if func_name in functions:
+                counter[0] += 1
+                inlined_stmts, return_name = inline_function_call(
+                    functions[func_name],
+                    node["expr"].get("args", []),
+                    {},
+                    f"{func_name}_{counter[0]}",
+                )
+                inlined_stmts = _inline_user_functions_in_nodes(inlined_stmts, functions, counter)
+
+                expanded_stmts = []
+                local_mappings = {}
+                for stmt in inlined_stmts:
+                    if (isinstance(stmt, dict)
+                            and stmt.get("type") == "let"
+                            and isinstance(stmt.get("expr"), dict)
+                            and stmt["expr"].get("type") == "user_function_call"
+                            and stmt["expr"].get("func_name") in functions):
+                        nested_func_name = stmt["expr"]["func_name"]
+                        counter[0] += 1
+                        nested_inlined, nested_return = inline_function_call(
+                            functions[nested_func_name],
+                            stmt["expr"].get("args", []),
+                            {},
+                            f"{nested_func_name}_{counter[0]}",
+                        )
+                        nested_inlined = _inline_user_functions_in_nodes(nested_inlined, functions, counter)
+                        expanded_stmts.extend(nested_inlined)
+                        if nested_return:
+                            local_mappings[stmt["name"]] = nested_return
+                    else:
+                        if (isinstance(stmt, dict)
+                                and stmt.get("type") == "let"
+                                and isinstance(stmt.get("expr"), dict)
+                                and "args" in stmt["expr"]):
+                            new_args = []
+                            for arg in stmt["expr"]["args"]:
+                                if isinstance(arg, str):
+                                    new_args.append(local_mappings.get(arg, arg))
+                                elif isinstance(arg, dict) and arg.get("type") == "name":
+                                    resolved = local_mappings.get(arg["name"], arg["name"])
+                                    new_args.append(resolved)
+                                else:
+                                    new_args.append(arg)
+                            stmt["expr"]["args"] = new_args
+                        if (isinstance(stmt, dict)
+                                and stmt.get("type") == "let"
+                                and isinstance(stmt.get("expr"), dict)
+                                and isinstance(stmt["expr"].get("tensors"), list)):
+                            stmt["expr"]["tensors"] = [
+                                local_mappings.get(t, t) for t in stmt["expr"]["tensors"]
+                            ]
+                        if (isinstance(stmt, dict)
+                                and stmt.get("type") == "let"
+                                and isinstance(stmt.get("expr"), dict)
+                                and "tensor" in stmt["expr"]):
+                            t = stmt["expr"]["tensor"]
+                            stmt["expr"]["tensor"] = local_mappings.get(t, t)
+                        expanded_stmts.append(stmt)
+
+                if return_name:
+                    expanded_stmts.append({
+                        "type": "let",
+                        "name": node["name"],
+                        "ty": node.get("ty"),
+                        "expr": {"type": "name", "name": return_name},
+                        "requires_grad": node.get("requires_grad", False),
+                        "tree": None,
+                    })
+                result.extend(expanded_stmts)
+                continue
+
+        if node.get("type") == "for":
+            node["body"] = _inline_user_functions_in_nodes(node.get("body", []), functions, counter)
+        if node.get("type") == "if":
+            node["then"] = _inline_user_functions_in_nodes(node.get("then", []), functions, counter)
+            new_elifs = []
+            for elif_node in node.get("elifs", []):
+                elif_node["body"] = _inline_user_functions_in_nodes(elif_node.get("body", []), functions, counter)
+                new_elifs.append(elif_node)
+            node["elifs"] = new_elifs
+            if node.get("else") is not None:
+                node["else"] = _inline_user_functions_in_nodes(node["else"], functions, counter)
+
+        result.append(node)
+    return result

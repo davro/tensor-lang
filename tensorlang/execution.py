@@ -698,6 +698,26 @@ class ExecutionMixin:
             if self.debug_mode:
                 self.tensorlang.print(type="[COMPILER]", message=f"Result {name} ({op_type}):\n{output}")
 
+    def _materialize_let_tensor(self, node, env, tensors, gpu_allocs, cache_file_dir, cuda):
+        name = node["name"]
+        expr = node.get("expr", {})
+        if expr.get("type") == "tensor_literal":
+            shape = tuple(int(d) for d in env[name]["shape"])
+            np_dtype = self._np_dtype(env, name)
+            tensors[name] = np.array(expr["data"], dtype=np_dtype).reshape(shape)
+        elif expr.get("type") == "load":
+            loaded_data, metadata = self._load_data_file(expr["file_path"], expr.get("array_name"))
+            target_dtype = self._np_dtype(env, name)
+            tensors[name] = loaded_data.astype(target_dtype)
+        else:
+            return
+        alloc = self._ensure_gpu_alloc(name, env, tensors, gpu_allocs, cuda)
+        gpu_allocs[name] = alloc
+        if node.get("requires_grad"):
+            self.requires_grad_tensors.add(name)
+        if self.cache_layers:
+            np.save(cache_file_dir / f"{name}.npy", tensors[name])
+
     def _resolve_alias_inline(self, node, gpu_allocs, tensors):
         alias_name = node["name"]
         source_name = node["expr"]["name"]
@@ -806,6 +826,11 @@ class ExecutionMixin:
                         and isinstance(node.get("expr"), dict)
                         and node["expr"].get("type") == "name"):
                     self._resolve_alias_inline(node, gpu_allocs, tensors)
+                    continue
+                if (node.get("type") == "let"
+                        and isinstance(node.get("expr"), dict)
+                        and node["expr"].get("type") in ("tensor_literal", "load")):
+                    self._materialize_let_tensor(node, env, tensors, gpu_allocs, cache_file_dir, cuda)
                     continue
 
                 if local_idx is None:
@@ -937,6 +962,11 @@ class ExecutionMixin:
                                 and node["expr"].get("type") == "name"):
                             self._resolve_alias_inline(node, gpu_allocs, tensors)
                             continue
+                        if (node.get("type") == "let"
+                                and isinstance(node.get("expr"), dict)
+                                and node["expr"].get("type") in ("tensor_literal", "load")):
+                            self._materialize_let_tensor(node, env, tensors, gpu_allocs, cache_file_dir, cuda)
+                            continue
 
                         if local_idx is None:
                             continue
@@ -1057,6 +1087,12 @@ class ExecutionMixin:
                 and node["expr"].get("type") == "name"
             ):
                 self._resolve_alias_inline(node, gpu_allocs, tensors)
+            if (
+                node.get("type") == "let"
+                and isinstance(node.get("expr"), dict)
+                and node["expr"].get("type") in ("tensor_literal", "load")
+            ):
+                self._materialize_let_tensor(node, env, tensors, gpu_allocs, cache_file_dir, cuda)
 
         for local_idx, branch_node in branch_flat:
             if branch_node.get("type") in ("backward", "save", "rebind"):
@@ -1073,6 +1109,13 @@ class ExecutionMixin:
                 and branch_node["expr"].get("type") == "name"
             ):
                 self._resolve_alias_inline(branch_node, gpu_allocs, tensors)
+            if (
+                branch_node.get("type") == "let"
+                and isinstance(branch_node.get("expr"), dict)
+                and branch_node["expr"].get("type") in ("tensor_literal", "load")
+            ):
+                self._materialize_let_tensor(branch_node, env, tensors, gpu_allocs, cache_file_dir, cuda)
+                continue
             if local_idx is None:
                 continue
             self._execute_single_kernel(branch_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
