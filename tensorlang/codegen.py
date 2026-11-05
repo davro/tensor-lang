@@ -438,7 +438,11 @@ class CodegenMixin:
                     if kstr is not None:
                         cond_kernels.append(kinfo)
                         cond_cuda += kstr
-                node["_condition_kernels"] = cond_kernels
+                # Synthetic bindings (e.g. a scalar literal lowered to a fill) must run
+                # BEFORE the comparison kernel, so they belong in the executed list.
+                # cond_kernels itself stays comparison-only: synth_kernels are added to
+                # the global kernel list separately below.
+                node["_condition_kernels"] = synth_kernels + cond_kernels
 
                 _prev_branch_path = getattr(self, "_branch_path", ())
                 self._branch_path = _prev_branch_path + (f"{if_scope}_then",)
@@ -472,7 +476,7 @@ class CodegenMixin:
                         if kstr is not None:
                             e_cond_kernels.append(kinfo)
                             e_cond_cuda += kstr
-                    elif_node["_condition_kernels"] = e_cond_kernels
+                    elif_node["_condition_kernels"] = e_synth_kernels + e_cond_kernels
 
                     self._branch_path = _prev_branch_path + (f"{if_scope}_elif{len(node['_elif_branch_paths'])}",)
                     e_body_kernels, e_body_cuda, e_body_flat = self._generate_kernels_for_nodes(elif_node.get("body", []), env, generator, scope_prefix=if_scope)
