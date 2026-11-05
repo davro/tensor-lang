@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.3 released (tensor-valued control flow, `any()`/`all()`, comparison operators, and `backward()` inside branches complete). Core suite: 196/196 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.4 released (user-defined functions and file I/O in loop bodies, `batch_norm`/`instance_norm` autograd, multiple `backward()` statements, and branch shape/dtype consistency complete). Core suite: 216/216 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.4 — remaining parity items.
+> **Current focus:** v0.5.5 — next parity items.
 
 ---
 
@@ -103,20 +103,24 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **`any()` / `all()` reductions** — full and axis reductions, N-D aware, f16 support, zero gradients for autograd
 * **Tensor-valued control flow** — `if` / `elif` / `else` conditions may be multi-element tensors; truthiness is all-nonzero
 * **Comparison operators in conditions** — `>`, `<`, `==`, `>=`, `<=`, `!=` with N-D broadcasting
-* **`backward()` inside branches** — supported in a selected branch, with branch-aware autograd and at most one backward pass per compilation
+* **`backward()` inside branches** — supported in a selected branch, with branch-aware autograd
+* **User-defined functions in loop bodies** — inlined in `for` and `if`/`elif`/`else` bodies
+* **File I/O in loop bodies** — `load()` and `save()` are supported inside `for` loops
+* **`batch_norm` / `instance_norm` autograd** — gradients are wired, with simplified N-D reductions
+* **Multiple `backward()` statements per compilation** — supported in source order
+* **Branch shape/dtype consistency** — matching shapes and dtypes are enforced across `if` / `elif` / `else` branches
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented. Branch shape/dtype consistency is not yet enforced. `backward()` inside branches is limited to at most one backward pass per compilation.
+* **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented. Branch shape/dtype consistency is enforced. `backward()` inside a selected branch is supported; nested branch backward and mixed-truthiness edge cases continue to be expanded.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
-* **For-loop bodies:** broad operation parity with top-level is now implemented; remaining gaps are user-defined functions and file I/O other than `save()`.
+* **For-loop bodies:** broad operation parity with top-level is now implemented, including user-defined functions and file I/O other than `save()`. Remaining constraints are integer loop counts and name-on-RHS rebinding.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
 * **`instance_norm`** N-D uses simplified spatial-dim flattening.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
 * **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
-* **Single backward pass per compilation** — multiple `backward()` statements in one file are not supported.
 * **Autograd N-D limitations** — `batch_norm`/`instance_norm` gradients are simplified.
 * **Dynamic loss scaling** — overflow detection works but scale growth interval defaults to 2000 steps; may need tuning for short training runs.
 
@@ -405,15 +409,10 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `greater`, `less`, `equal` | Yes (zero) | Non-differentiable; gradient is zero |
 | `>=`, `<=`, `!=` | Yes (zero) | Non-differentiable; gradient is zero |
 | `any`, `all` | Yes (zero) | Non-differentiable; gradient is zero |
+| `batch_norm` | Yes | Wired with simplified N-D reductions |
+| `instance_norm` | Yes | Wired with simplified N-D reductions |
 
 Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computation uses NumPy's type promotion (may upcast to f32 internally).
-
-### Not Currently Wired into Autograd
-
-The following operations are present in the language but are **not currently recorded for gradient computation**:
-
-* `batch_norm`
-* `instance_norm`
 
 ### Autograd Notes
 
@@ -422,6 +421,7 @@ The following operations are present in the language but are **not currently rec
 * `cross_entropy` expects probability tensors, not logits.
 * `argmax`/`argmin` gradients use one-hot scatter (non-standard but useful for hard selection).
 * `max`/`min` reduction gradients flow to all tied extrema (not divided).
+* `batch_norm` and `instance_norm` gradients are wired, but use simplified N-D reductions.
 
 ---
 
@@ -500,8 +500,8 @@ for epoch in range(10) {
 
 ### Limitations
 
-* **Single backward pass** — multiple `backward()` statements in one file are not supported.
-* **FP16 master weights** — ✅ now supported (see below).
+* **FP16 master weights** — supported (see below).
+* Multiple `backward()` statements are supported; each backward pass resets and recomputes gradients.
 
 ---
 
@@ -599,6 +599,8 @@ Both compile to the same CUDA kernels. Inline expressions are flattened into syn
 * **Kernel symbols** generated inside loop bodies are scoped with a `loopN_` prefix, so the same tensor name can be reused across loop iterations, multiple loops, and top-level code without CUDA symbol collisions
 * **Loss scaling** — works inside loops via `# loss_scale` pragma
 * **FP16 master weights** — works inside loops; master buffer persists across iterations
+* **User-defined functions in loop bodies** — inlined in `for` and `if`/`elif`/`else` bodies
+* **File I/O in loop bodies** — `load()` and `save()` are supported inside `for` loops
 
 ### Training Loop Constraints
 
@@ -621,19 +623,11 @@ Loop bodies now have broad operation parity with top-level, including:
 * slicing, `reshape`, `transpose`, `concat`
 * `fill`
 * `save()`
+* `load()`
+* user-defined functions
 * nested `for` loops
 * `let` bindings and rebinds
 * `backward()`
-
-Remaining loop-body gaps are user-defined functions and file I/O other than `save()`.
-
-### Rebinding
-
-```text
-w = w_updated
-```
-
-This swaps GPU buffer pointers rather than copying memory.
 
 ---
 
@@ -883,6 +877,11 @@ The suite covers:
 * Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
 * FP16 master weights (Adam optimizer)
 * For-loop body parity (`for_loop_body_parity.tl`)
+* User-defined functions in loop bodies
+* File I/O in loop bodies
+* Multiple `backward()` statements
+* Branch shape/dtype consistency
+* `batch_norm` / `instance_norm` autograd
 
 Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
 
@@ -983,14 +982,10 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.4 (planned)
+### v0.5.5 (planned)
 
-* **User-defined functions and file I/O in loop bodies:** support user-defined functions and file I/O other than `save()` inside `for` loops.
-* **Autograd wiring for `batch_norm` and `instance_norm`.**
-* **Branch consistency checks:** enforce matching shapes/dtypes across `if` / `elif` / `else` branches.
-* **Multiple `backward()` statements:** support more than one backward pass per compilation where semantically valid.
-* **Comparison operators beyond conditions:** expose `>=`, `<=`, and `!=` as general tensor operations if desired.
-* **Additional control-flow edge cases:** mixed truthiness, nested branch backward, and loop-interaction cases.
+* Additional control-flow edge cases: mixed truthiness, nested branch backward, and loop-interaction cases.
+* Comparison operators beyond conditions: expose `>=`, `<=`, and `!=` as general tensor operations if desired.
 
 ### Short Term
 

@@ -711,8 +711,21 @@ class ExecutionMixin:
             tensors[name] = loaded_data.astype(target_dtype)
         else:
             return
+        # Validate loaded/literal data against the declared shape (loop bodies skip
+        # the top-level shape check done in compiler.py).
+        declared = tuple(int(d) for d in env[name]["shape"])
+        if tuple(tensors[name].shape) != declared:
+            raise ValueError(
+                f"[COMPILER] Shape mismatch for '{name}': data has shape "
+                f"{tuple(tensors[name].shape)}, declared {declared}"
+            )
         alloc = self._ensure_gpu_alloc(name, env, tensors, gpu_allocs, cuda)
         gpu_allocs[name] = alloc
+        # _ensure_gpu_alloc returns an existing buffer without uploading, and the
+        # compiler pre-allocates every env name (including loop-local ones) before
+        # execution.  Always push the freshly materialised host data to the GPU.
+        np_dtype = self._np_dtype(env, name)
+        cuda.memcpy_htod(alloc, np.ascontiguousarray(tensors[name], dtype=np_dtype))
         if node.get("requires_grad"):
             self.requires_grad_tensors.add(name)
         if self.cache_layers:

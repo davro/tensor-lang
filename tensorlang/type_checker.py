@@ -124,7 +124,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
     # ================================================================
     for node in ast:
         if node.get("type") == "if":
-            for synth in node.get("_condition_synthetics", []):
+            for synth in list(node.get("_condition_synthetics", [])) + [
+                s for e in node.get("elifs", []) for s in e.get("_condition_synthetics", [])
+            ]:
                 success, env = type_checker([synth], env, DEBUG_INFO, DEBUG_MODE)
                 if not success:
                     return False, env

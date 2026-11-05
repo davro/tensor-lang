@@ -1283,6 +1283,29 @@ def build_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
     return []
 
 
+def _scalar_literal_to_fill(expr_node):
+    """Rewrite a bare numeric literal into a (1,) f32 fill so the type checker,
+    codegen and broadcasting comparison kernels treat it like any other tensor."""
+    if isinstance(expr_node, dict) and expr_node.get("type") == "number":
+        return {"type": "fill", "value": float(expr_node["value"]), "shape": (1,)}
+    return expr_node
+
+
+def _flatten_comparison_operands(condition, synthetics, DEBUG_MODE=False):
+    if not (isinstance(condition, dict) and condition.get("type") == "comparison"):
+        return
+    for side in ("left", "right"):
+        operand = condition.get(side)
+        before = len(synthetics)
+        is_scalar = isinstance(operand, dict) and operand.get("type") == "number"
+        if is_scalar:
+            operand = _scalar_literal_to_fill(operand)
+        name = _flatten_expr_to_name(operand, synthetics, DEBUG_MODE)
+        if is_scalar:
+            synthetics[-1]["ty"] = {"dtype": "f32", "shape": (1,)}
+        condition[side] = {"type": "name", "name": name}
+
+
 def build_if_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
     """Parse: if condition { ... } (elif condition { ... })* (else { ... })?"""
     if tree.data != 'if_statement':
@@ -1305,9 +1328,7 @@ def build_if_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
             then_body.extend(build_statement(inner, DEBUG_MODE, DEBUG_INFO))
 
     synthetics = []
-    if isinstance(condition, dict) and condition.get("type") == "comparison":
-        condition["left"] = {"type": "name", "name": _flatten_expr_to_name(condition.get("left"), synthetics, DEBUG_MODE)}
-        condition["right"] = {"type": "name", "name": _flatten_expr_to_name(condition.get("right"), synthetics, DEBUG_MODE)}
+    _flatten_comparison_operands(condition, synthetics, DEBUG_MODE)
 
     node = {
         "type": "if",
@@ -1334,10 +1355,13 @@ def build_elif_clause(tree, DEBUG_MODE=False, DEBUG_INFO=False):
             inner = child.children[0] if child.children else child
             body.extend(build_statement(inner, DEBUG_MODE, DEBUG_INFO))
 
+    synthetics = []
+    _flatten_comparison_operands(condition, synthetics, DEBUG_MODE)
     return {
         'type': 'elif',
         'condition': condition,
         'body': body,
+        '_condition_synthetics': synthetics,
     }
 
 
