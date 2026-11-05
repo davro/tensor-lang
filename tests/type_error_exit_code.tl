@@ -16,7 +16,8 @@
 //   is handled: unlike every other test in this directory, it does not
 //   use an @EXPECTED block and does not run to a successful save().
 //
-// @EXPECT_FAILURE
+// @EXPECT_FAILURE: matmul: shape mismatch
+// @EXPECT_FAILURE: Inner dimensions must match
 
 let x: Tensor[f32, (3, 4)] = [[1.0, 1.0, 1.0, 1.0],
                                [1.0, 1.0, 1.0, 1.0],

@@ -1,4 +1,4 @@
-// @EXPECT_FAILURE
+// @EXPECT_FAILURE: branch shape/dtype mismatch
 let x: Tensor[f32, (2, 2)] = fill(1.0, (2, 2))
 
 if x > 0.0 {
