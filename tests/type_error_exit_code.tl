@@ -11,12 +11,14 @@
 //
 //   This file is intentionally invalid — matmul shape mismatch,
 //   (3,4) @ (5,6) — and produces no usable output. The test passes if
-//   and only if tensorlang exits non-zero. See TestRunner.
-//   is_expect_failure_test() / run_single_test() for how @EXPECT_FAILURE
-//   is handled: unlike every other test in this directory, it does not
-//   use an @EXPECTED block and does not run to a successful save().
+//   and only if tensorlang exits non-zero AND its output contains every
+//   @EXPECT_FAILURE substring below (a stable diagnostic code plus a
+//   phrase), so it cannot pass on an unrelated failure. See
+//   TestRunner.parse_expect_failure() / run_single_test(): unlike every
+//   other test in this directory, it does not use an @EXPECTED block and
+//   does not run to a successful save().
 //
-// @EXPECT_FAILURE: matmul: shape mismatch
+// @EXPECT_FAILURE: [E-SHAPE-MISMATCH]
 // @EXPECT_FAILURE: Inner dimensions must match
 
 let x: Tensor[f32, (3, 4)] = [[1.0, 1.0, 1.0, 1.0],

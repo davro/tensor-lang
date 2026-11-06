@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.4 released (user-defined functions and file I/O in loop bodies, `batch_norm`/`instance_norm` autograd, multiple `backward()` statements, and branch shape/dtype consistency complete). Core suite: 216/216 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes and a stricter test harness are in. Core suite: 224/224 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.5 — next parity items.
+> **Current focus:** v0.5.5 — robustness of existing features (control-flow edge cases, diagnostics, one normalisation slice).
 
 ---
 
@@ -19,6 +19,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [Repository Layout](#repository-layout)
 * [Language Overview](#language-overview)
 * [Operations](#operations)
+* [Control Flow](#control-flow)
 * [Automatic Differentiation](#automatic-differentiation)
 * [Loss Scaling](#loss-scaling)
 * [Training Loops](#training-loops)
@@ -26,6 +27,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [File I/O](#file-io)
 * [NumPy Interop](#numpy-interop)
 * [Cache](#cache)
+* [Diagnostics](#diagnostics)
 * [Architecture](#architecture)
 * [Performance](#performance)
 * [Testing](#testing)
@@ -46,8 +48,10 @@ TensorLang provides a unified stack for parsing, type checking, CUDA kernel gene
 * **Native GPU acceleration** — tensor operations compile to CUDA kernels
 * **cuBLAS-accelerated matmul** — matrix multiplication dispatches to cuBLAS for performance, including batched N-D
 * **Type safety** — compile-time tensor shape and broadcasting checks (N-D aware)
+* **Stable diagnostics** — type-checker errors carry stable codes (e.g. `[E-SHAPE-MISMATCH]`) so tools and tests can match on the code while the wording improves
 * **ML-first design** — built specifically for neural network operations
 * **Automatic differentiation** — reverse-mode autograd for a broad set of operations (FP32 and FP16)
+* **Control flow** — scalar and tensor-valued `if` / `elif` / `else`, with branch shape/dtype consistency checks
 * **Training loops** — `for` loops with `backward()`, pointer-swap weight rebinding, nested loops, and `save()` inside loops
 * **Built-in optimizers** — first-class `sgd` and `adam` with compiler-managed state, FP32 master weights for FP16 params
 * **Elementwise kernel fusion** — fuses elementwise chains (e.g. `add → relu`), including broadcasting cases, into a single CUDA kernel
@@ -81,40 +85,40 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
 * Linear layers: `linear` (N-D aware)
-* Reverse-mode autograd for a broad set of operations (FP32 and FP16)
+* Reverse-mode autograd for a broad set of operations (FP32 and FP16), including `batch_norm` and `instance_norm` (simplified gradients)
+* Multiple `backward()` statements in one file (see [Automatic Differentiation](#automatic-differentiation))
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
-* Control flow: scalar/single-element and tensor-valued `if` / `elif` / `else` (grammar, AST, and execution)
+* Control flow: scalar/single-element and tensor-valued `if` / `elif` / `else` (grammar, AST, and execution); conditions may compare against numeric literals (`x > 0.5`); branch shape/dtype consistency is enforced
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter, FP32 master weights for FP16 params)
 * Elementwise kernel fusion for elementwise chains, including broadcasting (row/column/general broadcast modes, N-D aware)
 * Scoped kernel names for loop bodies
-* User-defined functions
-* File I/O: `load()`, `save()`
+* User-defined functions, including calls inside `for` loop bodies
+* File I/O: `load()` (including inside `for` loop bodies, f32 and f16 files), `save()`
 * NumPy zero-copy interop (CPU-side buffer sharing, float16/32/64)
 * Comments: `//` and `/* */`
 * Application system (`apps/`) with `hello_mlp`, `decision_boundary`, `tic_tac_toe`, and `2048` (engine verified)
 * Shared app toolkit (`apps/tlkit/`)
 * **Mixed precision (FP16/FP32)** — FP16 storage with FP32 accumulation; cast-based kernels; cuBLAS tensor-core matmul path; f16 autograd and training loops
 * **N-dimensional tensor support** — general stride-based indexing across elementwise, reductions, shape ops, normalisations, activations, and batched matmul
-* **Autograd coverage expansion** — gradients now wired for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, and comparisons (zero gradient for non-differentiable ops)
+* **Autograd coverage expansion** — gradients wired for `reshape`, `transpose`, `slice`, `concat`, `max`, `min`, `argmax`, `argmin`, comparisons (zero gradient for non-differentiable ops), `batch_norm`, and `instance_norm`
 * **Loss scaling** — static and dynamic loss scaling for FP16 training stability; configurable via `# loss_scale: <value|auto|dynamic>` pragma; gradients upcast to FP32 when scale overflows FP16 max; overflow detection with automatic scale reduction (halve on overflow, double after N successful steps); unscale before optimizer step
 * **FP16 master weights** — Adam/SGD with FP32 master weights for FP16 params; optimizer computes in FP32 with FP32 m/v buffers, casts to FP16 for forward pass; automatic for FP16 params with grad
 * **Batched matmul gradients** — N-D (batched) matmul backward via NumPy batched matmul + `_unbroadcast` for broadcast dims
-* **For-loop body parity** — normalisations, comparisons, slicing, reshape, transpose, concat, and additional reductions now execute in loop bodies
+* **For-loop body parity** — normalisations, comparisons, slicing, reshape, transpose, concat, additional reductions, user-defined functions, and `load()` execute in loop bodies
 * **`any()` / `all()` reductions** — full and axis reductions, N-D aware, f16 support, zero gradients for autograd
 * **Tensor-valued control flow** — `if` / `elif` / `else` conditions may be multi-element tensors; truthiness is all-nonzero
 * **Comparison operators in conditions** — `>`, `<`, `==`, `>=`, `<=`, `!=` with N-D broadcasting
 * **`backward()` inside branches** — supported in a selected branch, with branch-aware autograd
-* **User-defined functions in loop bodies** — inlined in `for` and `if`/`elif`/`else` bodies
-* **File I/O in loop bodies** — `load()` and `save()` are supported inside `for` loops
-* **`batch_norm` / `instance_norm` autograd** — gradients are wired, with simplified N-D reductions
-* **Multiple `backward()` statements per compilation** — supported in source order
-* **Branch shape/dtype consistency** — matching shapes and dtypes are enforced across `if` / `elif` / `else` branches
+* **Stable diagnostic codes** — see [Diagnostics](#diagnostics)
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented. Branch shape/dtype consistency is enforced. `backward()` inside a selected branch is supported; nested branch backward and mixed-truthiness edge cases continue to be expanded.
+* **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented, and branch shape/dtype consistency is enforced. Edge cases are not yet specified or tested: truthiness of `NaN`, `-0.0`, and f16 values that underflow to zero; `backward()` in a two-level nested branch or in an `elif` branch (planned for v0.5.5).
+* **Comparison operators as general operations:** `>=`, `<=`, and `!=` work in conditions only; `greater`, `less`, and `equal` are the general tensor operations (planned for v0.5.5).
+* **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
+* **Multiple `backward()` statements:** supported when each pass uses its own parameters (see `tests/autograd_multiple_backward.tl`). Behaviour when several passes share a parameter's gradient, and the interaction with loss scaling, is not yet specified or tested.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
-* **For-loop bodies:** broad operation parity with top-level is now implemented, including user-defined functions and file I/O other than `save()`. Remaining constraints are integer loop counts and name-on-RHS rebinding.
+* **For-loop bodies:** operation parity with top level, including user-defined functions and `load()`. Loop counts must still be integer literals.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
 * **`instance_norm`** N-D uses simplified spatial-dim flattening.
@@ -160,6 +164,7 @@ source build.sh
 **Important notes**
 
 * Always prefer `bash build.sh --install`. Using `source build.sh --install` hits an `exit 0` that kills the current shell.
+* `bash build.sh --test` is a safe way to run the full suite: it clears `cache/` first, then runs the `.tl` suite and the Python tests.
 * `pycuda` requires a working NVIDIA CUDA toolkit.
 * After install, the venv lives in `python-env/`.
 
@@ -217,7 +222,7 @@ tensor-lang/
 │   └── type_checker.py        # Shape and broadcasting checks
 ├── tensorlang.lark            # Grammar
 ├── build.sh                   # Install / test / lint helper
-├── tests/                     # Core language tests (.tl)
+├── tests/                     # Core language tests (.tl) and small data fixtures (.npy)
 │   └── python/                # Plain-Python unittest suite
 ├── apps/                      # User-facing applications
 │   ├── tlkit/                 # Shared toolkit for visual/interactive apps
@@ -268,7 +273,7 @@ fn normalize(x: Tensor[M, N]) -> Tensor[M, N] {
 }
 ```
 
-Function calls are inlined. Generic dimensions such as `M` and `N` are primarily syntactic; concrete shapes are resolved at call sites.
+Function calls are inlined, including calls inside `for` loop bodies. Generic dimensions such as `M` and `N` are primarily syntactic; concrete shapes are resolved at call sites.
 
 ### Inline Expressions
 
@@ -284,6 +289,10 @@ This is equivalent to:
 let __tmp_0 = mult(lr, w_grad)
 let w_updated = minus(w, __tmp_0)
 ```
+
+### Aliases
+
+A top-level `let a = z` makes `a` another name for `z`. After execution the compiler re-resolves aliases, so `a` reflects any later rebind of `z` (including a rebind inside a branch). If you need an independent copy, use an explicit operation rather than an alias.
 
 ---
 
@@ -334,8 +343,8 @@ let w_updated = minus(w, __tmp_0)
 | Operation | Status | Notes |
 |---|---|---|
 | `layer_norm` | Supported | N-D, any axis |
-| `batch_norm` | Partial | N-D (channel at dim 1, NCHW); uses running mean/variance; no gamma/beta |
-| `instance_norm` | Partial | N-D (per-instance over non-batch dims) |
+| `batch_norm` | Partial | N-D (channel at dim 1, NCHW); uses running mean/variance; no gamma/beta; simplified gradient |
+| `instance_norm` | Partial | N-D (per-instance over non-batch dims); simplified gradient |
 
 ### Losses
 
@@ -350,6 +359,57 @@ let w_updated = minus(w, __tmp_0)
 |---|---|---|
 | `greater`, `less`, `equal` | Supported | N-D broadcasting; output always f32 |
 | `>=`, `<=`, `!=` | Supported in conditions | N-D broadcasting; output always f32; used for tensor-valued branch conditions |
+
+---
+
+## Control Flow
+
+TensorLang supports `if` / `elif` / `else`. Conditions may be a tensor name, a boolean literal, or a comparison.
+
+```text
+let x: Tensor[f32, (1,)] = [1.0]
+let a: Tensor[f32, (1,)] = [10.0]
+let b: Tensor[f32, (1,)] = [20.0]
+let c: Tensor[f32, (1,)] = [30.0]
+let z: Tensor[f32, (1,)] = [0.0]
+
+if x > 5.0 {
+    let z = a
+} elif x > 0.5 {
+    let z = b
+} else {
+    let z = c
+}
+z
+```
+
+### Conditions
+
+* Comparison operators: `>`, `<`, `==`, `>=`, `<=`, `!=`, with N-D broadcasting. The result is always f32.
+* Either side of a comparison may be a tensor name or a numeric literal. A literal is lowered to a `(1,)` f32 fill that broadcasts against the other side. This works in `if` and `elif` conditions.
+* A bare tensor name is also a valid condition.
+* **Truthiness** is all-nonzero: a multi-element condition is true only if every element is nonzero.
+* Edge cases are not yet specified or tested: `NaN`, `-0.0`, f16 underflow to zero, and empty tensors (planned for v0.5.5).
+
+### Branch consistency
+
+A name defined in more than one branch must have the same shape and dtype in each. A mismatch is a compile error:
+
+```text
+if x > 0.0 {
+    let y: Tensor[f32, (2, 2)] = add(x, x)
+} else {
+    let y: Tensor[f32, (1,)] = fill(1.0, (1,))   // [E-BRANCH-MISMATCH]
+}
+```
+
+### Branches and loops
+
+`if` statements may appear inside `for` loops; the condition is re-evaluated every iteration. Rebinds (`w = w_updated`) inside a selected branch follow the same pointer-swap rules as in loop bodies.
+
+### Branches and autograd
+
+`backward()` is supported inside a selected branch. Two-level nested branches and `elif` branches are not yet covered by tests.
 
 ---
 
@@ -377,6 +437,25 @@ let w_updated = minus(w, mult(lr, w_grad))
 
 Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers` is used.
 
+### Multiple backward passes
+
+A file may contain more than one `backward()` statement. Each pass produces gradients for the parameters it depends on:
+
+```text
+let w1: Tensor[f32, (2, 2)] = fill(0.1, (2, 2)) with grad
+let w2: Tensor[f32, (2, 2)] = fill(0.2, (2, 2)) with grad
+
+let loss1 = sum(matmul(x, w1))
+backward(loss1)
+sgd(w1, w1_grad, 0.01)
+
+let loss2 = sum(matmul(x, w2))
+backward(loss2)
+sgd(w2, w2_grad, 0.01)
+```
+
+Passes that use separate parameters are tested. Behaviour when two passes share a parameter's gradient is not yet specified.
+
 ### Supported Gradient Operations
 
 | Operation | Gradient | Notes |
@@ -395,6 +474,8 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `mse_loss` | Yes | N-D |
 | `linear` | Yes | N-D (operates on last dim) |
 | `layer_norm` | Yes | N-D, any axis |
+| `batch_norm` | Yes | Simplified (running statistics; no gamma/beta) |
+| `instance_norm` | Yes | Simplified spatial-dim flattening |
 | `cross_entropy` | Yes | Probability inputs, class-index targets |
 | `gelu` | Yes | |
 | `swish` | Yes | |
@@ -409,8 +490,6 @@ Gradients are saved as `name.grad.npy` and `name_grad.npy` when `--cache-layers`
 | `greater`, `less`, `equal` | Yes (zero) | Non-differentiable; gradient is zero |
 | `>=`, `<=`, `!=` | Yes (zero) | Non-differentiable; gradient is zero |
 | `any`, `all` | Yes (zero) | Non-differentiable; gradient is zero |
-| `batch_norm` | Yes | Wired with simplified N-D reductions |
-| `instance_norm` | Yes | Wired with simplified N-D reductions |
 
 Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computation uses NumPy's type promotion (may upcast to f32 internally).
 
@@ -421,7 +500,7 @@ Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computatio
 * `cross_entropy` expects probability tensors, not logits.
 * `argmax`/`argmin` gradients use one-hot scatter (non-standard but useful for hard selection).
 * `max`/`min` reduction gradients flow to all tied extrema (not divided).
-* `batch_norm` and `instance_norm` gradients are wired, but use simplified N-D reductions.
+* `batch_norm`/`instance_norm` gradients are simplified (see [Known limitations](#known-limitations)).
 
 ---
 
@@ -500,8 +579,8 @@ for epoch in range(10) {
 
 ### Limitations
 
-* **FP16 master weights** — supported (see below).
-* Multiple `backward()` statements are supported; each backward pass resets and recomputes gradients.
+* **Multiple `backward()` statements** — the interaction of loss scaling with more than one `backward()` in a file is not yet tested.
+* **FP16 master weights** — ✅ supported (see below).
 
 ---
 
@@ -594,22 +673,23 @@ Both compile to the same CUDA kernels. Inline expressions are flattened into syn
 
 * **Nested loops** — arbitrary depth, independent counters per level
 * **`save()` inside loops** — fires per iteration, captures current storage, overwrites the file each time
+* **`load()` inside loops** — data is loaded and uploaded to the GPU each iteration; the loaded shape is checked against the declared shape
 * **Alias resolution** — `let y = x` inside a loop re-resolves after rebinds, so `y` tracks the rebound variable
 * **Shape-stability guard** — rebinds with mismatched shapes are skipped with a diagnostic
 * **Kernel symbols** generated inside loop bodies are scoped with a `loopN_` prefix, so the same tensor name can be reused across loop iterations, multiple loops, and top-level code without CUDA symbol collisions
 * **Loss scaling** — works inside loops via `# loss_scale` pragma
 * **FP16 master weights** — works inside loops; master buffer persists across iterations
-* **User-defined functions in loop bodies** — inlined in `for` and `if`/`elif`/`else` bodies
-* **File I/O in loop bodies** — `load()` and `save()` are supported inside `for` loops
+* **Control flow** — `if` / `elif` / `else` may appear in loop bodies and is re-evaluated each iteration
 
 ### Training Loop Constraints
 
 * Loop counts must be integer literals: `range(5)`, not `range(n)`.
 * Rebinding requires a name on the right-hand side: `w = w_updated`, not `w = minus(w, step)`.
+* Tensors declared inside a loop body are not persisted to the `.npy` cache; recompute them after the loop under a distinct name to inspect them.
 
 ### Operations Supported in Loop Bodies
 
-Loop bodies now have broad operation parity with top-level, including:
+Loop bodies have operation parity with top level, including:
 
 * `add`, `minus`, `mult`, `div`
 * `matmul`
@@ -621,13 +701,21 @@ Loop bodies now have broad operation parity with top-level, including:
 * `layer_norm`, `batch_norm`, `instance_norm`
 * `greater`, `less`, `equal`
 * slicing, `reshape`, `transpose`, `concat`
-* `fill`
-* `save()`
-* `load()`
+* `fill`, tensor literals
+* `load()` and `save()`
 * user-defined functions
 * nested `for` loops
+* `if` / `elif` / `else`
 * `let` bindings and rebinds
 * `backward()`
+
+### Rebinding
+
+```text
+w = w_updated
+```
+
+This swaps GPU buffer pointers rather than copying memory.
 
 ---
 
@@ -688,6 +776,8 @@ Supported formats:
 * `.csv` (requires pandas; drops a leading date/time/index/id column)
 
 If no type annotation is provided, shape and dtype are inferred from the file (including float16 from `.npy`).
+
+`load()` works at top level and inside `for` loop bodies. Paths are relative to the working directory the compiler is run from.
 
 ### Save
 
@@ -755,12 +845,37 @@ Contents include:
 * `tensor_name.grad.npy` — gradients, when `--cache-layers` is used
 * `tensor_name_grad.npy` — synthesised gradient variables, when `--cache-layers` is used
 
-The full test suite clears `cache/` before running. For isolated runs after modifying a test, clear its cache entry manually:
+The full test suite (`bash build.sh --test`) clears `cache/` before running. In addition, the test runner removes each test's own cache directory immediately before running it, so a filtered run (`--test --filter ...`) cannot pass on leftover artifacts from an earlier run.
+
+One exception to be aware of: `load_basic`, `load_dynamic`, and `load_inferred` read their inputs from `cache/tests/basics.tl/`, which is another test's output. Run the full suite once (or run `basics.tl` first) before running those three on their own.
+
+For an isolated run outside the test runner, clear the entry manually:
 
 ```bash
 rm -rf cache/tests/my_test.tl/
 python3 tensorlang.py tests/my_test.tl --cache-layers
 ```
+
+---
+
+## Diagnostics
+
+Type-checker errors are printed as `[TYPE CHECKER] error: [E-CODE] message`. The code is stable; the wording may be improved between releases, so scripts and tests should match on the code.
+
+| Code | Raised for |
+|---|---|
+| `[E-SHAPE-MISMATCH]` | Shape errors in elementwise ops, `matmul`, and other shape-checked operations |
+| `[E-BRANCH-MISMATCH]` | A name defined in more than one `if`/`elif`/`else` branch with different shapes or dtypes |
+| `[E-UNDEFINED-TENSOR]` | A tensor name used before it is defined (operation args, conditions) |
+| `[E-CONDITION-OPERAND]` | A condition comparison whose operand is not a tensor name or numeric literal |
+
+Example:
+
+```text
+[TYPE CHECKER] error: [E-SHAPE-MISMATCH] matmul: shape mismatch computing 'z': 'x' (3, 4) vs 'y' (5, 6). Inner dimensions must match: left has 4 columns but right has 5 rows
+```
+
+A failed compile exits with a non-zero status. Further codes (including a dedicated code for unsupported scalar literals) are planned.
 
 ---
 
@@ -770,19 +885,19 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 1. **Lexing & Parsing** — Lark grammar (`tensorlang.lark`)
 2. **AST Construction** — flatten inline expressions; inline user-defined functions; build nested loop bodies
-3. **Type Checking** — validate tensor shapes, broadcasting rules, gradient tensor pre-registration, dtype propagation and promotion (N-D aware)
+3. **Type Checking** — validate tensor shapes, broadcasting rules, branch consistency, gradient tensor pre-registration, dtype propagation and promotion (N-D aware)
 4. **CUDA Generation** — emit forward kernels; autograd is handled by the NumPy reference graph plus compiler-recorded operations; elementwise fusion (including broadcasting and N-D); dtype-aware kernel generation (f16/f32); stride-based N-D indexing; loss scaling (pragma-parsed, scale passed to backward, unscale before optimizer); FP16 master weights (master buffer allocation, init, mixed-type optimizer kernels)
 5. **Compilation** — `nvcc` to shared library
-6. **Execution** — PyCUDA kernel launching, memory management, loop iteration with pointer-swap rebinding, nested loop recursion, `save()` per iteration
+6. **Execution** — PyCUDA kernel launching, memory management, loop iteration with pointer-swap rebinding, nested loop recursion, `save()` per iteration, branch selection
 
 ### Key Modules
 
 * `tensorlang/ast_builder.py` — AST construction and inlining
-* `tensorlang/type_checker.py` — shape and broadcasting checks (N-D aware)
+* `tensorlang/type_checker.py` — shape and broadcasting checks (N-D aware), branch consistency, diagnostic codes
 * `tensorlang/kernel_generator.py` — CUDA kernel generation
 * `tensorlang/codegen.py` — code generation orchestration
 * `tensorlang/compiler.py` — orchestration, execution, caching, scoped kernel names, loss scale resolution, master weight allocation
-* `tensorlang/execution.py` — runtime execution, loops, rebinding
+* `tensorlang/execution.py` — runtime execution, loops, branches, rebinding
 * `tensorlang/interop.py` — NumPy zero-copy interop (`InteropMixin`)
 * `tensorlang/autograd.py` — NumPy reference autograd implementation (supports `scale` param, overflow detection)
 * `tensorlang/fusion.py` — elementwise kernel fusion (broadcasting-aware, N-D aware)
@@ -825,11 +940,13 @@ python3 tensorlang.py tests/inline_expr_basic.tl --debug
 ### Full Test Suite
 
 ```bash
-source build.sh
+bash build.sh --test
 source build.sh --test --filter autograd
 source build.sh --test --filter for_loop
-source build.sh --test --filter inline
+source build.sh --test --filter control_flow
 ```
+
+`--filter` matches on the test name, so tests are named by feature: `control_flow_*`, `for_loop_*`, `autograd_*`, `load_*`, `any_all_*`, and so on. Do not prefix tests with a version number.
 
 ### Test Annotations
 
@@ -840,13 +957,18 @@ Expected results:
 // {"loss_final": 0.0164794921875}
 ```
 
-Negative tests:
+Negative tests (the program must fail to compile or run):
 
 ```text
-// @EXPECT_FAILURE
+// @EXPECT_FAILURE: [E-SHAPE-MISMATCH]
+// @EXPECT_FAILURE: Inner dimensions must match
 ```
 
-`@EXPECT_FAILURE` currently passes if the compiler exits non-zero. It does not verify the specific failure reason.
+A negative test passes only if the compiler exits non-zero **and** its output contains every `@EXPECT_FAILURE:` text. Put a diagnostic code first (see [Diagnostics](#diagnostics)) and, optionally, a short phrase. Rules:
+
+* The marker must be the first thing on a comment line. A line that merely mentions `@EXPECT_FAILURE` in prose is ignored.
+* Several `@EXPECT_FAILURE:` lines may be stacked; all must be present in the output.
+* A bare `// @EXPECT_FAILURE` (no text) is still accepted but passes on any clean non-zero exit, fails if the output contains a Python traceback, and is listed in a warning at the end of the run so it can be pinned.
 
 ### Tensor Verification
 
@@ -866,24 +988,20 @@ The suite covers:
 * Linear layers, MLP, neural nets
 * Normalisations (layer/batch/instance, N-D)
 * Losses (mse, cross-entropy, N-D)
-* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul)
-* Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …)
-* Control flow (`control_flow_if_*`, including tensor-valued conditions, comparison operators, and branch backward)
+* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward)
+* Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …), including `load()`, tensor literals, user-defined functions, and f16 loads in loop bodies
+* Control flow (`control_flow_*`): tensor-valued conditions, comparison operators, scalar literals in `if`/`elif`, branch consistency (positive and negative), branch backward, `if` inside `for` (including a condition that flips between iterations), alias semantics
 * `any()` / `all()` reductions (`any_all_*`)
 * Functions, pipelines, portfolio-style examples
-* Load/save
+* Load/save, including float16 fixtures (`load_f16_*`)
 * Mixed precision (f16 basic, matmul, autograd, training)
 * N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
 * Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
 * FP16 master weights (Adam optimizer)
 * For-loop body parity (`for_loop_body_parity.tl`)
-* User-defined functions in loop bodies
-* File I/O in loop bodies
-* Multiple `backward()` statements
-* Branch shape/dtype consistency
-* `batch_norm` / `instance_norm` autograd
+* Negative tests (`@EXPECT_FAILURE`)
 
-Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`.
+Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`. Small input fixtures (such as `tests/for_loop_load_data.npy` and `tests/load_f16_data.npy`) live next to the tests that use them.
 
 ### Development Tools
 
@@ -896,6 +1014,8 @@ python3 check.py path/to/file.tl
 # NumPy-interpret a .tl AST (no GPU needed)
 python3 verify.py path/to/file.tl
 ```
+
+`check.py` is a fast way to confirm a new test parses and type-checks before running it on the GPU. It cannot catch runtime problems (for example, a kernel that is generated but never executed), so a test also needs a real GPU run.
 
 ### Multi-GPU Test Execution
 
@@ -982,10 +1102,42 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.5 (planned)
+### v0.5.5 (in progress) — robustness, not breadth
 
-* Additional control-flow edge cases: mixed truthiness, nested branch backward, and loop-interaction cases.
-* Comparison operators beyond conditions: expose `>=`, `<=`, and `!=` as general tensor operations if desired.
+Focus: harden what already exists rather than add another broad parity release.
+
+**Phase 0 — test harness and regression guards (done)**
+* Stable diagnostic codes in the type checker
+* `@EXPECT_FAILURE` pins required output text; existing negative tests migrated
+* Test runner clears each test's own cache directory before running it
+* Regression tests for the seams that broke during v0.5.4: branch consistency, scalar literals in `elif`, `load()` and tensor literals in loop bodies, f16 `load()`, alias semantics, `if` inside `for`
+
+**Phase 1 — small cleanups**
+* Remove dead, shadowed duplicates in `io.py` (`_ensure_gpu_alloc`, `_allocate_zeros`, `_load_data_file`)
+* Remove a duplicated `_inline_user_functions_in_nodes` call
+* Use a nonzero learning rate in `autograd_multiple_backward` so it can detect wrong gradients
+
+**Phase 2 — diagnostics**
+* Name the origin of synthetic bindings in errors
+* Distinguish "scalar literal not supported here" from "undefined tensor" (dedicated code)
+* Clearer shape-mismatch and branch-consistency messages; stable codes preserved
+
+**Phase 3 — control-flow edge cases (tests first)**
+* Specify truthiness before changing code: empty tensor (compile error), `NaN`, `-0.0`, f16 underflow to zero
+* `>=`, `<=`, `!=` as general tensor operations, reusing the existing kernels
+* Two-level nested branch `backward()` and `backward()` in an `elif`
+
+**Phase 4 — one normalisation slice**
+* `batch_norm` gamma/beta, with type checking and autograd
+* Axis validation and clearer normalisation errors
+* Full N-D indexing and an `instance_norm` rework are deferred
+
+**Phase 5 — application acceptance test**
+* A small app using an `if loss > threshold` learning-rate step and two losses with separate optimisers, with the branch taken in some iterations and not others
+
+**Also under consideration**
+* Make `load_basic`, `load_dynamic`, and `load_inferred` self-contained with committed fixtures
+* Dynamic loss scaling: make the growth interval configurable (otherwise deferred)
 
 ### Short Term
 
@@ -1020,7 +1172,12 @@ Contributions are welcome. Useful areas include:
 * Documentation improvements
 * Application examples
 
-When adding tests, copy expected values from a real run. Do not manually round or approximate them.
+When adding tests:
+
+* Copy expected values from a real run. Do not manually round or approximate them.
+* Name tests by feature (`control_flow_*`, `for_loop_*`, `autograd_*`), not by version.
+* For negative tests, pin a diagnostic code: `// @EXPECT_FAILURE: [E-...]`.
+* Run the test on the GPU, not only through `check.py`; some bugs only show at runtime.
 
 ---
 

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -34,9 +35,14 @@ CYAN = "36"
 class TestRunner:
     __test__ = False  # not a pytest test class; stops PytestCollectionWarning
 
-    # Matches "// @EXPECT_FAILURE", "// @EXPECT_FAILURE: some text" and
-    # "// @EXPECT_FAILURE some text".  Group 1 is the (possibly empty) reason.
-    _EXPECT_FAILURE_RE = re.compile(r"//[ \t]*@EXPECT_FAILURE\b[ \t]*:?[ \t]*(.*)")
+    # Matches "// @EXPECT_FAILURE" and "// @EXPECT_FAILURE: some text".
+    # Group 1 is the reason (None/empty for the bare marker). The marker must be
+    # the first thing on a comment line and be followed by nothing or by ":" and
+    # a reason, so prose such as "// @EXPECT_FAILURE substring below ..."
+    # does NOT match.
+    _EXPECT_FAILURE_RE = re.compile(
+        r"^[ \t]*//[ \t]*@EXPECT_FAILURE[ \t]*(?::[ \t]*(.*?))?[ \t]*$", re.MULTILINE
+    )
 
     def __init__(self, parallel=True, jobs=None, verify_tensors=False, debug_mode=False,
                  tests_dir=None, gpu_pinning=True, fixed_gpu=None):
@@ -130,6 +136,13 @@ class TestRunner:
 
             # Extract expected results from .tl file
             tl_path = Path(self.tests_dir) / test_file
+
+            # Start every test from an empty cache dir so it can never pass on
+            # leftover .npy/.log/kernel artifacts from an earlier run (a filtered
+            # --test run does not clear cache/ the way the full suite does).
+            # Only this test's own directory is removed; tests that load()
+            # another test's output (e.g. load_basic -> basics.tl) are unaffected.
+            shutil.rmtree(Path("cache") / self.tests_dir / test_file, ignore_errors=True)
 
             # ----------------------------------------------------------------
             # Negative tests (@EXPECT_FAILURE): the test passes if tensorlang
