@@ -36,6 +36,39 @@ from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.type_checker import _is_scalar_shape, type_checker
 
+def _format_parse_error(err, source):
+    """Short parse-error message: code, location, source line with caret, hint."""
+    tok = getattr(err, "token", None)
+    tok_type = getattr(tok, "type", None)
+    line = getattr(err, "line", None)
+    col = getattr(err, "column", None)
+    where = f"line {line}, column {col}" if line is not None else "unknown position"
+    try:
+        context = err.get_context(source).rstrip()
+    except Exception:
+        context = ""
+    if tok_type == "NUMBER":
+        head = (f"[COMPILER] error: [E-SCALAR-LITERAL] a numeric literal cannot be used here "
+                f"({where}).")
+        hint = ("Numeric literals are only valid in comparison conditions (`if x > 0.5`) and in "
+                "optimizer arguments (`sgd(w, w_grad, 0.01)`). To use a constant as an operand, "
+                "declare a tensor, e.g. `let half: Tensor[f32, (1,)] = [0.5]`.")
+    else:
+        found = str(tok) if tok is not None else repr(getattr(err, "char", "?"))
+        head = f"[COMPILER] error: [E-SYNTAX] unexpected {found} ({where})."
+        expected = sorted(getattr(err, "expected", None) or [])
+        hint = ""
+        if expected:
+            shown = ", ".join(expected[:8]) + (", ..." if len(expected) > 8 else "")
+            hint = f"Expected one of: {shown}."
+    parts = [head]
+    if context:
+        parts.append(context)
+    if hint:
+        parts.append(hint)
+    return "\n".join(parts)
+
+
 class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
     def __init__(self, debug_mode=False, debug_info=False, debug_ast=False, cache_layers=False, transpile=False, loss_scale=1.0, dynamic_loss_scale=False, loss_scale_patience=2000):
 
@@ -999,8 +1032,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             sys.exit(1)
 
         except UnexpectedInput as e:
-            self.tensorlang.print(message=f"[COMPILER] Parse error: {e}")
-            traceback.print_exc()
+            self.tensorlang.print(message=_format_parse_error(e, code))
+            if self.debug_mode:
+                traceback.print_exc()
             sys.exit(1)
 
         except Exception as e:

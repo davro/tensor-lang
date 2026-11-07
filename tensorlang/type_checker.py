@@ -6,6 +6,7 @@ File: tensorlang/type_checker.py
 
 import copy
 import copy
+import difflib
 import numpy as np
 
 from tensorlang.tensor_lang import TensorLang
@@ -21,12 +22,94 @@ def _normalize_axis(axis, ndim):
         axis += ndim
     return axis
 
+_SYNTHETIC_PREFIXES = ("__tmp_", "__if_cond_")
+
+
+def _is_synthetic(name):
+    """Compiler-generated temporaries (flattened nested calls, condition results)."""
+    return isinstance(name, str) and name.startswith(_SYNTHETIC_PREFIXES)
+
+
+def _name_label(name):
+    """'x' for a user name; a readable phrase for a compiler temporary."""
+    if _is_synthetic(name):
+        return f"a nested expression ('{name}')"
+    return f"'{name}'"
+
+
+def _render_expr(expr):
+    """Compact source-like text for an expression node, for error messages."""
+    if not isinstance(expr, dict):
+        return str(expr)
+    t = expr.get("type")
+    if t == "name":
+        return str(expr.get("name"))
+    if t == "number":
+        return str(expr.get("value"))
+    if t == "fill":
+        return f"fill({expr.get('value')}, {tuple(expr.get('shape', ()))})"
+    if t == "load":
+        return f'load("{expr.get("file_path")}")'
+    if t == "tensor_literal":
+        return "[...]"
+    args = expr.get("args")
+    if isinstance(args, list):
+        return f"{t}({', '.join(_render_expr(a) for a in args)})"
+    if "tensor" in expr:
+        return f"{t}({expr['tensor']})"
+    return f"{t}(...)"
+
+
+def _describe_binding(name, expr):
+    """How an error refers to the let being checked."""
+    if _is_synthetic(name):
+        return f"the nested expression `{_render_expr(expr)}`"
+    if expr is None:
+        return f"'{name}'"
+    return f"`let {name} = {_render_expr(expr)}`"
+
+
+def _fmt_type(entry):
+    return f"{entry.get('dtype')} {tuple(entry.get('shape', ()))}"
+
+
+def _undefined_message(missing, env, name=None, expr=None, where=None):
+    """[E-UNDEFINED-TENSOR]: say which expression uses what, and suggest close names."""
+    missing = list(missing)
+    shown = ", ".join(f"'{m}'" for m in missing)
+    verb = "is" if len(missing) == 1 else "are"
+    subject = where if where is not None else _describe_binding(name, expr)
+    msg = (f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] {subject} uses {shown}, "
+           f"which {verb} not defined at this point.")
+    pool = [n for n in env if not _is_synthetic(n)]
+    hints = []
+    for m in missing:
+        close = difflib.get_close_matches(str(m), pool, n=3, cutoff=0.6)
+        if close:
+            hints.append(f"Did you mean {' or '.join(repr(c) for c in close)} instead of '{m}'?")
+    if hints:
+        msg += " " + " ".join(hints)
+    return msg
+
+
+def _scalar_literal_message(name, expr):
+    value = expr.get("value")
+    if _is_synthetic(name):
+        return (f"[TYPE CHECKER] error: [E-SCALAR-LITERAL] the numeric literal {value} cannot be "
+                f"used as an operand here. Declare a tensor instead, e.g. "
+                f"`let c: Tensor[f32, (1,)] = [{value}]`.")
+    return (f"[TYPE CHECKER] error: [E-SCALAR-LITERAL] '{name}' is bound to the bare number "
+            f"{value}, but TensorLang has no scalar values. Declare a tensor instead, e.g. "
+            f"`let {name}: Tensor[f32, (1,)] = [{value}]` (or fill({value}, <shape>)).")
+
+
 def _shape_error(op, name, shape1, shape2, arg_names=None, hint=None):
     if arg_names and len(arg_names) == 2:
-        operands = f"'{arg_names[0]}' {tuple(shape1)} vs '{arg_names[1]}' {tuple(shape2)}"
+        operands = (f"{_name_label(arg_names[0])} {tuple(shape1)} vs "
+                    f"{_name_label(arg_names[1])} {tuple(shape2)}")
     else:
         operands = f"left {tuple(shape1)} vs right {tuple(shape2)}"
-    msg = f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] {op}: shape mismatch computing '{name}': {operands}"
+    msg = f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] {op}: shape mismatch computing {_name_label(name)}: {operands}"
     if hint:
         msg += f". {hint}"
     return msg
@@ -139,7 +222,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 elif isinstance(cond, dict) and cond.get("type") == "name":
                     cond_name = cond["name"]
                     if cond_name not in env:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined condition tensor '{cond_name}'")
+                        tensorlang.print(message=_undefined_message([cond_name], env, where="the `if`/`elif` condition"))
                         return False, env
                     shape = env[cond_name]["shape"]
                     # Tensor-valued conditions are allowed. Truthiness is all-nonzero.
@@ -149,7 +232,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensor_name = cond["tensor"]
                     tensor_type = _resolve_tensor_type(env, tensor_name)
                     if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for {cond['type']}")
+                        tensorlang.print(message=_undefined_message([tensor_name], env, where=f"the `{cond['type']}({tensor_name})` condition"))
                         return False, env
                     synth_name = f"__if_cond_{len(env)}"
                     env[synth_name] = {"dtype": "f32", "shape": ()}
@@ -161,7 +244,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     tensor_name = cond["tensor"]
                     tensor_type = _resolve_tensor_type(env, tensor_name)
                     if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for {cond['type']}")
+                        tensorlang.print(message=_undefined_message([tensor_name], env, where=f"the `{cond['type']}({tensor_name})` condition"))
                         return False, env
                     synth_name = f"__if_cond_{len(env)}"
                     env[synth_name] = {"dtype": "f32", "shape": ()}
@@ -173,15 +256,17 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     left = cond.get("left")
                     right = cond.get("right")
                     if not (isinstance(left, dict) and left.get("type") == "name"):
-                        tensorlang.print(message="[TYPE CHECKER] error: [E-CONDITION-OPERAND] if comparison left side must be a tensor name")
+                        tensorlang.print(message="[TYPE CHECKER] error: [E-CONDITION-OPERAND] the left side of an if/elif comparison must be a tensor name or a numeric literal")
                         return False, env
                     if not (isinstance(right, dict) and right.get("type") == "name"):
-                        tensorlang.print(message="[TYPE CHECKER] error: [E-CONDITION-OPERAND] if comparison right side must be a tensor name")
+                        tensorlang.print(message="[TYPE CHECKER] error: [E-CONDITION-OPERAND] the right side of an if/elif comparison must be a tensor name or a numeric literal")
                         return False, env
                     left_name = left["name"]
                     right_name = right["name"]
                     if left_name not in env or right_name not in env:
-                        tensorlang.print(message="[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor in if condition")
+                        tensorlang.print(message=_undefined_message(
+                            [n for n in (left_name, right_name) if n not in env], env,
+                            where=f"the condition `{_name_label(left_name) if _is_synthetic(left_name) else left_name} {cond.get('op')} {_name_label(right_name) if _is_synthetic(right_name) else right_name}`"))
                         return False, env
                     op = cond.get("op")
                     if op not in (">", "<", "==", ">=", "<=", "!="):
@@ -190,7 +275,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     try:
                         out_shape = tuple(np.broadcast_shapes(env[left_name]["shape"], env[right_name]["shape"]))
                     except ValueError:
-                        tensorlang.print(message="[TYPE CHECKER] error: Incompatible shapes in if condition")
+                        tensorlang.print(message=f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] if/elif condition: cannot compare {_name_label(left_name)} {tuple(env[left_name]['shape'])} with {_name_label(right_name)} {tuple(env[right_name]['shape'])}")
                         return False, env
                     # Tensor-valued conditions are allowed. Truthiness is all-nonzero.
                     synth_name = f"__if_cond_{len(env)}"
@@ -211,6 +296,11 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             if node.get("else") is not None:
                 branch_specs.append(node.get("else"))
 
+            branch_labels = ["the `if` branch"]
+            branch_labels += [f"`elif` branch {i + 1}" for i in range(len(node.get("elifs", [])))]
+            if node.get("else") is not None:
+                branch_labels.append("the `else` branch")
+
             branch_envs = []
             for branch in branch_specs:
                 branch_env = copy.deepcopy(env)
@@ -224,15 +314,21 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             for branch_env in branch_envs:
                 all_names.update(branch_env.keys())
             for name in all_names:
-                present = [branch_env[name] for branch_env in branch_envs if name in branch_env]
+                present = [(branch_labels[i], branch_env[name])
+                           for i, branch_env in enumerate(branch_envs) if name in branch_env]
                 if len(present) > 1:
-                    first = present[0]
-                    for other in present[1:]:
+                    first_label, first = present[0]
+                    for other_label, other in present[1:]:
                         if (other.get("dtype") != first.get("dtype")
                                 or tuple(other.get("shape", ())) != tuple(first.get("shape", ()))):
+                            def _how(label, entry):
+                                verb = "leaves it as" if env.get(name) == entry else "defines it as"
+                                return f"{label} {verb} {_fmt_type(entry)}"
                             tensorlang.print(
-                                message=f"[TYPE CHECKER] error: [E-BRANCH-MISMATCH] branch shape/dtype mismatch for '{name}': "
-                                        f"{first} vs {other}"
+                                message=f"[TYPE CHECKER] error: [E-BRANCH-MISMATCH] branch shape/dtype mismatch for "
+                                        f"'{name}': {_how(first_label, first)}, but {_how(other_label, other)}. "
+                                        f"A name used after an if/elif/else must have the same shape and dtype "
+                                        f"in every branch that sets it."
                             )
                             return False, env
 
@@ -280,6 +376,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
         name = node["name"]
         expr = node["expr"]
         ty = node.get("ty")
+        if isinstance(expr, dict) and expr.get("type") == "number":
+            tensorlang.print(message=_scalar_literal_message(name, expr))
+            return False, env
 
         arg_names = expr.get("args", []) if isinstance(expr, dict) else []
         args = [env.get(a) for a in arg_names if a in env]
@@ -435,7 +534,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for {expr['type']}")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
 
                 input_shape = tensor_type["shape"]
@@ -485,7 +584,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for {expr['type']}")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
                 input_shape = tensor_type["shape"]
                 axis = expr.get("axis")
@@ -514,7 +613,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for {expr['type']}")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
 
                 input_shape = tensor_type["shape"]
@@ -559,7 +658,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for layer_norm")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
 
                 input_shape = tensor_type["shape"]
@@ -587,7 +686,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 var_type = _resolve_tensor_type(env, running_var_name)
 
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for batch_norm")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
                 if mean_type is None:
                     tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_mean {running_mean_name} for batch_norm")
@@ -623,7 +722,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for instance_norm")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
                 env[name] = {"dtype": tensor_type["dtype"], "shape": tensor_type["shape"]}
                 if DEBUG_INFO:
@@ -634,7 +733,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for {expr['type']}")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
 
                 input_shape = tensor_type["shape"]
@@ -659,7 +758,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for transpose")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
 
                 input_shape = tensor_type["shape"]
@@ -684,7 +783,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensor_name = expr["tensor"]
                 tensor_type = _resolve_tensor_type(env, tensor_name)
                 if tensor_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for reshape")
+                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                     return False, env
 
                 input_shape = tensor_type["shape"]
@@ -710,7 +809,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 for tensor_name in tensor_names:
                     tensor_type = _resolve_tensor_type(env, tensor_name)
                     if tensor_type is None:
-                        tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined tensor {tensor_name} for concat")
+                        tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
                         return False, env
                     tensor_types.append(tensor_type)
 
@@ -763,7 +862,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     print(f"[INFO] Checking args for {name}: {args}")
 
                 if missing_args:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] Undefined args for {name}: {missing_args}")
+                    tensorlang.print(message=_undefined_message(missing_args, env, name, expr))
                     return False, env
 
                 if expr["type"] == "matmul":
