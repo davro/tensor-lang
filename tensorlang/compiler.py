@@ -99,6 +99,8 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             sys.exit(1)
 
         compile_start_time = time.time()
+        # gradients written by backward passes belong to one run only
+        self.comp_graph.grads_written = set()
 
         try:
             if self.debug_mode:

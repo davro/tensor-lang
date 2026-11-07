@@ -4,7 +4,7 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes and a stricter test harness are in. Core suite: 224/224 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes, a stricter test harness, and multi-pass gradient semantics are in. Core suite: 226/226 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
 > **Current focus:** v0.5.5 — robustness of existing features (control-flow edge cases, diagnostics, one normalisation slice).
 
@@ -86,7 +86,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
 * Linear layers: `linear` (N-D aware)
 * Reverse-mode autograd for a broad set of operations (FP32 and FP16), including `batch_norm` and `instance_norm` (simplified gradients)
-* Multiple `backward()` statements in one file (see [Automatic Differentiation](#automatic-differentiation))
+* Multiple `backward()` statements in one file; a pass only overwrites the gradients of parameters its loss depends on (see [Automatic Differentiation](#automatic-differentiation))
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
 * Control flow: scalar/single-element and tensor-valued `if` / `elif` / `else` (grammar, AST, and execution); conditions may compare against numeric literals (`x > 0.5`); branch shape/dtype consistency is enforced
 * Built-in optimizers: `sgd`, `adam` (compiler-managed state, multi-parameter, FP32 master weights for FP16 params)
@@ -116,7 +116,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented, and branch shape/dtype consistency is enforced. Edge cases are not yet specified or tested: truthiness of `NaN`, `-0.0`, and f16 values that underflow to zero; `backward()` in a two-level nested branch or in an `elif` branch (planned for v0.5.5).
 * **Comparison operators as general operations:** `>=`, `<=`, and `!=` work in conditions only; `greater`, `less`, and `equal` are the general tensor operations (planned for v0.5.5).
 * **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
-* **Multiple `backward()` statements:** supported when each pass uses its own parameters (see `tests/autograd_multiple_backward.tl`). Behaviour when several passes share a parameter's gradient, and the interaction with loss scaling, is not yet specified or tested.
+* **Multiple `backward()` statements:** each pass updates the gradients of the parameters its loss depends on; other parameters keep the gradient from the last pass that reached them, and a parameter no pass has reached has a zero gradient. There is no implicit gradient zeroing (see [Automatic Differentiation](#automatic-differentiation)). The interaction with loss scaling is not yet tested.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
 * **For-loop bodies:** operation parity with top level, including user-defined functions and `load()`. Loop counts must still be integer literals.
 * **Axis support is limited** for several normalisations.
@@ -454,7 +454,19 @@ backward(loss2)
 sgd(w2, w2_grad, 0.01)
 ```
 
-Passes that use separate parameters are tested. Behaviour when two passes share a parameter's gradient is not yet specified.
+A pass only overwrites the gradient (`<name>_grad`) of tensors its loss depends on. A parameter the loss does not reach keeps the gradient written by the last pass that did reach it, and a parameter that no pass has reached has a zero gradient. This means the updates can be applied after both passes:
+
+```text
+backward(loss1)
+backward(loss2)
+
+sgd(w1, w1_grad, 0.01)   // still the gradient from loss1
+sgd(w2, w2_grad, 0.01)   // gradient from loss2
+```
+
+There is no implicit gradient zeroing. If you call `sgd` or `opt.step()` on a parameter after a pass that did not reach it, its previous gradient is applied again, as in PyTorch without `zero_grad()`. Gradients written by a run do not carry over to the next compile.
+
+Tested: separate parameters with an update after each pass, separate parameters with both updates deferred, and a parameter that no loss reaches (`autograd_multiple_backward`, `autograd_multiple_backward_deferred`, `autograd_unreached_param`).
 
 ### Supported Gradient Operations
 
@@ -988,7 +1000,7 @@ The suite covers:
 * Linear layers, MLP, neural nets
 * Normalisations (layer/batch/instance, N-D)
 * Losses (mse, cross-entropy, N-D)
-* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward)
+* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward passes: sequential, deferred updates, unreached parameters)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …), including `load()`, tensor literals, user-defined functions, and f16 loads in loop bodies
 * Control flow (`control_flow_*`): tensor-valued conditions, comparison operators, scalar literals in `if`/`elif`, branch consistency (positive and negative), branch backward, `if` inside `for` (including a condition that flips between iterations), alias semantics
 * `any()` / `all()` reductions (`any_all_*`)
@@ -1112,10 +1124,11 @@ Focus: harden what already exists rather than add another broad parity release.
 * Test runner clears each test's own cache directory before running it
 * Regression tests for the seams that broke during v0.5.4: branch consistency, scalar literals in `elif`, `load()` and tensor literals in loop bodies, f16 `load()`, alias semantics, `if` inside `for`
 
-**Phase 1 — small cleanups**
-* Remove dead, shadowed duplicates in `io.py` (`_ensure_gpu_alloc`, `_allocate_zeros`, `_load_data_file`)
-* Remove a duplicated `_inline_user_functions_in_nodes` call
-* Use a nonzero learning rate in `autograd_multiple_backward` so it can detect wrong gradients
+**Phase 1 — small cleanups (done)**
+* Removed dead, shadowed duplicates in `io.py` (`_ensure_gpu_alloc`, `_allocate_zeros`, `_load_data_file`)
+* Removed a duplicated `_inline_user_functions_in_nodes` call
+* `autograd_multiple_backward` now uses a nonzero learning rate so it can detect wrong gradients
+* Multi-pass gradient semantics: a `backward()` pass no longer zeroes the gradients of parameters its loss does not reach (found by the deferred-update test)
 
 **Phase 2 — diagnostics**
 * Name the origin of synthetic bindings in errors

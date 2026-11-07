@@ -37,6 +37,9 @@ class ComputationGraph:
         self.tensorlang = TensorLang()
         self.debug_mode = debug_mode
         self.overflow_detected = False
+        # Gradient names (e.g. "w1") that a backward pass has already written
+        # to their <name>_grad variable during the current compile.
+        self.grads_written: set[str] = set()
 
     def register_tensor(self, name: str, value: np.ndarray, requires_grad: bool = False):
         self.tensors[name] = value
@@ -58,6 +61,25 @@ class ComputationGraph:
             else:
                 self.gradients[name] = np.zeros_like(self.tensors[name])
 
+
+    def reachable_tensors(self, loss_name: str, active_branch_path=None) -> set:
+        """Names of the tensors `loss_name` structurally depends on (the loss itself
+        and, transitively, the inputs of every recorded node that feeds it).
+        Honours the same branch filter as backward()."""
+        active = tuple(active_branch_path or ())
+        needed = {loss_name}
+        for node in reversed(self.nodes):
+            node_branch = tuple(node.metadata.get("branch_path", ()) or ())
+            if active and not self._branch_path_compatible(node_branch, active):
+                continue
+            if node.output_name in needed:
+                needed.update(node.inputs)
+        return needed
+
+    def keeps_previous_gradient(self, name: str, reached: set) -> bool:
+        """True when this pass does not reach `name` AND an earlier pass already
+        wrote its gradient: that earlier gradient must survive this pass."""
+        return name not in reached and name in self.grads_written
 
     def _branch_path_compatible(self, node_branch, active_branch):
         node_branch = tuple(node_branch or ())

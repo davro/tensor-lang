@@ -882,6 +882,7 @@ class ExecutionMixin:
 
                 self.comp_graph.gradients = {}
                 self.comp_graph.backward(loss_name, scale=scale)
+                reached = self.comp_graph.reachable_tensors(loss_name)
 
                 # Overflow detection
                 overflow = self.comp_graph.overflow_detected
@@ -909,7 +910,9 @@ class ExecutionMixin:
 
                 if not overflow:
                     for grad_name in self.comp_graph.requires_grad:
-                        if grad_name in self.comp_graph.gradients:
+                        if (grad_name in self.comp_graph.gradients
+                                and not self.comp_graph.keeps_previous_gradient(grad_name, reached)):
+                            self.comp_graph.grads_written.add(grad_name)
                             grad_tensor = self.comp_graph.gradients[grad_name]
                             # Unscale gradients before optimizer step
                             if scale != 1.0 and scale != 0.0:
@@ -1262,9 +1265,12 @@ class ExecutionMixin:
         try:
             self.comp_graph.gradients = {}
             self.comp_graph.backward(loss_name, scale=scale, active_branch_path=self.comp_graph.active_branch_path)
+            reached = self.comp_graph.reachable_tensors(loss_name, self.comp_graph.active_branch_path)
 
             for grad_name in self.comp_graph.requires_grad:
                 if grad_name not in self.comp_graph.gradients:
+                    continue
+                if self.comp_graph.keeps_previous_gradient(grad_name, reached):
                     continue
                 grad_tensor = self.comp_graph.gradients[grad_name]
                 if self.debug_mode:
@@ -1289,6 +1295,9 @@ class ExecutionMixin:
                 for grad_name in self.comp_graph.requires_grad:
                     if grad_name not in self.comp_graph.gradients:
                         continue
+                    if self.comp_graph.keeps_previous_gradient(grad_name, reached):
+                        continue
+                    self.comp_graph.grads_written.add(grad_name)
                     grad_tensor = self.comp_graph.gradients[grad_name]
                     if scale != 1.0 and scale != 0.0:
                         grad_tensor = grad_tensor / scale

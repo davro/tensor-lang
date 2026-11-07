@@ -322,9 +322,6 @@ def build_ast(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False, source_code=None) 
     # Inline user-defined functions that appear in for/if bodies.
     ast = _inline_user_functions_in_nodes(ast, functions, [0])
 
-    # Inline user-defined functions that appear in for/if bodies.
-    ast = _inline_user_functions_in_nodes(ast, functions, [0])
-
     # Default to last tensor if no explicit output
     if not output_tensor and ast:
         # Find the last 'let' statement (skip backward statements)
