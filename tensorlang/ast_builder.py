@@ -608,10 +608,28 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         return {'type': expr_name, 'args': args}
 
     # Ops that still use NAME-only arguments
-    elif tree.data in ['equal_call', 'greater_call', 'linear_call']:
+    elif tree.data in ['equal_call', 'greater_call', 'linear_call',
+                       'greater_equal_call', 'less_equal_call', 'not_equal_call']:
         expr_name = tree.data.replace("_call", "")
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         return {'type': expr_name, 'args': args}
+
+    elif tree.data == 'comparison_expr':
+        # A comparison used as a value (`let m = x >= y`), lowered to the named op.
+        _reject_chained_comparison(tree)
+        cond = build_condition(tree, DEBUG_MODE, DEBUG_INFO)
+        sides = [cond['left'], cond['right']]
+        scalar = [isinstance(x, dict) and x.get('type') == 'number' for x in sides]
+        if any(scalar):
+            others = [x for x, is_lit in zip(sides, scalar) if not is_lit]
+            if others and not (isinstance(others[0], dict) and others[0].get('type') == 'name'):
+                raise ValueError(
+                    "[E-SCALAR-LITERAL] a numeric literal can only be compared with a named tensor "
+                    "in a `let`; put the other side in its own let first.")
+            like = others[0]['name'] if others else None
+            sides = [_scalar_literal_to_fill(x, like=like) if is_lit else x
+                     for x, is_lit in zip(sides, scalar)]
+        return {'type': _COMPARISON_OP_NAMES[cond['op']], 'args': sides}
 
     elif tree.data == 'less_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
@@ -1280,27 +1298,40 @@ def build_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
     return []
 
 
-def _scalar_literal_to_fill(expr_node):
-    """Rewrite a bare numeric literal into a (1,) f32 fill so the type checker,
-    codegen and broadcasting comparison kernels treat it like any other tensor."""
+def _scalar_literal_to_fill(expr_node, like=None):
+    """Rewrite a bare numeric literal into an f32 fill.
+
+    The comparison kernels only run equal shapes, or a (rows, cols) tensor against a (cols,)
+    row, so a literal is given the SAME shape as the tensor it is compared with (`like`,
+    resolved by the type checker). With nothing to match it is a (1,) fill."""
     if isinstance(expr_node, dict) and expr_node.get("type") == "number":
-        return {"type": "fill", "value": float(expr_node["value"]), "shape": (1,)}
+        node = {"type": "fill", "value": float(expr_node["value"]), "shape": (1,)}
+        if like is not None:
+            node["shape_like"] = like
+        return node
     return expr_node
 
 
 def _flatten_comparison_operands(condition, synthetics, DEBUG_MODE=False):
     if not (isinstance(condition, dict) and condition.get("type") == "comparison"):
         return
-    for side in ("left", "right"):
-        operand = condition.get(side)
-        before = len(synthetics)
-        is_scalar = isinstance(operand, dict) and operand.get("type") == "number"
-        if is_scalar:
-            operand = _scalar_literal_to_fill(operand)
-        name = _flatten_expr_to_name(operand, synthetics, DEBUG_MODE)
-        if is_scalar:
-            synthetics[-1]["ty"] = {"dtype": "f32", "shape": (1,)}
-        condition[side] = {"type": "name", "name": name}
+    sides = ("left", "right")
+    is_scalar = {s: isinstance(condition.get(s), dict) and condition[s].get("type") == "number"
+                 for s in sides}
+    names = {}
+    # tensors / nested expressions first, so a literal can take the shape of what it is compared with
+    for side in sides:
+        if not is_scalar[side]:
+            names[side] = _flatten_expr_to_name(condition[side], synthetics, DEBUG_MODE)
+    like = names.get("left") or names.get("right")
+    for side in sides:
+        if is_scalar[side]:
+            literal = condition[side]
+            fill = _scalar_literal_to_fill(literal, like=like)
+            names[side] = _flatten_expr_to_name(fill, synthetics, DEBUG_MODE)
+            condition[f"{side}_text"] = str(literal["value"])
+    for side in sides:
+        condition[side] = {"type": "name", "name": names[side]}
 
 
 def build_if_statement(tree, DEBUG_MODE=False, DEBUG_INFO=False):
@@ -1371,6 +1402,20 @@ def build_block_from_clause(tree, DEBUG_MODE=False, DEBUG_INFO=False):
     return body
 
 
+_COMPARISON_OP_NAMES = {'>': 'greater', '<': 'less', '==': 'equal',
+                        '>=': 'greater_equal', '<=': 'less_equal', '!=': 'not_equal'}
+
+
+def _reject_chained_comparison(tree):
+    """`a > b > c` parses (right-associatively) but means nothing useful."""
+    for child in tree.children:
+        if getattr(child, 'data', None) == 'expr' and child.children:
+            if getattr(child.children[0], 'data', None) == 'comparison_expr':
+                raise ValueError(
+                    "[E-SYNTAX] chained comparisons (a > b > c) are not supported; compare two "
+                    "values at a time, using separate lets for each comparison.")
+
+
 def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
     if tree.data == 'condition':
         if tree.children:
@@ -1397,6 +1442,7 @@ def build_condition(tree, DEBUG_MODE=False, DEBUG_INFO=False):
         return build_expression(tree, DEBUG_MODE, DEBUG_INFO)
 
     if tree.data == 'comparison_expr':
+        _reject_chained_comparison(tree)
         expr_children = [c for c in tree.children if c.data == 'expr']
         def _collect_tokens(node):
             if isinstance(node, Token):

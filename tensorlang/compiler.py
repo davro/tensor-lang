@@ -28,7 +28,7 @@ from tensorlang.codegen import CodegenMixin
 from tensorlang.constants import (OPTIMIZER_NAMES, dtype_numpy, promote_dtype,
                                  DEFAULT_LOSS_SCALE_FP32, DEFAULT_LOSS_SCALE_FP16)
 
-from tensorlang.execution import ExecutionMixin
+from tensorlang.execution import ExecutionMixin, TensorLangRuntimeError
 from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.io import IOMixin
 from tensorlang.interop import InteropMixin
@@ -595,6 +595,23 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             cuda_code += kernel
                             self._record_operation("equal", name, [arg1, arg2])
 
+                        elif expr.get("type") in ("greater_equal", "less_equal", "not_equal"):
+                            arg1, arg2 = expr["args"]
+                            shape1, shape2 = env[arg1]["shape"], env[arg2]["shape"]
+                            output_shape = env[name]["shape"]
+                            size = int(np.prod([int(d) for d in output_shape])) if output_shape else 1
+                            cmp_gen = {
+                                "greater_equal": generator.greater_equal_broadcast,
+                                "less_equal": generator.less_equal_broadcast,
+                                "not_equal": generator.not_equal_broadcast,
+                            }[expr["type"]]
+                            kernel, kernel_info = cmp_gen(
+                                expr["type"], name, arg1, arg2, shape1, shape2, output_shape, size, dtype="f32"
+                            )
+                            kernels.append(kernel_info)
+                            cuda_code += kernel
+                            self._record_operation(expr["type"], name, [arg1, arg2])
+
                         elif expr.get("type") in ("any", "all"):
                             tensor_name = expr["tensor"]
                             input_shape = env[tensor_name]["shape"]
@@ -1026,7 +1043,18 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                 )
                 return False
 
+        except TensorLangRuntimeError as e:
+            self.tensorlang.print(message=str(e))
+            if self.debug_mode:
+                traceback.print_exc()
+            sys.exit(1)
+
         except ValueError as e:
+            if str(e).startswith("[E-"):
+                self.tensorlang.print(message=f"[COMPILER] error: {e}")
+                if self.debug_mode:
+                    traceback.print_exc()
+                sys.exit(1)
             self.tensorlang.print(message=f"[COMPILER] Value Error: failed: {e}")
             traceback.print_exc()
             sys.exit(1)

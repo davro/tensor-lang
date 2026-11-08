@@ -103,6 +103,19 @@ def _scalar_literal_message(name, expr):
             f"`let {name}: Tensor[f32, (1,)] = [{value}]` (or fill({value}, <shape>)).")
 
 
+def _has_zero_dim(shape):
+    try:
+        return any(int(d) == 0 for d in shape)
+    except (TypeError, ValueError):
+        return False
+
+
+def _empty_condition_message(text, name, shape):
+    return (f"[TYPE CHECKER] error: [E-CONDITION-EMPTY] the condition `{text}` involves an empty "
+            f"tensor ({_name_label(name)} has shape {tuple(shape)}). A condition needs at least "
+            f"one element.")
+
+
 def _shape_error(op, name, shape1, shape2, arg_names=None, hint=None):
     if arg_names and len(arg_names) == 2:
         operands = (f"{_name_label(arg_names[0])} {tuple(shape1)} vs "
@@ -225,6 +238,10 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         tensorlang.print(message=_undefined_message([cond_name], env, where="the `if`/`elif` condition"))
                         return False, env
                     shape = env[cond_name]["shape"]
+                    if _has_zero_dim(shape):
+                        tensorlang.print(message=_empty_condition_message(cond_name, cond_name, shape))
+                        return False, env
+                    cond_node["_condition_text"] = cond_name
                     # Tensor-valued conditions are allowed. Truthiness is all-nonzero.
                     cond_node["_condition_name"] = cond_name
                     cond_node["_condition_shape"] = shape
@@ -234,6 +251,11 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if tensor_type is None:
                         tensorlang.print(message=_undefined_message([tensor_name], env, where=f"the `{cond['type']}({tensor_name})` condition"))
                         return False, env
+                    if _has_zero_dim(tensor_type.get("shape", ())):
+                        tensorlang.print(message=_empty_condition_message(
+                            f"{cond['type']}({tensor_name})", tensor_name, tensor_type.get("shape", ())))
+                        return False, env
+                    cond_node["_condition_text"] = f"{cond['type']}({tensor_name})"
                     synth_name = f"__if_cond_{len(env)}"
                     env[synth_name] = {"dtype": "f32", "shape": ()}
                     cond_node["_condition_name"] = synth_name
@@ -277,6 +299,15 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     except ValueError:
                         tensorlang.print(message=f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] if/elif condition: cannot compare {_name_label(left_name)} {tuple(env[left_name]['shape'])} with {_name_label(right_name)} {tuple(env[right_name]['shape'])}")
                         return False, env
+                    left_text = cond.get("left_text") or ("<expression>" if _is_synthetic(left_name) else left_name)
+                    right_text = cond.get("right_text") or ("<expression>" if _is_synthetic(right_name) else right_name)
+                    cond_text = f"{left_text} {op} {right_text}"
+                    for operand in (left_name, right_name):
+                        if _has_zero_dim(env[operand]["shape"]):
+                            tensorlang.print(message=_empty_condition_message(
+                                cond_text, operand, env[operand]["shape"]))
+                            return False, env
+                    cond_node["_condition_text"] = cond_text
                     # Tensor-valued conditions are allowed. Truthiness is all-nonzero.
                     synth_name = f"__if_cond_{len(env)}"
                     env[synth_name] = {"dtype": "f32", "shape": out_shape}
@@ -438,13 +469,19 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             "fill", "load", "save",
             "sum", "mean", "max", "min", "argmax", "argmin",
             "any", "all",
-            "greater", "less", "equal",
+            "greater", "less", "equal", "greater_equal", "less_equal", "not_equal",
             "linear", "layer_norm", "batch_norm", "instance_norm",
             "cross_entropy", "mse_loss",
             "transpose", "reshape", "concat", "slice",
             "sgd", "adam", "sgd_update", "adam_update",
         ]:
             if expr["type"] == "fill":
+                if expr.get("shape_like") is not None:
+                    like = expr["shape_like"]
+                    if like not in env:
+                        tensorlang.print(message=_undefined_message([like], env, name, expr))
+                        return False, env
+                    expr["shape"] = env[like]["shape"]    # same object: kernels test shape1 == shape2
                 fill_dtype = "f32"
                 if ty and isinstance(ty, dict) and "dtype" in ty:
                     fill_dtype = ty["dtype"]
@@ -971,7 +1008,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     continue
 
 
-                if expr["type"] in ("greater", "less", "equal"):
+                if expr["type"] in ("greater", "less", "equal", "greater_equal", "less_equal", "not_equal"):
                     shape1, shape2 = args[0]["shape"], args[1]["shape"]
                     orig_shape1, orig_shape2 = shape1, shape2
                     if len(shape1) < len(shape2):

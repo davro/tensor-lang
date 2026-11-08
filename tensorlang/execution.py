@@ -15,6 +15,10 @@ from tensorlang.tensor_lang import TensorLang
 from tensorlang.constants import dtype_numpy, OPTIMIZER_NAMES
 
 
+class TensorLangRuntimeError(RuntimeError):
+    """A run-time failure with a stable diagnostic code; the message is already formatted."""
+
+
 class ExecutionMixin:
     def _inline_functions(self, ast, functions):
         return ast
@@ -1062,6 +1066,8 @@ class ExecutionMixin:
         if name is None:
             return False
 
+        self._reject_nan_condition(node, tensors, gpu_allocs, env, cuda)
+
         if name not in tensors and name in gpu_allocs and name in env:
             shape = tuple(int(d) for d in env[name]["shape"])
             np_dtype = self._np_dtype(env, name)
@@ -1076,6 +1082,40 @@ class ExecutionMixin:
         if arr.size == 0:
             return False
         return bool(np.all(arr != 0))
+
+    def _reject_nan_condition(self, node, tensors, gpu_allocs, env, cuda):
+        """A NaN operand makes a condition meaningless: every comparison with NaN is false
+        (except !=), so the program would silently take a branch. Stop instead.
+        The operands are checked, not the 0/1 result, which has already lost the NaN."""
+        expr = node.get("_condition_expr")
+        if isinstance(expr, dict) and isinstance(expr.get("args"), list):
+            operands = list(expr["args"])
+        elif isinstance(expr, dict) and "tensor" in expr:
+            operands = [expr["tensor"]]
+        else:
+            operands = [node.get("_condition_name")]
+        for op_name in operands:
+            if not isinstance(op_name, str) or op_name not in env:
+                continue
+            if op_name in gpu_allocs:
+                shape = tuple(int(d) for d in env[op_name]["shape"])
+                arr = np.empty(shape if shape else (1,), dtype=self._np_dtype(env, op_name))
+                cuda.memcpy_dtoh(arr, gpu_allocs[op_name])
+            elif op_name in tensors:
+                arr = np.asarray(tensors[op_name])
+            else:
+                continue
+            if arr.dtype.kind != "f":
+                continue
+            nan_count = int(np.isnan(arr).sum())
+            if nan_count:
+                text = node.get("_condition_text") or op_name
+                label = "a nested expression" if op_name.startswith("__tmp_") else f"'{op_name}'"
+                raise TensorLangRuntimeError(
+                    f"[RUNTIME] error: [E-NAN-IN-CONDITION] {label} contains NaN ({nan_count} of "
+                    f"{arr.size} elements), so the condition `{text}` cannot be evaluated: a NaN "
+                    f"makes every comparison false (except !=) and would silently pick a branch. "
+                    f"Find the computation that produced it.")
 
     def _select_if_branch(self, node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir):
         if self._eval_if_condition(node, tensors, gpu_allocs, env, cuda):

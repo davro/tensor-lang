@@ -87,6 +87,10 @@ expr: tensor_literal
     | greater_call
     | less_call
     | equal_call
+    | greater_equal_call
+    | less_equal_call
+    | not_equal_call
+    | comparison_expr
     | linear_call
     | layer_norm_call
     | batch_norm_call
@@ -217,6 +221,9 @@ softmax_call: "softmax" "(" NAME ["," "axis" "=" NUMBER] ")"
 greater_call: "greater" "(" NAME "," NAME ")"
 less_call: "less" "(" NAME "," NAME ")"
 equal_call: "equal" "(" NAME "," NAME ")"
+greater_equal_call: "greater_equal" "(" NAME "," NAME ")"
+less_equal_call: "less_equal" "(" NAME "," NAME ")"
+not_equal_call: "not_equal" "(" NAME "," NAME ")"
 
 
 ////////////////////////////////////////////////////////////////////////////////
