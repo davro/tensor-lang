@@ -446,7 +446,9 @@ class CodegenMixin:
 
                 _prev_branch_path = getattr(self, "_branch_path", ())
                 self._branch_path = _prev_branch_path + (f"{if_scope}_then",)
-                then_kernels, then_cuda, then_flat = self._generate_kernels_for_nodes(node.get("then", []), env, generator, scope_prefix=if_scope)
+                # each branch gets its own scope: branches reuse tensor names, and same-named kernels in
+                # sibling branches would be duplicate CUDA symbols
+                then_kernels, then_cuda, then_flat = self._generate_kernels_for_nodes(node.get("then", []), env, generator, scope_prefix=f"{if_scope}_then")
                 node["_then_kernels"] = then_kernels
                 node["_then_flat_items"] = then_flat
                 node["_then_branch_path"] = self._branch_path
@@ -479,7 +481,7 @@ class CodegenMixin:
                     elif_node["_condition_kernels"] = e_synth_kernels + e_cond_kernels
 
                     self._branch_path = _prev_branch_path + (f"{if_scope}_elif{len(node['_elif_branch_paths'])}",)
-                    e_body_kernels, e_body_cuda, e_body_flat = self._generate_kernels_for_nodes(elif_node.get("body", []), env, generator, scope_prefix=if_scope)
+                    e_body_kernels, e_body_cuda, e_body_flat = self._generate_kernels_for_nodes(elif_node.get("body", []), env, generator, scope_prefix=f"{if_scope}_elif{len(node['_elif_branch_paths'])}")
                     elif_node["_body_kernels"] = e_body_kernels
                     elif_node["_body_flat_items"] = e_body_flat
                     node["_elif_branch_paths"].append(self._branch_path)
@@ -492,7 +494,7 @@ class CodegenMixin:
                 else_flat = []
                 if node.get("else") is not None:
                     self._branch_path = _prev_branch_path + (f"{if_scope}_else",)
-                    else_kernels, else_cuda, else_flat = self._generate_kernels_for_nodes(node["else"], env, generator, scope_prefix=if_scope)
+                    else_kernels, else_cuda, else_flat = self._generate_kernels_for_nodes(node["else"], env, generator, scope_prefix=f"{if_scope}_else")
                     node["_else_kernels"] = else_kernels
                     node["_else_flat_items"] = else_flat
                     node["_else_branch_path"] = self._branch_path

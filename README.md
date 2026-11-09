@@ -4,7 +4,7 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes, a stricter test harness, and multi-pass gradient semantics are in. Core suite: 226/226 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes with clearer messages, a stricter test harness, multi-pass gradient semantics, defined condition semantics (`NaN`, empty tensors), and comparison operators usable as values are in. Core suite: 266/266 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
 > **Current focus:** v0.5.5 — robustness of existing features (control-flow edge cases, diagnostics, one normalisation slice).
 
@@ -79,8 +79,8 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Matrix multiplication (`matmul`) — cuBLAS-backed (FP32 and FP16 tensor core path), including batched N-D
 * Activations: `relu`, `sigmoid`, `tanh`, `softmax`, `gelu`, `swish` (N-D aware)
 * Reductions: `sum`, `mean`, `min`, `max`, `argmin`, `argmax` (N-D aware, arbitrary axis)
-* Comparisons: `greater`, `less`, `equal` (N-D broadcasting)
-* Condition comparisons: `>`, `<`, `==`, `>=`, `<=`, `!=` (N-D broadcasting; output always f32)
+* Comparisons: `greater`, `less`, `equal`, `greater_equal`, `less_equal`, `not_equal`, also written as the operators `>`, `<`, `==`, `>=`, `<=`, `!=` (equal shapes, or a `(rows, cols)` tensor against a `(cols,)` row; see Known limitations)
+* Condition comparisons: `>`, `<`, `==`, `>=`, `<=`, `!=` (output always f32); a numeric literal takes the shape of the tensor it is compared with
 * Slicing, reshape, transpose, concat (N-D aware)
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
@@ -107,14 +107,14 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **For-loop body parity** — normalisations, comparisons, slicing, reshape, transpose, concat, additional reductions, user-defined functions, and `load()` execute in loop bodies
 * **`any()` / `all()` reductions** — full and axis reductions, N-D aware, f16 support, zero gradients for autograd
 * **Tensor-valued control flow** — `if` / `elif` / `else` conditions may be multi-element tensors; truthiness is all-nonzero
-* **Comparison operators in conditions** — `>`, `<`, `==`, `>=`, `<=`, `!=` with N-D broadcasting
-* **`backward()` inside branches** — supported in a selected branch, with branch-aware autograd
+* **Comparison operators as expressions** — `let m = x >= y`, `let m = x != 2.0` (lowered to the named operations; chained comparisons such as `a > b > c` are a syntax error)
+* **`backward()` inside branches** — in any `if`, `elif` or `else` branch, including nested branches (two levels and deeper); each `backward()` runs where it appears, several may appear in one branch, and the loss may depend on values computed before the branch or in an enclosing branch
 * **Stable diagnostic codes** — see [Diagnostics](#diagnostics)
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` grammar, AST construction, scalar/single-element, and tensor-valued execution are implemented, and branch shape/dtype consistency is enforced. Edge cases are not yet specified or tested: truthiness of `NaN`, `-0.0`, and f16 values that underflow to zero; `backward()` in a two-level nested branch or in an `elif` branch (planned for v0.5.5).
-* **Comparison operators as general operations:** `>=`, `<=`, and `!=` work in conditions only; `greater`, `less`, and `equal` are the general tensor operations (planned for v0.5.5).
+* **Control flow:** `if` / `elif` / `else` are implemented with defined condition semantics (see [Control Flow](#control-flow)) and branch shape/dtype consistency is enforced. A `for` loop body runs only the first `backward()` statement it contains (a branch runs all of them).
+* **Comparison shapes:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` row. Other broadcasts (for example `(3,)` against `(1,)`, or a row against a matrix) pass the type checker but are not reliably supported. A numeric literal avoids the problem because it takes the shape of the tensor it is compared with. `phase3/scan_comparison_shapes.py` lists suspicious comparisons in a codebase. Comparisons of f16 tensors are also untested: the kernels are generated for f32 operands.
 * **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
 * **Multiple `backward()` statements:** each pass updates the gradients of the parameters its loss depends on; other parameters keep the gradient from the last pass that reached them, and a parameter no pass has reached has a zero gradient. There is no implicit gradient zeroing (see [Automatic Differentiation](#automatic-differentiation)). The interaction with loss scaling is not yet tested.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
@@ -262,6 +262,13 @@ let img: Tensor[f32, (batch, channels, height, width)] = ...
 
 Supported dtypes: `f16`, `f32`. (`f64` is parsed but lowered to `f32`.)
 
+There are no scalar values. A bare number cannot be bound with `let` (`[E-SCALAR-LITERAL]`). Numeric literals are valid only in comparisons (`if x > 0.5`, `let m = x >= 0.5`), in optimizer arguments (`sgd(w, w_grad, 0.01)`), and as `fill` values. For a constant operand, use a `(1,)` tensor:
+
+```text
+let half: Tensor[f32, (1,)] = [0.5]
+let y = mult(x, half)
+```
+
 Shapes are part of the type system. The compiler checks shape compatibility and broadcasting rules at compile time, including N-D broadcasting (NumPy-style: align trailing dims, broadcast size-1 dims).
 
 ### User-Defined Functions
@@ -357,8 +364,8 @@ A top-level `let a = z` makes `a` another name for `z`. After execution the comp
 
 | Operation | Status | Notes |
 |---|---|---|
-| `greater`, `less`, `equal` | Supported | N-D broadcasting; output always f32 |
-| `>=`, `<=`, `!=` | Supported in conditions | N-D broadcasting; output always f32; used for tensor-valued branch conditions |
+| `greater`, `less`, `equal`, `greater_equal`, `less_equal`, `not_equal` | Supported | Output always f32 (0.0 / 1.0). Operands: equal shapes, or `(rows, cols)` against `(cols,)` |
+| `>`, `<`, `==`, `>=`, `<=`, `!=` | Supported | Operator forms of the above, usable in conditions and as values: `let m = x >= y`. One comparison at a time; a numeric literal on either side is allowed |
 
 ---
 
@@ -385,11 +392,13 @@ z
 
 ### Conditions
 
-* Comparison operators: `>`, `<`, `==`, `>=`, `<=`, `!=`, with N-D broadcasting. The result is always f32.
-* Either side of a comparison may be a tensor name or a numeric literal. A literal is lowered to a `(1,)` f32 fill that broadcasts against the other side. This works in `if` and `elif` conditions.
+* Comparison operators: `>`, `<`, `==`, `>=`, `<=`, `!=`. The result is always f32. The same operators work as values (`let m = x >= y`) and as the named operations `greater_equal(x, y)` and so on.
+* Either side of a comparison may be a tensor name or a numeric literal. A literal is lowered to an f32 fill with the same shape as the tensor on the other side, so `x > 0.5` compares every element of `x` with `0.5`. This works in `if` and `elif` conditions and in `let` comparisons. In a `let`, a literal can only be compared with a named tensor (not a nested call).
 * A bare tensor name is also a valid condition.
 * **Truthiness** is all-nonzero: a multi-element condition is true only if every element is nonzero.
-* Edge cases are not yet specified or tested: `NaN`, `-0.0`, f16 underflow to zero, and empty tensors (planned for v0.5.5).
+* `-0.0` is falsy (it equals zero). An f16 value that underflows to zero when stored is zero, so it is falsy. Infinity is an ordinary value: `inf > 1.0` is true.
+* **`NaN` is a run-time error** (`[E-NAN-IN-CONDITION]`). Every comparison with `NaN` is false (except `!=`), so a `NaN` loss would silently take the `else` branch. The operands of the condition are checked before it is evaluated, for comparisons, bare names, and `any()`/`all()`, in `if` and `elif`. This costs one device-to-host copy of each operand per evaluation, which matters only for large tensors in conditions.
+* **An empty tensor is a compile error** (`[E-CONDITION-EMPTY]`). A zero-sized tensor has no elements to be "all nonzero".
 
 ### Branch consistency
 
@@ -409,7 +418,27 @@ if x > 0.0 {
 
 ### Branches and autograd
 
-`backward()` is supported inside a selected branch. Two-level nested branches and `elif` branches are not yet covered by tests.
+`backward()` is supported in any branch of an `if`/`elif`/`else`, and in `if` statements nested inside branches. Only the nodes of the branch that actually ran (and of its enclosing branches) take part in the backward pass, so branches may define the same names with different operations:
+
+```text
+if c1 {
+    let z = mult(w, w)
+    let loss = sum(z)
+    backward(loss)          // runs only if c1 is true
+} elif c2 {
+    let z = mult(w, x)
+    let loss = sum(z)
+    backward(loss)
+} else {
+    let z = add(w, w)
+    let loss = sum(z)
+    backward(loss)
+}
+```
+
+* Each `backward()` runs at its position in the branch, in order, so `backward(loss)` followed by `sgd(w, w_grad, 0.01)` steps with the new gradient, and a branch may contain several `backward()` statements (the multi-pass rules above apply).
+* The loss may depend on tensors computed before the `if`, or in an enclosing branch; their values are read from the device like at top level.
+* A branch that is not taken never runs its backward pass, so the gradients of its parameters are not touched.
 
 ---
 
@@ -499,8 +528,7 @@ Tested: separate parameters with an update after each pass, separate parameters 
 | `min` | Yes | Full and axis reduction; gradient flows to all extrema |
 | `argmax` | Yes | Full and axis reduction; gradient is one-hot at index |
 | `argmin` | Yes | Full and axis reduction; gradient is one-hot at index |
-| `greater`, `less`, `equal` | Yes (zero) | Non-differentiable; gradient is zero |
-| `>=`, `<=`, `!=` | Yes (zero) | Non-differentiable; gradient is zero |
+| `greater`, `less`, `equal`, `greater_equal`, `less_equal`, `not_equal` | Yes (zero) | Non-differentiable; gradient is zero. Other paths through the same tensor still receive gradient (`autograd_comparison_ops`) |
 | `any`, `all` | Yes (zero) | Non-differentiable; gradient is zero |
 
 Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computation uses NumPy's type promotion (may upcast to f32 internally).
@@ -872,22 +900,35 @@ python3 tensorlang.py tests/my_test.tl --cache-layers
 
 ## Diagnostics
 
-Type-checker errors are printed as `[TYPE CHECKER] error: [E-CODE] message`. The code is stable; the wording may be improved between releases, so scripts and tests should match on the code.
+Errors carry a stable code. Type-checker errors print as `[TYPE CHECKER] error: [E-CODE] message` and parse errors as `[COMPILER] error: [E-CODE] message`. The code is stable; the wording may be improved between releases, so scripts and tests should match on the code.
 
 | Code | Raised for |
 |---|---|
-| `[E-SHAPE-MISMATCH]` | Shape errors in elementwise ops, `matmul`, and other shape-checked operations |
+| `[E-SHAPE-MISMATCH]` | Shape errors in elementwise ops, `matmul`, comparisons, and other shape-checked operations |
 | `[E-BRANCH-MISMATCH]` | A name defined in more than one `if`/`elif`/`else` branch with different shapes or dtypes |
 | `[E-UNDEFINED-TENSOR]` | A tensor name used before it is defined (operation args, conditions) |
-| `[E-CONDITION-OPERAND]` | A condition comparison whose operand is not a tensor name or numeric literal |
+| `[E-CONDITION-OPERAND]` | A condition comparison whose operand is neither a tensor name nor a numeric literal |
+| `[E-SCALAR-LITERAL]` | A bare number bound with `let`, or a numeric literal used as an operand |
+| `[E-CONDITION-EMPTY]` | An empty (zero-sized) tensor used in an `if`/`elif` condition |
+| `[E-NAN-IN-CONDITION]` | A `NaN` operand in an `if`/`elif` condition. A run-time error, printed as `[RUNTIME] error: ...` |
+| `[E-SYNTAX]` | Any other syntax error, including chained comparisons (`a > b > c`); reported with the source line and a caret where there is one |
 
-Example:
+Messages name the expression involved and avoid compiler internals. A nested call such as `add(x, mult(x, nope))` is reported as ``the nested expression `mult(x, nope)` ``, not as a `__tmp_N` temporary, and a near-miss name gets a suggestion:
 
 ```text
+[TYPE CHECKER] error: [E-UNDEFINED-TENSOR] `let y = add(weights, wieghts)` uses 'wieghts', which is not defined at this point. Did you mean 'weights' instead of 'wieghts'?
+
+[TYPE CHECKER] error: [E-BRANCH-MISMATCH] branch shape/dtype mismatch for 'y': the `if` branch defines it as f32 (2, 2), but the `else` branch defines it as f32 (1,). A name used after an if/elif/else must have the same shape and dtype in every branch that sets it.
+
 [TYPE CHECKER] error: [E-SHAPE-MISMATCH] matmul: shape mismatch computing 'z': 'x' (3, 4) vs 'y' (5, 6). Inner dimensions must match: left has 4 columns but right has 5 rows
+
+[COMPILER] error: [E-SCALAR-LITERAL] a numeric literal cannot be used here (line 2, column 16).
+let y = add(x, 2.0)
+               ^
+Numeric literals are only valid in comparison conditions (`if x > 0.5`) and in optimizer arguments (`sgd(w, w_grad, 0.01)`). To use a constant as an operand, declare a tensor, e.g. `let half: Tensor[f32, (1,)] = [0.5]`.
 ```
 
-A failed compile exits with a non-zero status. Further codes (including a dedicated code for unsupported scalar literals) are planned.
+A failed compile exits with a non-zero status. A Python traceback is printed for parse errors only with `--debug`. Each code has a negative test under `tests/diagnostics_*.tl`.
 
 ---
 
@@ -1002,7 +1043,10 @@ The suite covers:
 * Losses (mse, cross-entropy, N-D)
 * Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward passes: sequential, deferred updates, unreached parameters)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …), including `load()`, tensor literals, user-defined functions, and f16 loads in loop bodies
-* Control flow (`control_flow_*`): tensor-valued conditions, comparison operators, scalar literals in `if`/`elif`, branch consistency (positive and negative), branch backward, `if` inside `for` (including a condition that flips between iterations), alias semantics
+* Comparison operations (`comparison_*`, `autograd_comparison_ops`, `for_loop_comparison_ops`): the named operations, the operator forms, literals against 1-D, 2-D and 3-D tensors, zero gradients
+* Condition semantics (`control_flow_condition_*`, `control_flow_nan_condition_*`): `-0.0`, f16 underflow, infinity, all-nonzero, empty tensors (compile error), `NaN` (run-time error, loaded from a fixture)
+* Autograd in branches (`autograd_branch_*`): `if`/`elif`/`else` taken and not taken, nested branches (then/then, then/else, inside an `elif`), a loss through a value computed outside the branch, several `backward()` statements in one branch, `backward()` followed by `sgd`
+* Control flow (`control_flow_*`): tensor-valued conditions, comparison operators, scalar literals in `if`/`elif`, branch consistency (positive and negative), `if` inside `for` (including a condition that flips between iterations), alias semantics
 * `any()` / `all()` reductions (`any_all_*`)
 * Functions, pipelines, portfolio-style examples
 * Load/save, including float16 fixtures (`load_f16_*`)
@@ -1011,6 +1055,7 @@ The suite covers:
 * Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
 * FP16 master weights (Adam optimizer)
 * For-loop body parity (`for_loop_body_parity.tl`)
+* Diagnostics (`diagnostics_*`): one negative test per error code, plus nested-expression, suggestion, condition, and branch-label messages
 * Negative tests (`@EXPECT_FAILURE`)
 
 Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`. Small input fixtures (such as `tests/for_loop_load_data.npy` and `tests/load_f16_data.npy`) live next to the tests that use them.
@@ -1130,15 +1175,20 @@ Focus: harden what already exists rather than add another broad parity release.
 * `autograd_multiple_backward` now uses a nonzero learning rate so it can detect wrong gradients
 * Multi-pass gradient semantics: a `backward()` pass no longer zeroes the gradients of parameters its loss does not reach (found by the deferred-update test)
 
-**Phase 2 — diagnostics**
-* Name the origin of synthetic bindings in errors
-* Distinguish "scalar literal not supported here" from "undefined tensor" (dedicated code)
-* Clearer shape-mismatch and branch-consistency messages; stable codes preserved
+**Phase 2 — diagnostics (done)**
+* Errors name the expression involved instead of compiler temporaries (`__tmp_N`)
+* `[E-SCALAR-LITERAL]` distinguishes a bare number from an undefined tensor; a bare numeric `let` is now an error instead of being skipped silently
+* "Did you mean" suggestions for undefined names; branch mismatches name the branches and both types
+* Parse errors show the source line with a caret (`[E-SYNTAX]`), with no traceback unless `--debug`
+* Still open: better debug output for loop and branch execution
 
-**Phase 3 — control-flow edge cases (tests first)**
-* Specify truthiness before changing code: empty tensor (compile error), `NaN`, `-0.0`, f16 underflow to zero
-* `>=`, `<=`, `!=` as general tensor operations, reusing the existing kernels
-* Two-level nested branch `backward()` and `backward()` in an `elif`
+**Phase 3 — control-flow edge cases (done)**
+* Done: condition semantics (`NaN` is a run-time error, an empty tensor is a compile error, `-0.0` and f16 underflow are falsy)
+* Done: `greater_equal`, `less_equal`, `not_equal` and the operators `>`, `<`, `==`, `>=`, `<=`, `!=` as values
+* Done: numeric literals in comparisons take the shape of the other operand (the comparison kernels cannot broadcast a `(1,)` operand)
+* Done: `backward()` in an `elif` and in nested branches, plus bugs this exposed: a loss through a value computed outside the branch gave silent zero gradients; only the first `backward()` in a branch ran; the pass ran after the branch's other statements instead of in order; top-level `if` statements (and `if` inside loop bodies) ran their branch without its autograd path, so a backward pass included the nodes of every branch; and sibling branches shared one kernel scope, so same-named kernels collided as duplicate CUDA symbols (each branch now has its own scope)
+* Still open: the same first-`backward()`-only rule in `for` loop bodies
+* Found along the way, not yet addressed: general N-D broadcasting in the comparison kernels (currently equal shapes or `(rows, cols)` vs `(cols,)`); f16 operands in comparison kernels; an explicit `isnan()` operation, since a deliberate check for `NaN` is impossible while any condition on a `NaN` is an error
 
 **Phase 4 — one normalisation slice**
 * `batch_norm` gamma/beta, with type checking and autograd

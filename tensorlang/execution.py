@@ -820,18 +820,9 @@ class ExecutionMixin:
                     continue
 
                 if node.get("type") == "if":
-                    for k in node.get("_condition_kernels", []):
-                        self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
-                    selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
-                        node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
-                    )
-                    if selected_nodes is not None:
-                        self._execute_if_branch(
-                            selected_nodes, selected_flat, selected_kernels,
-                            lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                        )
-                    node["_selected_branch_flat_items"] = selected_flat
-                    node["_selected_branch_kernels"] = selected_kernels
+                    # Shared with top level and nested ifs: also resolves which branch ran, so a
+                    # backward pass inside it ignores the nodes of the other branches.
+                    self._execute_if_node(node, kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
                     continue
 
                 if node.get("type") == "for":
@@ -1151,7 +1142,17 @@ class ExecutionMixin:
                 self._materialize_let_tensor(node, env, tensors, gpu_allocs, cache_file_dir, cuda)
 
         for local_idx, branch_node in branch_flat:
-            if branch_node.get("type") in ("backward", "save", "rebind"):
+            if branch_node.get("type") == "backward":
+                # Run each backward pass where it appears, in order: a later sgd/let sees its
+                # gradients and several passes in one branch all run. Sync every device tensor,
+                # as at top level: the loss may depend on values computed before this branch or
+                # in an enclosing branch, which this branch's own statements do not mention.
+                self._execute_backward_pass(
+                    branch_node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda,
+                    active_branch_path=branch_path or (),
+                )
+                continue
+            if branch_node.get("type") in ("save", "rebind"):
                 continue
             if branch_node.get("type") == "for":
                 self._execute_for_loop(branch_node, branch_kernels, None, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
@@ -1175,15 +1176,6 @@ class ExecutionMixin:
             if local_idx is None:
                 continue
             self._execute_single_kernel(branch_kernels[local_idx], lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
-
-        backward_node = next((n for n in branch_nodes if n.get("type") == "backward"), None)
-        if backward_node is not None:
-            sync_names = set(tensors.keys()) | self._collect_executed_output_names(branch_flat)
-            self.comp_graph.active_branch_path = tuple(branch_path or ())
-            self._execute_backward_pass(
-                backward_node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda,
-                sync_names=sync_names, active_branch_path=branch_path or (),
-            )
 
         pending_gpu = {}
         pending_tensors = {}

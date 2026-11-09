@@ -931,18 +931,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                         # inline, so more than one backward pass is supported.
                         for ast_idx, node in enumerate(ast):
                             if node.get("type") == "if":
-                                for k in node.get("_condition_kernels", []):
-                                    self._execute_single_kernel(k, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
-                                selected_nodes, selected_kernels, selected_flat = self._select_if_branch(
-                                    node, tensors, gpu_allocs, env, cuda, lib, cache_file_dir
-                                )
-                                if selected_nodes is not None:
-                                    self._execute_if_branch(
-                                        selected_nodes, selected_flat, selected_kernels,
-                                        lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                    )
-                                node["_selected_branch_flat_items"] = selected_flat
-                                node["_selected_branch_kernels"] = selected_kernels
+                                # Shared with nested ifs: also resolves which branch ran, so a backward
+                                # pass inside it ignores the nodes of the other branches.
+                                self._execute_if_node(node, kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
                                 continue
 
                             if node.get("type") == "for":
