@@ -137,6 +137,32 @@ _MATRIX_VECTOR_HINT = (
     "one of the N-D operand's dimensions"
 )
 
+
+_COMPARISON_OPS = ("greater", "less", "equal", "greater_equal", "less_equal", "not_equal")
+_COMPARISON_HINT = (
+    "comparison kernels support equal shapes, or a (rows, cols) tensor against a (cols,) "
+    "or (1, cols) row"
+)
+
+
+def _comparison_supported(shape1, shape2):
+    """True if the CUDA comparison kernels can run these operand shapes.
+
+    Shapes with non-integer (generic) dimensions are not judged here.
+    """
+    try:
+        s1 = tuple(int(d) for d in shape1)
+        s2 = tuple(int(d) for d in shape2)
+    except (TypeError, ValueError):
+        return True
+    if s1 == s2:
+        return True
+    if len(s1) == 2 and len(s2) in (1, 2):
+        cols = s1[1]
+        return s2 == (cols,) or s2 == (1, cols)
+    return False
+
+
 def _resolve_tensor_type(env, tensor_name):
     t = env.get(tensor_name)
     if t is not None:
@@ -294,6 +320,9 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if op not in (">", "<", "==", ">=", "<=", "!="):
                         tensorlang.print(message=f"[TYPE CHECKER] error: Unsupported if comparison operator '{op}'")
                         return False, env
+                    if not _comparison_supported(env[left_name]["shape"], env[right_name]["shape"]):
+                        tensorlang.print(message=f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] if/elif condition: cannot compare {_name_label(left_name)} {tuple(env[left_name]['shape'])} with {_name_label(right_name)} {tuple(env[right_name]['shape'])}. {_COMPARISON_HINT}")
+                        return False, env
                     try:
                         out_shape = tuple(np.broadcast_shapes(env[left_name]["shape"], env[right_name]["shape"]))
                     except ValueError:
@@ -417,6 +446,16 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
         if DEBUG_MODE:
             tensorlang.print(message=f"[TYPE CHECKER] Arg Names: {arg_names}")
             tensorlang.print(message=f"[TYPE CHECKER] Args: {args}")
+
+        # Comparison operand shapes must be ones the CUDA kernels can run (checked even when the
+        # result has a declared type).
+        if (isinstance(expr, dict) and expr.get("type") in _COMPARISON_OPS
+                and len(arg_names) == 2 and all(a in env for a in arg_names)):
+            _s1, _s2 = env[arg_names[0]]["shape"], env[arg_names[1]]["shape"]
+            if not _comparison_supported(_s1, _s2):
+                tensorlang.print(message=_shape_error(
+                    expr["type"], name, _s1, _s2, arg_names, hint=_COMPARISON_HINT))
+                return False, env
 
         # Annotated type: trust the declared type.
         if ty and isinstance(ty, dict) and "dtype" in ty:

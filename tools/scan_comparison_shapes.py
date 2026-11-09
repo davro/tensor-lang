@@ -7,10 +7,10 @@ The six comparison kernels (greater, less, equal, greater_equal, less_equal, not
     * a (rows, cols) operand against a (cols,) or (1, cols) row.
 Anything else type-checks but either fails in code generation or reads past a buffer.
 
-Run from the repo root (after apply_phase3.py, so literals already take their partner's shape):
+Works from any directory (it locates the repo root itself):
 
-    python3 phase3/scan_comparison_shapes.py            # tests/, apps/, examples/
-    python3 phase3/scan_comparison_shapes.py a.tl b.tl
+    python3 tools/scan_comparison_shapes.py            # tests/, apps/, examples/
+    python3 tools/scan_comparison_shapes.py a.tl b.tl
 
 Exit status 0 = nothing suspicious, 1 = suspicious comparisons found.
 Comparisons on names defined only inside a branch are reported as 'unresolved', not as problems.
@@ -19,12 +19,18 @@ import contextlib
 import glob
 import io
 import sys
+from pathlib import Path
+
+# repo-root-aware (fix_scan_paths)
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 from lark import Lark, UnexpectedInput
 from tensorlang.ast_builder import build_ast
 from tensorlang.type_checker import type_checker
 
 COMPARISONS = {"greater", "less", "equal", "greater_equal", "less_equal", "not_equal"}
-parser = Lark(open("tensorlang.lark").read(), start="program", parser="lalr", propagate_positions=True)
+parser = Lark((ROOT / "tensorlang.lark").read_text(), start="program", parser="lalr", propagate_positions=True)
 
 
 def supported(s1, s2):
@@ -56,9 +62,9 @@ def comparisons(nodes):
                 yield from comparisons(v)
 
 
-files = sys.argv[1:] or sorted(set(glob.glob("tests/**/*.tl", recursive=True)
-                                   + glob.glob("apps/**/*.tl", recursive=True)
-                                   + glob.glob("examples/**/*.tl", recursive=True)))
+files = sys.argv[1:] or sorted(set(glob.glob(str(ROOT / "tests/**/*.tl"), recursive=True)
+                                   + glob.glob(str(ROOT / "apps/**/*.tl"), recursive=True)
+                                   + glob.glob(str(ROOT / "examples/**/*.tl"), recursive=True)))
 bad = unresolved = checked = skipped = 0
 for f in files:
     code = "\n".join("" if l.lstrip().startswith("#") else l for l in open(f).read().split("\n"))
