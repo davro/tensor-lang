@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes with clearer messages, a stricter test harness, multi-pass gradient semantics, defined condition semantics (`NaN`, empty tensors), and comparison operators usable as values are in. Core suite: 267/267 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.5 released (robustness: stable diagnostic codes with clearer messages, a stricter test harness, defined condition semantics for `NaN` and empty tensors, comparison operators usable as values, `backward()` in any branch or loop body, multi-pass gradient rules, and fixes for several silent-wrong-answer bugs in branch and loop autograd). Core suite: 268/268 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.5 — robustness of existing features (control-flow edge cases, diagnostics, one normalisation slice).
+> **Current focus:** v0.5.6 — a comparison-shape guard, `batch_norm` `gamma`/`beta`, and an application acceptance test for control flow with autograd.
 
 ---
 
@@ -114,7 +114,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 ### Known limitations
 
 * **Control flow:** `if` / `elif` / `else` are implemented with defined condition semantics (see [Control Flow](#control-flow)) and branch shape/dtype consistency is enforced. A `for` loop body or a branch may contain several `backward()` statements; each runs where it appears.
-* **Comparison shapes:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` row. Other broadcasts (for example `(3,)` against `(1,)`, or a row against a matrix) pass the type checker but are not reliably supported. A numeric literal avoids the problem because it takes the shape of the tensor it is compared with. `phase3/scan_comparison_shapes.py` lists suspicious comparisons in a codebase. Comparisons of f16 tensors are also untested: the kernels are generated for f32 operands.
+* **Comparison shapes:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` row. Other broadcasts (for example `(3,)` against `(1,)`, or a row against a matrix) pass the type checker but are not reliably supported. A numeric literal avoids the problem because it takes the shape of the tensor it is compared with. `tools/scan_comparison_shapes.py` lists suspicious comparisons in a codebase. Comparisons of f16 tensors are also untested: the kernels are generated for f32 operands.
 * **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
 * **Multiple `backward()` statements:** each pass updates the gradients of the parameters its loss depends on; other parameters keep the gradient from the last pass that reached them, and a parameter no pass has reached has a zero gradient. There is no implicit gradient zeroing (see [Automatic Differentiation](#automatic-differentiation)). The interaction with loss scaling is not yet tested.
 * **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
@@ -1159,7 +1159,7 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.5 (in progress) — robustness, not breadth
+### v0.5.5 (released) — robustness, not breadth
 
 Focus: harden what already exists rather than add another broad parity release.
 
@@ -1188,14 +1188,21 @@ Focus: harden what already exists rather than add another broad parity release.
 * Done: numeric literals in comparisons take the shape of the other operand (the comparison kernels cannot broadcast a `(1,)` operand)
 * Done: `backward()` in an `elif` and in nested branches, plus bugs this exposed: a loss through a value computed outside the branch gave silent zero gradients; only the first `backward()` in a branch ran; the pass ran after the branch's other statements instead of in order; top-level `if` statements (and `if` inside loop bodies) ran their branch without its autograd path, so a backward pass included the nodes of every branch; and sibling branches shared one kernel scope, so same-named kernels collided as duplicate CUDA symbols (each branch now has its own scope)
 * Done: a `for` loop body now runs every `backward()` it contains, in order (it used to run only the first and skip the rest silently)
-* Found along the way, not yet addressed: general N-D broadcasting in the comparison kernels (currently equal shapes or `(rows, cols)` vs `(cols,)`); f16 operands in comparison kernels; an explicit `isnan()` operation, since a deliberate check for `NaN` is impossible while any condition on a `NaN` is an error
+* Found along the way, carried to v0.5.6: general N-D broadcasting in the comparison kernels (currently equal shapes or `(rows, cols)` vs `(cols,)`); f16 operands in comparison kernels; an explicit `isnan()` operation, since a deliberate check for `NaN` is impossible while any condition on a `NaN` is an error
 
-**Phase 4 — one normalisation slice**
+### v0.5.6 (in progress) — close the gaps found in v0.5.5
+
+**Phase 1 — comparison-shape guard**
+* Reject comparison operand shapes the kernels cannot run (anything other than equal shapes, or a `(rows, cols)` tensor against a `(cols,)` or `(1, cols)` row) with `[E-SHAPE-MISMATCH]`, for comparison `let` operations and for `if`/`elif` conditions
+* `tools/scan_comparison_shapes.py` found no affected comparison in the existing tests, apps or examples (716 comparisons checked)
+* Open: whether to reject f16 operands as well, or only document them
+
+**Phase 2 — one normalisation slice**
 * `batch_norm` gamma/beta, with type checking and autograd
 * Axis validation and clearer normalisation errors
 * Full N-D indexing and an `instance_norm` rework are deferred
 
-**Phase 5 — application acceptance test**
+**Phase 3 — application acceptance test**
 * A small app using an `if loss > threshold` learning-rate step and two losses with separate optimisers, with the branch taken in some iterations and not others
 
 **Also under consideration**
