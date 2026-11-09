@@ -949,9 +949,16 @@ class ExecutionMixin:
 
                 if bw_list_pos is not None:
                     for pos, (local_idx, node) in enumerate(for_node["_flat_items"]):
-                        if node["type"] in ("backward", "save", "rebind"):
-                            continue
                         if pos <= bw_list_pos:
+                            continue
+                        if node["type"] == "backward":
+                            # a further backward pass in the same loop body: run it here, in order
+                            # (the first one was handled above, with the loss-scaling bookkeeping)
+                            self._execute_backward_pass(
+                                node["loss_tensor"], tensors, gpu_allocs, env, cache_file_dir, cuda
+                            )
+                            continue
+                        if node["type"] in ("save", "rebind"):
                             continue
 
                         if node.get("type") == "if":

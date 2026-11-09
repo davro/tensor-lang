@@ -4,7 +4,7 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes with clearer messages, a stricter test harness, multi-pass gradient semantics, defined condition semantics (`NaN`, empty tensors), and comparison operators usable as values are in. Core suite: 266/266 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.4 released (control-flow robustness, loop-body parity, multiple `backward()` statements, and `batch_norm`/`instance_norm` autograd). v0.5.5 work in progress: stable diagnostic codes with clearer messages, a stricter test harness, multi-pass gradient semantics, defined condition semantics (`NaN`, empty tensors), and comparison operators usable as values are in. Core suite: 267/267 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
 > **Current focus:** v0.5.5 — robustness of existing features (control-flow edge cases, diagnostics, one normalisation slice).
 
@@ -113,7 +113,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 
 ### Known limitations
 
-* **Control flow:** `if` / `elif` / `else` are implemented with defined condition semantics (see [Control Flow](#control-flow)) and branch shape/dtype consistency is enforced. A `for` loop body runs only the first `backward()` statement it contains (a branch runs all of them).
+* **Control flow:** `if` / `elif` / `else` are implemented with defined condition semantics (see [Control Flow](#control-flow)) and branch shape/dtype consistency is enforced. A `for` loop body or a branch may contain several `backward()` statements; each runs where it appears.
 * **Comparison shapes:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` row. Other broadcasts (for example `(3,)` against `(1,)`, or a row against a matrix) pass the type checker but are not reliably supported. A numeric literal avoids the problem because it takes the shape of the tensor it is compared with. `phase3/scan_comparison_shapes.py` lists suspicious comparisons in a codebase. Comparisons of f16 tensors are also untested: the kernels are generated for f32 operands.
 * **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
 * **Multiple `backward()` statements:** each pass updates the gradients of the parameters its loss depends on; other parameters keep the gradient from the last pass that reached them, and a parameter no pass has reached has a zero gradient. There is no implicit gradient zeroing (see [Automatic Differentiation](#automatic-differentiation)). The interaction with loss scaling is not yet tested.
@@ -1041,7 +1041,7 @@ The suite covers:
 * Linear layers, MLP, neural nets
 * Normalisations (layer/batch/instance, N-D)
 * Losses (mse, cross-entropy, N-D)
-* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward passes: sequential, deferred updates, unreached parameters)
+* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward passes: sequential, deferred updates, unreached parameters, several per loop body)
 * Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …), including `load()`, tensor literals, user-defined functions, and f16 loads in loop bodies
 * Comparison operations (`comparison_*`, `autograd_comparison_ops`, `for_loop_comparison_ops`): the named operations, the operator forms, literals against 1-D, 2-D and 3-D tensors, zero gradients
 * Condition semantics (`control_flow_condition_*`, `control_flow_nan_condition_*`): `-0.0`, f16 underflow, infinity, all-nonzero, empty tensors (compile error), `NaN` (run-time error, loaded from a fixture)
@@ -1187,7 +1187,7 @@ Focus: harden what already exists rather than add another broad parity release.
 * Done: `greater_equal`, `less_equal`, `not_equal` and the operators `>`, `<`, `==`, `>=`, `<=`, `!=` as values
 * Done: numeric literals in comparisons take the shape of the other operand (the comparison kernels cannot broadcast a `(1,)` operand)
 * Done: `backward()` in an `elif` and in nested branches, plus bugs this exposed: a loss through a value computed outside the branch gave silent zero gradients; only the first `backward()` in a branch ran; the pass ran after the branch's other statements instead of in order; top-level `if` statements (and `if` inside loop bodies) ran their branch without its autograd path, so a backward pass included the nodes of every branch; and sibling branches shared one kernel scope, so same-named kernels collided as duplicate CUDA symbols (each branch now has its own scope)
-* Still open: the same first-`backward()`-only rule in `for` loop bodies
+* Done: a `for` loop body now runs every `backward()` it contains, in order (it used to run only the first and skip the rest silently)
 * Found along the way, not yet addressed: general N-D broadcasting in the comparison kernels (currently equal shapes or `(rows, cols)` vs `(cols,)`); f16 operands in comparison kernels; an explicit `isnan()` operation, since a deliberate check for `NaN` is impossible while any condition on a `NaN` is an error
 
 **Phase 4 — one normalisation slice**
