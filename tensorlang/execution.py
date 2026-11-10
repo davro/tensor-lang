@@ -962,12 +962,9 @@ class ExecutionMixin:
                             continue
 
                         if node.get("type") == "if":
-                            selected_flat = node.get("_selected_branch_flat_items")
-                            selected_kernels = node.get("_selected_branch_kernels")
-                            if selected_flat is not None:
-                                self._execute_if_branch_post(
-                                    selected_flat, selected_kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda
-                                )
+                            # v0.5.6: an `if` after the first backward() runs here, like any other `if`: it
+                            # sees the fresh loss, and an optimiser step in its branch sees the fresh gradient.
+                            self._execute_if_node(node, kernels, lib, gpu_allocs, env, tensors, cache_file_dir, cuda)
                             continue
 
                         if node.get("type") == "for":

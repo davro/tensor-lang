@@ -912,10 +912,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             if node.get("type") == "if":
                                 kernel_idx += len(node.get("_kernels", []))
                             elif node.get("type") == "for":
-                                kernel_idx += len([
-                                    fi for fi, _ in node.get("_flat_items", [])
-                                    if fi is not None
-                                ])
+                                # v0.5.6: count every kernel generated for the body. They all sit in the global
+                                # list, including those of an `if` inside it (an `if` is a flat item with no
+                                # kernel index of its own), so statements after the loop keep their position.
+                                kernel_idx += len(node.get("_kernels", []))
                             elif node.get("type") in OPTIMIZER_NAMES or (
                                 node.get("type") == "call" and node.get("name") in OPTIMIZER_NAMES
                             ):
