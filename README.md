@@ -1151,6 +1151,7 @@ App tests run sequentially.
 ### Notable Apps
 
 * `examples/hello_mlp` — minimal 2-layer MLP training example.
+* `examples/adaptive_lr` — two linear models in one loop, each with its own loss, `backward()` and `sgd` step; `if loss1 > 1.0` switches model 1 between a large and a small learning rate, taken in some iterations and not others.
 * `examples/decision_boundary` — trains a 2-8-1 tanh/sigmoid MLP on XOR and animates the decision boundary. Verified: loss dropped from 0.243585 to 0.001573 over 1000 epochs.
 * `games/tic_tac_toe` — complete.
 * `games/2048` — tensor-ops game engine (`step.tl`) verified.
@@ -1203,8 +1204,10 @@ Focus: harden what already exists rather than add another broad parity release.
 * Axis validation and clearer normalisation errors
 * Full N-D indexing and an `instance_norm` rework are deferred
 
-**Phase 3 — application acceptance test**
-* A small app using an `if loss > threshold` learning-rate step and two losses with separate optimisers, with the branch taken in some iterations and not others
+**Phase 3 — application acceptance test (done)**
+* Done: `apps/examples/adaptive_lr` — an `if loss > threshold` learning-rate step and two losses with separate optimisers, with the branch taken in some iterations and not others, pinned against hand-derived values
+* Found and fixed by it: an `if` placed after the first `backward()` in a `for` body was silently never executed (a branch `sgd` did not run), and every statement after a loop containing an `if` ran the wrong kernel (the loop's kernels were miscounted). Regression tests: `for_loop_if_after_backward_sgd`, `for_loop_if_then_statement_after`
+* Open: an optimiser step inside an `if` does not honour the loss-scaling overflow skip (f16 with dynamic loss scaling); the same already held for a `backward()` and `sgd` in one branch
 
 **Also under consideration**
 * Make `load_basic`, `load_dynamic`, and `load_inferred` self-contained with committed fixtures
