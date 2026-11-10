@@ -10,7 +10,7 @@
 // Composite output encoding, same as indicators.tl:
 //   +1.0 = buy   -1.0 = sell   0.0 = hold
 
-let window: Tensor[f64, (200, 8)] = load("cache/apps/trading/gmx_charts/indicators_no_gate.tl/window.npy")
+let window: Tensor[f32, (200, 8)] = load("cache/apps/trading/gmx_charts/indicators_no_gate.tl/window.npy")
 
 let fast_window = window[190:200, 4:5]
 let slow_window = window[170:200, 4:5]

@@ -25,7 +25,7 @@
 // Run directly, for manual testing:
 //   python3 tensorlang.py apps/trading/gmx_charts/indicators.tl
 
-let window: Tensor[f64, (200, 8)] = load("cache/apps/trading/gmx_charts/indicators.tl/window.npy")
+let window: Tensor[f32, (200, 8)] = load("cache/apps/trading/gmx_charts/indicators.tl/window.npy")
 
 // --- SMA(10) / SMA(30) on closing price (column 4) ---
 let fast_window = window[190:200, 4:5]

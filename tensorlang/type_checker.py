@@ -145,6 +145,16 @@ _COMPARISON_HINT = (
 )
 
 
+_COMPARISON_DTYPE_HINT = (
+    "comparison kernels only support f32 data (f64 is stored as f32), not f16; "
+    "a numeric literal is f32, so comparing an f16 tensor with a literal is rejected too"
+)
+
+
+def _comparison_has_f16(dtype1, dtype2):
+    return "f16" in (dtype1, dtype2)
+
+
 def _comparison_supported(shape1, shape2):
     """True if the CUDA comparison kernels can run these operand shapes.
 
@@ -161,6 +171,12 @@ def _comparison_supported(shape1, shape2):
         cols = s1[1]
         return s2 == (cols,) or s2 == (1, cols)
     return False
+
+
+_UNSUPPORTED_DTYPE_HINT = (
+    "f64 has no CUDA kernel support yet (operations raise a KeyError or read it as f32); "
+    "declare the tensor as f32"
+)
 
 
 def _resolve_tensor_type(env, tensor_name):
@@ -323,6 +339,12 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                     if not _comparison_supported(env[left_name]["shape"], env[right_name]["shape"]):
                         tensorlang.print(message=f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] if/elif condition: cannot compare {_name_label(left_name)} {tuple(env[left_name]['shape'])} with {_name_label(right_name)} {tuple(env[right_name]['shape'])}. {_COMPARISON_HINT}")
                         return False, env
+                    if _comparison_has_f16(env[left_name]["dtype"], env[right_name]["dtype"]):
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-COMPARISON-DTYPE] if/elif condition: cannot compare "
+                            f"{_name_label(left_name)} ({env[left_name]['dtype']}) with "
+                            f"{_name_label(right_name)} ({env[right_name]['dtype']}). {_COMPARISON_DTYPE_HINT}"))
+                        return False, env
                     try:
                         out_shape = tuple(np.broadcast_shapes(env[left_name]["shape"], env[right_name]["shape"]))
                     except ValueError:
@@ -456,9 +478,21 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 tensorlang.print(message=_shape_error(
                     expr["type"], name, _s1, _s2, arg_names, hint=_COMPARISON_HINT))
                 return False, env
+            _d1, _d2 = env[arg_names[0]]["dtype"], env[arg_names[1]]["dtype"]
+            if _comparison_has_f16(_d1, _d2):
+                tensorlang.print(message=(
+                    f"[TYPE CHECKER] error: [E-COMPARISON-DTYPE] {expr['type']}: cannot compare "
+                    f"{_name_label(arg_names[0])} ({_d1}) with {_name_label(arg_names[1])} ({_d2}) "
+                    f"computing {_name_label(name)}. {_COMPARISON_DTYPE_HINT}"))
+                return False, env
 
         # Annotated type: trust the declared type.
         if ty and isinstance(ty, dict) and "dtype" in ty:
+            if ty["dtype"] == "f64":
+                tensorlang.print(message=(
+                    f"[TYPE CHECKER] error: [E-UNSUPPORTED-DTYPE] {_name_label(name)} is declared as f64, "
+                    f"which is not supported. {_UNSUPPORTED_DTYPE_HINT}"))
+                return False, env
             shape = ty["shape"]
             if any(isinstance(dim, str) for dim in shape):
                 if DEBUG_INFO:

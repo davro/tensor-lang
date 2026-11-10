@@ -114,10 +114,10 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 ### Known limitations
 
 * **Control flow:** `if` / `elif` / `else` are implemented with defined condition semantics (see [Control Flow](#control-flow)) and branch shape/dtype consistency is enforced. A `for` loop body or a branch may contain several `backward()` statements; each runs where it appears.
-* **Comparison shapes:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` row. Other broadcasts (for example `(3,)` against `(1,)`, or a row against a matrix) pass the type checker but are not reliably supported. A numeric literal avoids the problem because it takes the shape of the tensor it is compared with. `tools/scan_comparison_shapes.py` lists suspicious comparisons in a codebase. Comparisons of f16 tensors are also untested: the kernels are generated for f32 operands.
+* **Comparison operands:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` or `(1, cols)` row. Any other combination (for example `(3,)` against `(1,)`, or a row against a matrix) is a compile error, `[E-SHAPE-MISMATCH]`, for comparison operations and for `if`/`elif` conditions. f16 operands are a compile error too, `[E-COMPARISON-DTYPE]`, because the comparison kernels are always generated for f32; that includes an f16 tensor compared with a numeric literal, which is an f32 fill. A numeric literal takes the shape of the tensor it is compared with. `tools/scan_comparison_shapes.py` and `tools/scan_comparison_dtypes.py` list the comparisons in a codebase that these rules would affect.
 * **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
 * **Multiple `backward()` statements:** each pass updates the gradients of the parameters its loss depends on; other parameters keep the gradient from the last pass that reached them, and a parameter no pass has reached has a zero gradient. There is no implicit gradient zeroing (see [Automatic Differentiation](#automatic-differentiation)). The interaction with loss scaling is not yet tested.
-* **`f64`:** parsed by the grammar, but type checking and kernels effectively force `f32`. Intentional for an ML language; full f64 support is not planned.
+* **`f64`:** a tensor declared as `f64` is a compile error, `[E-UNSUPPORTED-DTYPE]`. The grammar parses `f64`, but there is no f64 code generation: operations failed with a `KeyError`, and comparisons read the data as f32. Declare tensors as `f32`; the data in a `.npy` file can stay float64, because `load()` converts it to the declared type. An undeclared `load()` of a float64 `.npy` is still inferred as f64 and fails later (planned). Full f64 support is not planned.
 * **For-loop bodies:** operation parity with top level, including user-defined functions and `load()`. Loop counts must still be integer literals.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
@@ -260,7 +260,7 @@ let x16: Tensor[f16, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
 let img: Tensor[f32, (batch, channels, height, width)] = ...
 ```
 
-Supported dtypes: `f16`, `f32`. (`f64` is parsed but lowered to `f32`.)
+Supported dtypes: `f16`, `f32`. (`f64` is parsed but rejected with `[E-UNSUPPORTED-DTYPE]`.)
 
 There are no scalar values. A bare number cannot be bound with `let` (`[E-SCALAR-LITERAL]`). Numeric literals are valid only in comparisons (`if x > 0.5`, `let m = x >= 0.5`), in optimizer arguments (`sgd(w, w_grad, 0.01)`), and as `fill` values. For a constant operand, use a `(1,)` tensor:
 
@@ -1192,10 +1192,11 @@ Focus: harden what already exists rather than add another broad parity release.
 
 ### v0.5.6 (in progress) — close the gaps found in v0.5.5
 
-**Phase 1 — comparison-shape guard**
-* Reject comparison operand shapes the kernels cannot run (anything other than equal shapes, or a `(rows, cols)` tensor against a `(cols,)` or `(1, cols)` row) with `[E-SHAPE-MISMATCH]`, for comparison `let` operations and for `if`/`elif` conditions
-* `tools/scan_comparison_shapes.py` found no affected comparison in the existing tests, apps or examples (716 comparisons checked)
-* Open: whether to reject f16 operands as well, or only document them
+**Phase 1 — comparison and dtype guards (done)**
+* Done: comparison operand shapes the kernels cannot run (anything other than equal shapes, or a `(rows, cols)` tensor against a `(cols,)` or `(1, cols)` row) are `[E-SHAPE-MISMATCH]`, for comparison `let` operations (annotated ones included) and for `if`/`elif` conditions; `tools/scan_comparison_shapes.py` found no affected comparison in the existing tests, apps or examples
+* Done: f16 operands in comparisons, including against a numeric literal, are `[E-COMPARISON-DTYPE]`: the kernels are generated for f32 only. No existing test or app compared f16 (`tools/scan_comparison_dtypes.py`). Real f16 comparison support is deferred
+* Done: a tensor declared as `f64` is `[E-UNSUPPORTED-DTYPE]`. f64 never had code generation support (operations raised `KeyError: 'f64'`) and comparisons misread it silently. The two `apps/trading` indicator apps now declare their window as `f32`
+* Open: an undeclared `load()` of a float64 `.npy` is still inferred as f64 (planned: infer f32 and convert on load)
 
 **Phase 2 — one normalisation slice**
 * `batch_norm` gamma/beta, with type checking and autograd
