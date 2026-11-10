@@ -1,0 +1,10 @@
+[app]
+name = "adaptive_lr"
+description = "Two linear models in one loop: a loss threshold switches model 1 between a large and a small learning rate"
+
+[requirements]
+gpus = 1
+memory_gb = 4
+
+[entry_points]
+main = "main.tl"
