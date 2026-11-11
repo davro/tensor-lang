@@ -769,18 +769,24 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             self._record_operation("concat", name, tensor_names, metadata={"axis": axis})
 
                         elif expr.get("type") == "batch_norm":
+                            # v0.5.6: batch_norm gamma/beta
                             tensor_name = expr["tensor"]
                             running_mean_name = expr["running_mean"]
                             running_var_name = expr["running_var"]
+                            gamma_name = expr.get("gamma")
+                            beta_name = expr.get("beta")
                             eps = expr.get("eps", 1e-5)
                             input_shape = env[tensor_name]["shape"]
                             kernel, kernel_info = generator.batch_norm(
                                 expr["type"], name, input_shape, tensor_name, running_mean_name, eps, running_var_name,
-                                dtype=env[tensor_name].get("dtype", "f32")
+                                dtype=env[tensor_name].get("dtype", "f32"), gamma_name=gamma_name, beta_name=beta_name
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel
-                            self._record_operation("batch_norm", name, [tensor_name, running_mean_name, running_var_name], metadata={"eps": eps})
+                            _bn_inputs = [tensor_name, running_mean_name, running_var_name]
+                            if gamma_name is not None:
+                                _bn_inputs += [gamma_name, beta_name]
+                            self._record_operation("batch_norm", name, _bn_inputs, metadata={"eps": eps})
 
                         elif expr.get("type") == "instance_norm":
                             tensor_name = expr["tensor"]

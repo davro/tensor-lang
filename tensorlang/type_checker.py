@@ -787,41 +787,46 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                 continue
 
             if expr["type"] == "batch_norm":
+                # v0.5.6: batch_norm gamma/beta
                 tensor_name = expr["tensor"]
-                running_mean_name = expr["running_mean"]
-                running_var_name = expr["running_var"]
+                gamma_name = expr.get("gamma")
+                beta_name = expr.get("beta")
+                roles = [("input", tensor_name), ("running_mean", expr["running_mean"]),
+                         ("running_var", expr["running_var"])]
+                if gamma_name is not None:
+                    roles += [("gamma", gamma_name), ("beta", beta_name)]
+
+                missing = [n for _, n in roles if _resolve_tensor_type(env, n) is None]
+                if missing:
+                    tensorlang.print(message=_undefined_message(missing, env, name, expr))
+                    return False, env
 
                 tensor_type = _resolve_tensor_type(env, tensor_name)
-                mean_type = _resolve_tensor_type(env, running_mean_name)
-                var_type = _resolve_tensor_type(env, running_var_name)
-
-                if tensor_type is None:
-                    tensorlang.print(message=_undefined_message([tensor_name], env, name, expr))
-                    return False, env
-                if mean_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_mean {running_mean_name} for batch_norm")
-                    return False, env
-                if var_type is None:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: Undefined running_var {running_var_name} for batch_norm")
-                    return False, env
-
-                input_shape = tensor_type["shape"]
-                mean_shape = mean_type["shape"]
-                var_shape = var_type["shape"]
-
+                input_shape = tuple(tensor_type["shape"])
                 if len(input_shape) < 2:
-                    tensorlang.print(message="[TYPE CHECKER] error: BatchNorm input must be at least 2D")
+                    tensorlang.print(message=(
+                        f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] batch_norm: the input {_name_label(tensor_name)} "
+                        f"has shape {input_shape}, but batch_norm needs at least 2 dimensions "
+                        f"(batch, channels, ...); the channel is dimension 1"))
                     return False, env
 
-                num_features = input_shape[1]
-                expected_stats_shape = (num_features,)
-
-                if mean_shape != expected_stats_shape:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_mean shape {mean_shape} != expected {expected_stats_shape}")
-                    return False, env
-                if var_shape != expected_stats_shape:
-                    tensorlang.print(message=f"[TYPE CHECKER] error: BatchNorm running_var shape {var_shape} != expected {expected_stats_shape}")
-                    return False, env
+                expected_stats_shape = (input_shape[1],)
+                for role, tname in roles[1:]:
+                    t = _resolve_tensor_type(env, tname)
+                    if tuple(t["shape"]) != expected_stats_shape:
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-SHAPE-MISMATCH] batch_norm: {role} {_name_label(tname)} "
+                            f"has shape {tuple(t['shape'])}, expected {expected_stats_shape}: one value per "
+                            f"channel (dimension 1 of the input, shape {input_shape})"))
+                        return False, env
+                for role, tname in roles[1:]:
+                    t = _resolve_tensor_type(env, tname)
+                    if t.get("dtype") != "f32":
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-BATCH-NORM-DTYPE] batch_norm: {role} {_name_label(tname)} "
+                            f"is {t.get('dtype')}, but running_mean, running_var, gamma and beta must be f32 "
+                            f"(the kernel reads them as float)"))
+                        return False, env
 
                 env[name] = {"dtype": tensor_type["dtype"], "shape": input_shape}
                 if DEBUG_INFO:

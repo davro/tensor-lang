@@ -773,24 +773,31 @@ class ComputationGraph:
         self._accumulate_grad(inp, grad)
 
     def _backward_batch_norm(self, node, output_grad):
+        # v0.5.6: batch_norm gamma/beta. The forward normalises with the GIVEN running_mean / running_var
+        # (constants), so that is what is differentiated:
+        #   dx = dy * gamma / sqrt(var + eps)      dgamma = sum(dy * xhat)      dbeta = sum(dy)
+        # with the sums over every axis except the channel (dimension 1). Nothing flows to the statistics.
         inp = node.inputs[0]
         x = self.tensors[inp]
         og = np.asarray(output_grad)
-        if x.ndim >= 2:
-            axes = (0,) + tuple(range(2, x.ndim))
-        else:
-            axes = (0,)
-        mean = x.mean(axis=axes, keepdims=True)
-        var = x.var(axis=axes, keepdims=True)
+        mean = np.asarray(self.tensors[node.inputs[1]])
+        var = np.asarray(self.tensors[node.inputs[2]])
         eps = node.metadata.get('eps', 1e-5)
-        std = np.sqrt(var + eps)
-        N = int(np.prod([x.shape[a] for a in axes])) or 1
-        grad_var = np.sum(og * (x - mean) * -0.5 * (var + eps) ** -1.5,
-                         axis=axes, keepdims=True)
-        grad_mean = np.sum(og * -1.0 / std, axis=axes, keepdims=True) + \
-                   grad_var * np.sum(-2.0 * (x - mean), axis=axes, keepdims=True) / N
-        grad = og / std + grad_var * 2.0 * (x - mean) / N + grad_mean / N
-        self._accumulate_grad(inp, grad)
+        bshape = [1] * x.ndim
+        bshape[1] = -1
+        inv_std = 1.0 / np.sqrt(var.reshape(bshape) + eps)
+        affine = len(node.inputs) >= 5
+        if affine:
+            gamma_name, beta_name = node.inputs[3], node.inputs[4]
+            scale = np.asarray(self.tensors[gamma_name]).reshape(bshape) * inv_std
+        else:
+            scale = inv_std
+        self._accumulate_grad(inp, og * scale)
+        if affine:
+            axes = tuple(i for i in range(x.ndim) if i != 1)
+            xhat = (x - mean.reshape(bshape)) * inv_std
+            self._accumulate_grad(gamma_name, (og * xhat).sum(axis=axes))
+            self._accumulate_grad(beta_name, og.sum(axis=axes))
 
     def _backward_instance_norm(self, node, output_grad):
         inp = node.inputs[0]

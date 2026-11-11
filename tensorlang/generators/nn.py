@@ -727,85 +727,54 @@ extern "C" void launch_mse_loss_{name}({ctype}* predictions, {ctype}* targets,
 """
         return kernel, (f"{op_type}", name, pred_name, target_name, total_elements)
 
-    def batch_norm(self, op_type, name, input_shape, tensor_name, running_mean_name, eps, running_var_name, dtype="f32"):
+    def batch_norm(self, op_type, name, input_shape, tensor_name, running_mean_name, eps, running_var_name,
+                   dtype="f32", gamma_name=None, beta_name=None):
+        # v0.5.6: batch_norm gamma/beta. One kernel for every rank >= 2, the channel is dimension 1 (NCHW):
+        #   element idx belongs to channel c = (idx / inner) % num_features, inner = product of dims after dim 1.
+        # running_mean / running_var / gamma / beta are f32 (the type checker enforces it).
         ctype = self._ctype(dtype)
         include = self._include(dtype)
         inp_read = lambda idx: self._read(dtype, "input", idx)
 
-        ndim = len(input_shape)
+        input_shape = tuple(int(d) for d in input_shape)
+        num_features = input_shape[1]
+        inner = 1
+        for d in input_shape[2:]:
+            inner *= d
+        total = 1
+        for d in input_shape:
+            total *= d
 
-        # --- 2D (existing optimization) ---
-        if ndim == 2:
-            batch_size, num_features = int(input_shape[0]), int(input_shape[1])
-            kernel = include + f"""
-__global__ void batch_norm_2d_kernel_{name}({ctype}* input, float* running_mean, float* running_var,
-                                            {ctype}* output, int batch_size, int num_features, float eps) {{
-    int feature_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        affine = gamma_name is not None
+        affine_params = "float* gamma, float* beta, " if affine else ""
+        affine_call = "gamma, beta, " if affine else ""
+        normalized = f"({inp_read('idx')} - running_mean[c]) / sqrtf(running_var[c] + eps)"
+        if affine:
+            normalized = f"({normalized}) * gamma[c] + beta[c]"
 
-    if (feature_idx < num_features && batch_idx < batch_size) {{
-        float mean = running_mean[feature_idx];
-        float var = running_var[feature_idx];
-        float std_dev = sqrtf(var + eps);
-
-        int idx = batch_idx * num_features + feature_idx;
-        output[idx] = {self._write(dtype, f"({inp_read('idx')} - mean) / std_dev")};
+        kernel = include + f"""
+__global__ void batch_norm_kernel_{name}({ctype}* input, float* running_mean, float* running_var,
+                                         {affine_params}{ctype}* output, int total, int num_features,
+                                         int inner, float eps) {{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) {{
+        int c = (idx / inner) % num_features;
+        output[idx] = {self._write(dtype, normalized)};
     }}
 }}
 extern "C" void launch_batch_norm_{name}({ctype}* input, float* running_mean, float* running_var,
-                                        {ctype}* output, int batch_size, int num_features, float eps) {{
-    dim3 block(16, 16);
-    dim3 grid((num_features + block.x - 1) / block.x, (batch_size + block.y - 1) / block.y);
-    batch_norm_2d_kernel_{name}<<<grid, block>>>(input, running_mean, running_var, output,
-                                                batch_size, num_features, eps);
+                                        {affine_params}{ctype}* output, int total, int num_features,
+                                        int inner, float eps) {{
+    dim3 block(256);
+    dim3 grid((total + block.x - 1) / block.x);
+    batch_norm_kernel_{name}<<<grid, block>>>(input, running_mean, running_var, {affine_call}output,
+                                             total, num_features, inner, eps);
     cudaDeviceSynchronize();
     {self.cuda_debug()}
 }}
 """
-            return kernel, (f"{op_type}_2d", name, tensor_name, running_mean_name, batch_size, num_features, eps, running_var_name)
-
-        # --- N-D general (channel dim = 1, NCHW convention) ---
-        # Flatten: batch = product of dims except channel (dim 1) and spatial
-        # For N-D, channel is at axis 1; normalize over batch + all spatial dims
-        if ndim >= 3:
-            num_features = int(input_shape[1])
-            # Total elements per feature = product of all dims except channel
-            total_per_feature = 1
-            for i, d in enumerate(input_shape):
-                if i != 1:
-                    total_per_feature *= int(d)
-            # Number of "spatial positions" = total_per_feature / batch_size
-            # We'll just use the 2D-style kernel with batch = product of dims except channel
-            batch_size = total_per_feature  # all non-channel elements treated as batch
-
-            kernel = include + f"""
-__global__ void batch_norm_nd_kernel_{name}({ctype}* input, float* running_mean, float* running_var,
-                                            {ctype}* output, int batch_size, int num_features, float eps) {{
-    int feature_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (feature_idx < num_features && batch_idx < batch_size) {{
-        float mean = running_mean[feature_idx];
-        float var = running_var[feature_idx];
-        float std_dev = sqrtf(var + eps);
-
-        int idx = batch_idx * num_features + feature_idx;
-        // Note: this assumes NCHW-like layout where channel is stride-1 in inner loop
-        // For true N-D, the indexing needs stride computation. This is a simplified version.
-        output[idx] = {self._write(dtype, f"({inp_read('idx')} - mean) / std_dev")};
-    }}
-}}
-extern "C" void launch_batch_norm_{name}({ctype}* input, float* running_mean, float* running_var,
-                                        {ctype}* output, int batch_size, int num_features, float eps) {{
-    dim3 block(16, 16);
-    dim3 grid((num_features + block.x - 1) / block.x, (batch_size + block.y - 1) / block.y);
-    batch_norm_nd_kernel_{name}<<<grid, block>>>(input, running_mean, running_var, output,
-                                                batch_size, num_features, eps);
-    cudaDeviceSynchronize();
-    {self.cuda_debug()}
-}}
-"""
-            return kernel, (f"{op_type}_nd", name, tensor_name, running_mean_name, batch_size, num_features, eps, running_var_name)
+        return kernel, ("batch_norm", name, tensor_name, running_mean_name, total, num_features, inner, eps,
+                        running_var_name, gamma_name, beta_name)
 
     def instance_norm(self, op_type, name, tensor_name, input_shape, eps, dtype="f32"):
         ctype = self._ctype(dtype)

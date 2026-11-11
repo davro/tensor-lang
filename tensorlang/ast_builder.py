@@ -794,6 +794,8 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
         tensor_name = None
         running_mean_name = None
         running_var_name = None
+        gamma_name = None   # v0.5.6: batch_norm gamma/beta
+        beta_name = None
         eps = 1e-5
         arg_count = 0
         for child in tree.children:
@@ -804,13 +806,17 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
                     running_mean_name = child.value
                 elif arg_count == 2:
                     running_var_name = child.value
+                elif arg_count == 3:
+                    gamma_name = child.value
+                elif arg_count == 4:
+                    beta_name = child.value
                 arg_count += 1
             elif isinstance(child, Token) and child.type == 'NUMBER':
                 eps = float(child.value)
         if DEBUG_MODE:
             tensorlang.print(message=f"[AST] Expression: {tree.data} args: tensor={tensor_name}, mean={running_mean_name}, var={running_var_name}, eps={eps}")
         return {'type': 'batch_norm', 'tensor': tensor_name, 'running_mean': running_mean_name,
-                'running_var': running_var_name, 'eps': eps}
+                'running_var': running_var_name, 'gamma': gamma_name, 'beta': beta_name, 'eps': eps}
 
     # Instance norm
     elif tree.data == 'instance_norm_call':

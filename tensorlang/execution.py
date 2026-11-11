@@ -635,6 +635,22 @@ class ExecutionMixin:
                 c_int(size1), c_int(size2),
             )
 
+        elif op_type == "batch_norm":
+            # v0.5.6: batch_norm gamma/beta (one kernel for every rank >= 2, channel at dim 1)
+            total, num_features, inner, eps, running_var_name, gamma_name, beta_name = dims
+            bn_args = [
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[running_var_name])),
+            ]
+            if gamma_name is not None:
+                bn_args += [c_void_p(int(gpu_allocs[gamma_name])), c_void_p(int(gpu_allocs[beta_name]))]
+            bn_args += [
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(total), c_int(num_features), c_int(inner), c_float(eps),
+            ]
+            getattr(lib, f"launch_batch_norm_{kernel_func_name}")(*bn_args)
+
         elif op_type == "batch_norm_2d":
             running_mean_name, batch_size, num_features, eps, running_var_name = arg2, dims[0], dims[1], dims[2], dims[3]
             getattr(lib, f"launch_batch_norm_{kernel_func_name}")(
