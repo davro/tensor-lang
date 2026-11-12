@@ -6,7 +6,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 
 > **Status:** v0.5.5 released (robustness: stable diagnostic codes with clearer messages, a stricter test harness, defined condition semantics for `NaN` and empty tensors, comparison operators usable as values, `backward()` in any branch or loop body, multi-pass gradient rules, and fixes for several silent-wrong-answer bugs in branch and loop autograd). Core suite: 268/268 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.6 — a comparison-shape guard, `batch_norm` `gamma`/`beta`, and an application acceptance test for control flow with autograd.
+> **Current focus:** v0.5.6 — close the gaps found in v0.5.5: comparison and dtype guards, `batch_norm` `gamma`/`beta`, and two loop fixes found by a new acceptance app; release preparation.
 
 ---
 
@@ -85,7 +85,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * Normalisations: `layer_norm`, `batch_norm`, `instance_norm` (N-D aware)
 * Losses: `mse_loss`, `cross_entropy` (N-D aware)
 * Linear layers: `linear` (N-D aware)
-* Reverse-mode autograd for a broad set of operations (FP32 and FP16), including `batch_norm` and `instance_norm` (simplified gradients)
+* Reverse-mode autograd for a broad set of operations (FP32 and FP16), including `batch_norm` (with `gamma`/`beta`) and `instance_norm` (simplified gradients)
 * Multiple `backward()` statements in one file; a pass only overwrites the gradients of parameters its loss depends on (see [Automatic Differentiation](#automatic-differentiation))
 * Training loops with weight rebinding, nested loops, `save()` inside loops, and alias resolution
 * Control flow: scalar/single-element and tensor-valued `if` / `elif` / `else` (grammar, AST, and execution); conditions may compare against numeric literals (`x > 0.5`); branch shape/dtype consistency is enforced
@@ -120,12 +120,12 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **`f64`:** a tensor declared as `f64` is a compile error, `[E-UNSUPPORTED-DTYPE]`. The grammar parses `f64`, but there is no f64 code generation: operations failed with a `KeyError`, and comparisons read the data as f32. Declare tensors as `f32`; the data in a `.npy` file can stay float64, because `load()` converts it to the declared type. An undeclared `load()` of a float64 `.npy` is still inferred as f64 and fails later (planned). Full f64 support is not planned.
 * **For-loop bodies:** operation parity with top level, including user-defined functions and `load()`. Loop counts must still be integer literals.
 * **Axis support is limited** for several normalisations.
-* **`batch_norm`** uses running mean/variance; it does **not** apply `gamma`/`beta` affine parameters. N-D uses simplified NCHW convention.
+* **`batch_norm`** normalises with the *given* `running_mean`/`running_var`: it does not compute batch statistics or update running statistics (training-mode batch norm is not implemented). `gamma`/`beta` are optional, both or neither. The channel is dimension 1 (NCHW); the running statistics, `gamma` and `beta` must be f32 (`[E-BATCH-NORM-DTYPE]`) with shape `(C,)`.
 * **`instance_norm`** N-D uses simplified spatial-dim flattening.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
 * **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
-* **Autograd N-D limitations** — `batch_norm`/`instance_norm` gradients are simplified.
+* **Autograd N-D limitations** — `instance_norm` gradients are simplified. `batch_norm` gradients are exact for its forward (given statistics): `dx`, `dgamma` and `dbeta`; nothing flows to the running statistics.
 * **Dynamic loss scaling** — overflow detection works but scale growth interval defaults to 2000 steps; may need tuning for short training runs.
 
 ---
@@ -350,7 +350,7 @@ A top-level `let a = z` makes `a` another name for `z`. After execution the comp
 | Operation | Status | Notes |
 |---|---|---|
 | `layer_norm` | Supported | N-D, any axis |
-| `batch_norm` | Partial | N-D (channel at dim 1, NCHW); uses running mean/variance; no gamma/beta; simplified gradient |
+| `batch_norm` | Supported | `batch_norm(x, mean, var [, gamma, beta] [, eps=...])`, N-D (channel at dim 1, NCHW); given running statistics, optional affine `gamma`/`beta`; no training-mode statistics |
 | `instance_norm` | Partial | N-D (per-instance over non-batch dims); simplified gradient |
 
 ### Losses
@@ -515,7 +515,7 @@ Tested: separate parameters with an update after each pass, separate parameters 
 | `mse_loss` | Yes | N-D |
 | `linear` | Yes | N-D (operates on last dim) |
 | `layer_norm` | Yes | N-D, any axis |
-| `batch_norm` | Yes | Simplified (running statistics; no gamma/beta) |
+| `batch_norm` | Yes | `dx`, `dgamma`, `dbeta` for the given-statistics forward |
 | `instance_norm` | Yes | Simplified spatial-dim flattening |
 | `cross_entropy` | Yes | Probability inputs, class-index targets |
 | `gelu` | Yes | |
@@ -540,7 +540,7 @@ Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computatio
 * `cross_entropy` expects probability tensors, not logits.
 * `argmax`/`argmin` gradients use one-hot scatter (non-standard but useful for hard selection).
 * `max`/`min` reduction gradients flow to all tied extrema (not divided).
-* `batch_norm`/`instance_norm` gradients are simplified (see [Known limitations](#known-limitations)).
+* `instance_norm` gradients are simplified (see [Known limitations](#known-limitations)).
 
 ---
 
@@ -1199,10 +1199,10 @@ Focus: harden what already exists rather than add another broad parity release.
 * Done: a tensor declared as `f64` is `[E-UNSUPPORTED-DTYPE]`. f64 never had code generation support (operations raised `KeyError: 'f64'`) and comparisons misread it silently. The two `apps/trading` indicator apps now declare their window as `f32`
 * Open: an undeclared `load()` of a float64 `.npy` is still inferred as f64 (planned: infer f32 and convert on load)
 
-**Phase 2 — one normalisation slice**
-* `batch_norm` gamma/beta, with type checking and autograd
-* Axis validation and clearer normalisation errors
-* Full N-D indexing and an `instance_norm` rework are deferred
+**Phase 2 — one normalisation slice (done)**
+* Done: `batch_norm(x, mean, var, gamma, beta)` with optional `gamma`/`beta` (both or neither), type checking with stable codes (`[E-SHAPE-MISMATCH]`, `[E-UNDEFINED-TENSOR]`, `[E-BATCH-NORM-DTYPE]`) and gradients for `x`, `gamma` and `beta`
+* Found and fixed by it: the N-D forward took each element's channel as `idx % C`, which is wrong for NCHW (only half the elements got the right channel), and the backward used batch statistics while the forward uses the given ones (a gradient near zero where it should be 0.5 to 4). Both gave wrong results with no error. Regression tests: `batch_norm_nchw`, `autograd_batchnorm_given_stats`
+* Deferred: training-mode batch statistics and running-statistics updates, an `axis=` option, and an `instance_norm` rework
 
 **Phase 3 — application acceptance test (done)**
 * Done: `apps/examples/adaptive_lr` — an `if loss > threshold` learning-rate step and two losses with separate optimisers, with the branch taken in some iterations and not others, pinned against hand-derived values
@@ -1216,7 +1216,6 @@ Focus: harden what already exists rather than add another broad parity release.
 ### Short Term
 
 * Improve shape-mismatch error messages
-* `batch_norm` gamma/beta affine parameters
 * Dynamic loss scaling tuning (growth interval, overflow threshold)
 
 ### Medium Term
