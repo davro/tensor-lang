@@ -584,7 +584,10 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         if loaded_data.dtype == np.float16:
                             inferred_dtype = "f16"
                         elif loaded_data.dtype == np.float64:
-                            inferred_dtype = "f64"
+                            inferred_dtype = "f32"
+                            if DEBUG_INFO:
+                                tensorlang.print(type="[INFO]", message=(
+                                    f"{name}: float64 data in {file_path} " + "is loaded as f32 (f64 is not supported)"))
                         else:
                             inferred_dtype = "f32"
 
@@ -605,7 +608,10 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         if data_array.dtype == np.float16:
                             inferred_dtype = "f16"
                         elif data_array.dtype == np.float64:
-                            inferred_dtype = "f64"
+                            inferred_dtype = "f32"
+                            if DEBUG_INFO:
+                                tensorlang.print(type="[INFO]", message=(
+                                    f"{name}: float64 data in {file_path} " + "is loaded as f32 (f64 is not supported)"))
                         else:
                             inferred_dtype = "f32"
                         npz_file.close()

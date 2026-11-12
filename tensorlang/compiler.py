@@ -372,7 +372,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                     if loaded_data.dtype == np.float16:
                                         inferred_dtype = "f16"
                                     elif loaded_data.dtype == np.float64:
-                                        inferred_dtype = "f64"
+                                        inferred_dtype = "f32"
+                                        if self.debug_info:
+                                            self.tensorlang.print(type="[INFO]", message=(
+                                                f"{name}: float64 data in {file_path_load} " + "is loaded as f32 (f64 is not supported)"))
                                     else:
                                         inferred_dtype = "f32"
                                     env[name] = {
