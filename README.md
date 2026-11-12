@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.5 released (robustness: stable diagnostic codes with clearer messages, a stricter test harness, defined condition semantics for `NaN` and empty tensors, comparison operators usable as values, `backward()` in any branch or loop body, multi-pass gradient rules, and fixes for several silent-wrong-answer bugs in branch and loop autograd). Core suite: 268/268 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.6 released (closing the v0.5.5 gaps: shape and dtype guards for comparisons and `f64`, `batch_norm` `gamma`/`beta` with N-D and gradient fixes, an undeclared float64 `load()` inferred as f32, and two loop fixes found by a new acceptance app). Core suite: 294/294 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.6 — close the gaps found in v0.5.5: comparison and dtype guards, `batch_norm` `gamma`/`beta`, and two loop fixes found by a new acceptance app; release preparation.
+> **Current focus:** v0.5.7 — to be scoped. Candidates: the loss-scaling overflow skip for an optimiser step inside an `if`, an `isnan()` operation, f16 comparison kernels, and self-contained `load_*` tests.
 
 ---
 
@@ -117,7 +117,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Comparison operands:** the CUDA comparison kernels run two operands of equal shape (any rank), or a `(rows, cols)` operand against a `(cols,)` or `(1, cols)` row. Any other combination (for example `(3,)` against `(1,)`, or a row against a matrix) is a compile error, `[E-SHAPE-MISMATCH]`, for comparison operations and for `if`/`elif` conditions. f16 operands are a compile error too, `[E-COMPARISON-DTYPE]`, because the comparison kernels are always generated for f32; that includes an f16 tensor compared with a numeric literal, which is an f32 fill. A numeric literal takes the shape of the tensor it is compared with. `tools/scan_comparison_shapes.py` and `tools/scan_comparison_dtypes.py` list the comparisons in a codebase that these rules would affect.
 * **Aliases track their source:** a top-level alias (`let a = z`) is another name for `z` and reflects any later rebind, including rebinds inside branches. It is not a snapshot.
 * **Multiple `backward()` statements:** each pass updates the gradients of the parameters its loss depends on; other parameters keep the gradient from the last pass that reached them, and a parameter no pass has reached has a zero gradient. There is no implicit gradient zeroing (see [Automatic Differentiation](#automatic-differentiation)). The interaction with loss scaling is not yet tested.
-* **`f64`:** a tensor declared as `f64` is a compile error, `[E-UNSUPPORTED-DTYPE]`. The grammar parses `f64`, but there is no f64 code generation: operations failed with a `KeyError`, and comparisons read the data as f32. Declare tensors as `f32`; the data in a `.npy` file can stay float64, because `load()` converts it to the declared type. An undeclared `load()` of a float64 `.npy` is still inferred as f64 and fails later (planned). Full f64 support is not planned.
+* **`f64`:** a tensor declared as `f64` is a compile error, `[E-UNSUPPORTED-DTYPE]`. The grammar parses `f64`, but there is no f64 code generation: operations failed with a `KeyError`, and comparisons read the data as f32. Declare tensors as `f32`; the data in a `.npy` file can stay float64, because `load()` converts it to the declared type. An undeclared `load()` of a float64 `.npy` or `.npz` is inferred as f32 and converted on load (`--debug-info` prints a note). Full f64 support is not planned.
 * **For-loop bodies:** operation parity with top level, including user-defined functions and `load()`. Loop counts must still be integer literals.
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** normalises with the *given* `running_mean`/`running_var`: it does not compute batch statistics or update running statistics (training-mode batch norm is not implemented). `gamma`/`beta` are optional, both or neither. The channel is dimension 1 (NCHW); the running statistics, `gamma` and `beta` must be f32 (`[E-BATCH-NORM-DTYPE]`) with shape `(C,)`.
@@ -815,7 +815,7 @@ Supported formats:
 * `.npz` (uses `data` array or first available array)
 * `.csv` (requires pandas; drops a leading date/time/index/id column)
 
-If no type annotation is provided, shape and dtype are inferred from the file (including float16 from `.npy`).
+If no type annotation is provided, shape and dtype are inferred from the file: a float16 file loads as `f16`; every other numeric dtype, including NumPy's default float64, loads as `f32` (converted on load, with a note under `--debug-info`).
 
 `load()` works at top level and inside `for` loop bodies. Paths are relative to the working directory the compiler is run from.
 
@@ -863,9 +863,9 @@ compiler.sync_to_cpu("x")   # pull GPU → CPU (in place)
 
 ### Constraints
 
-* `load_numpy` requires C-contiguous `float16`, `float32`, or `float64` arrays (non-contiguous arrays are made contiguous automatically).
+* `load_numpy` accepts `float16`, `float32`, and `float64` arrays; any other dtype raises `TypeError`. A non-contiguous array is first copied to a contiguous one, so that array is no longer shared with NumPy (`to_numpy` returns the copy).
 * GPU-side zero-copy (CUDA unified memory) is deferred to a future version.
-* Mixed precision through shared buffers is supported (f16/f32/f64).
+* The interop helpers move buffers between NumPy and the GPU. They do not feed `.tl` programs: `compile_and_execute` starts from a fresh environment, so a `load_numpy` buffer is not visible to a program. Buffers of all three dtypes can be shared and synced, but `f64` has no kernel support (see [Current Status and Limitations](#current-status-and-limitations)).
 
 ---
 
@@ -1049,7 +1049,7 @@ The suite covers:
 * Control flow (`control_flow_*`): tensor-valued conditions, comparison operators, scalar literals in `if`/`elif`, branch consistency (positive and negative), `if` inside `for` (including a condition that flips between iterations), alias semantics
 * `any()` / `all()` reductions (`any_all_*`)
 * Functions, pipelines, portfolio-style examples
-* Load/save, including float16 fixtures (`load_f16_*`)
+* Load/save, including float16 (`load_f16_*`) and float64 (`load_f64_*`) fixtures
 * Mixed precision (f16 basic, matmul, autograd, training)
 * N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
 * Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
@@ -1191,13 +1191,13 @@ Focus: harden what already exists rather than add another broad parity release.
 * Done: a `for` loop body now runs every `backward()` it contains, in order (it used to run only the first and skip the rest silently)
 * Found along the way, carried to v0.5.6: general N-D broadcasting in the comparison kernels (currently equal shapes or `(rows, cols)` vs `(cols,)`); f16 operands in comparison kernels; an explicit `isnan()` operation, since a deliberate check for `NaN` is impossible while any condition on a `NaN` is an error
 
-### v0.5.6 (in progress) — close the gaps found in v0.5.5
+### v0.5.6 (released) — close the gaps found in v0.5.5
 
 **Phase 1 — comparison and dtype guards (done)**
 * Done: comparison operand shapes the kernels cannot run (anything other than equal shapes, or a `(rows, cols)` tensor against a `(cols,)` or `(1, cols)` row) are `[E-SHAPE-MISMATCH]`, for comparison `let` operations (annotated ones included) and for `if`/`elif` conditions; `tools/scan_comparison_shapes.py` found no affected comparison in the existing tests, apps or examples
 * Done: f16 operands in comparisons, including against a numeric literal, are `[E-COMPARISON-DTYPE]`: the kernels are generated for f32 only. No existing test or app compared f16 (`tools/scan_comparison_dtypes.py`). Real f16 comparison support is deferred
 * Done: a tensor declared as `f64` is `[E-UNSUPPORTED-DTYPE]`. f64 never had code generation support (operations raised `KeyError: 'f64'`) and comparisons misread it silently. The two `apps/trading` indicator apps now declare their window as `f32`
-* Open: an undeclared `load()` of a float64 `.npy` is still inferred as f64 (planned: infer f32 and convert on load)
+* Done: an undeclared `load()` of a float64 `.npy` or `.npz` is inferred as f32 and converted on load. It used to be inferred as f64 and failed with `KeyError: 'f64'` at the first operation that used it. NumPy writes float64 by default, so rejecting it would have been hostile. `tools/scan_load_f64.py` lists the undeclared loads in a codebase that this affects (none in the existing tests, apps or examples). Test: `load_f64_inferred`
 
 **Phase 2 — one normalisation slice (done)**
 * Done: `batch_norm(x, mean, var, gamma, beta)` with optional `gamma`/`beta` (both or neither), type checking with stable codes (`[E-SHAPE-MISMATCH]`, `[E-UNDEFINED-TENSOR]`, `[E-BATCH-NORM-DTYPE]`) and gradients for `x`, `gamma` and `beta`
