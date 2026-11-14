@@ -545,6 +545,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             "greater", "less", "equal", "greater_equal", "less_equal", "not_equal",
             "linear", "layer_norm", "batch_norm", "instance_norm",
             "cross_entropy", "mse_loss",
+            "embedding",
             "transpose", "reshape", "concat", "slice",
             "sgd", "adam", "sgd_update", "adam_update",
         ]:
@@ -1148,6 +1149,33 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                         bias_tensor["dtype"],
                     )
                     env[name] = {"dtype": linear_dtype, "shape": output_shape}
+                    if DEBUG_INFO:
+                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
+
+                if expr["type"] == "embedding":
+                    if len(args) != 2:
+                        tensorlang.print(message="[TYPE CHECKER] error: [E-EMBEDDING-ARGS] embedding requires exactly 2 arguments: embedding(indices, weight)")
+                        return False, env
+                    idx_tensor, weight_tensor = args
+                    idx_shape = tuple(idx_tensor["shape"])
+                    weight_shape = tuple(weight_tensor["shape"])
+                    if len(weight_shape) != 2:
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-EMBEDDING-SHAPE] embedding: weight {arg_names[1]!r} must be 2-D "
+                            f"(vocab, dim), got shape {weight_shape}"))
+                        return False, env
+                    if len(idx_shape) < 1:
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-EMBEDDING-SHAPE] embedding: indices {arg_names[0]!r} must have at least 1 dimension"))
+                        return False, env
+                    if idx_tensor["dtype"] != "f32":
+                        # Indices are stored as floats (there is no integer dtype). f16 is exact only up to 2048.
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-EMBEDDING-DTYPE] embedding: indices {arg_names[0]!r} must be f32 "
+                            f"(f16 cannot represent token ids above 2048 exactly), got {idx_tensor['dtype']}"))
+                        return False, env
+                    env[name] = {"dtype": weight_tensor["dtype"], "shape": idx_shape + (weight_shape[1],)}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue

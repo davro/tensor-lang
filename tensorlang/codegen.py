@@ -197,6 +197,14 @@ class CodegenMixin:
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.softmax(expr["type"], kernel_name, tensor_name, input_shape, axis, dtype=result_dtype)
 
+        if expr.get("type") == "embedding":
+            idx_name, weight_name = expr["args"]
+            num_indices = int(np.prod([int(d) for d in env[idx_name]["shape"]]))
+            vocab, dim = (int(d) for d in env[weight_name]["shape"])
+            self._record_operation("embedding", name, [idx_name, weight_name])
+            return generator.embedding(expr["type"], kernel_name, idx_name, weight_name, num_indices, vocab, dim,
+                                       dtype=env[weight_name].get("dtype", "f32"))
+
         if expr.get("type") == "mse_loss":
             pred_name, target_name = expr["args"]
             pred_shape = env[pred_name]["shape"]

@@ -342,6 +342,41 @@ extern "C" void launch_slice_{name}(
                            list(input_shape), list(output_shape), offsets, is_index, fixed_vals)
             return kernel, kernel_info
 
+    def embedding(self, op_type, name, idx_name, weight_name, num_indices, vocab, dim, dtype="f32"):
+        """Gather rows: out[..., :] = weight[indices[...], :].
+
+        Indices are f32 (there is no integer dtype) and are validated on the host before the launch
+        (see execution.py). The device guard below is a second line of defence: an out-of-range id
+        writes NaN, never reads outside the table.
+        """
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+        nan_value = self._write(dtype, "nanf(\"\")")
+        total_output = int(num_indices) * int(dim)
+
+        kernel = include + f"""
+__global__ void embedding_kernel_{name}(const float* indices, const {ctype}* weight, {ctype}* output,
+                                        int total_output, int dim, int vocab) {{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total_output) return;
+    int row = (int)indices[i / dim];
+    if (row < 0 || row >= vocab) {{
+        output[i] = {nan_value};
+        return;
+    }}
+    output[i] = weight[(size_t)row * dim + (i % dim)];
+}}
+extern "C" void launch_embedding_{name}(float* indices, {ctype}* weight, {ctype}* output,
+                                        int total_output, int dim, int vocab) {{
+    dim3 block(256);
+    dim3 grid((total_output + block.x - 1) / block.x);
+    embedding_kernel_{name}<<<grid, block>>>(indices, weight, output, total_output, dim, vocab);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        return kernel, (f"{op_type}", name, idx_name, weight_name, int(num_indices), int(vocab), int(dim))
+
     def concat(self, op_type, name, tensor_names, axis, env, dtype="f32"):
         ctype = self._ctype(dtype)
         include = self._include(dtype)

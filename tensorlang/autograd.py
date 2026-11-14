@@ -256,6 +256,8 @@ class ComputationGraph:
             self._backward_instance_norm(node, output_grad)
 
         # Losses
+        elif ot == 'embedding':
+            self._backward_embedding(node, output_grad)
         elif ot in ('mse_loss', 'mse'):
             self._backward_mse_loss(node, output_grad)
         elif ot in ('cross_entropy', 'ce', 'crossentropy'):
@@ -827,6 +829,17 @@ class ComputationGraph:
     # ----------------------------------------------------------------
     # Losses
     # ----------------------------------------------------------------
+    def _backward_embedding(self, node, output_grad):
+        """Scatter-add: grad_weight[indices[i]] += output_grad[i]. A repeated id accumulates.
+        Nothing flows to the indices (they select rows, they are not differentiable)."""
+        idx_name, weight_name = node.inputs
+        idx = np.asarray(self.tensors[idx_name]).reshape(-1).astype(np.int64)
+        weight = self.tensors[weight_name]
+        og = np.asarray(output_grad, dtype=np.float32).reshape(idx.shape[0], weight.shape[1])
+        grad_w = np.zeros(weight.shape, dtype=np.float32)
+        np.add.at(grad_w, idx, og)
+        self._accumulate_grad(weight_name, grad_w)
+
     def _backward_mse_loss(self, node, output_grad):
         pred, target = node.inputs
         pred_val = self.tensors[pred]

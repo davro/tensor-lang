@@ -583,6 +583,26 @@ class ExecutionMixin:
                 c_int(batch_size), c_int(num_classes),
             )
 
+        elif op_type == "embedding":
+            num_indices, vocab, dim = dims
+            # Token ids are f32 and a bad id would read outside the table: check them here,
+            # where a clear error is possible. The copy is num_indices floats.
+            idx_host = np.empty(num_indices, dtype=np.float32)
+            cuda.memcpy_dtoh(idx_host, gpu_allocs[arg1])
+            bad = ~np.isfinite(idx_host) | (idx_host != np.floor(idx_host)) | (idx_host < 0) | (idx_host >= vocab)
+            if bad.any():
+                first = int(np.argmax(bad))
+                raise TensorLangRuntimeError(
+                    f"[RUNTIME] error: [E-EMBEDDING-INDEX] embedding('{arg1}', '{arg2}'): {int(bad.sum())} of "
+                    f"{num_indices} indices are not integers in [0, {vocab}); the first is {idx_host[first]!r} "
+                    f"at flat position {first}.")
+            getattr(lib, f"launch_embedding_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(num_indices * dim), c_int(dim), c_int(vocab),
+            )
+
         elif op_type == "mse_loss":
             total_elements = dims[0]
             getattr(lib, f"launch_mse_loss_{kernel_func_name}")(

@@ -648,6 +648,13 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
         return {'type': 'mse_loss', 'args': args}
 
+    # Gather rows: embedding(indices, weight)
+    elif tree.data == 'embedding_call':
+        args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+        if DEBUG_INFO:
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
+        return {'type': 'embedding', 'args': args}
+
     # Axis operations
     elif tree.data in ['softmax_call', 'sum_call', 'mean_call', 'max_call', 'min_call', 'argmax_call', 'argmin_call']:
         tensor_name = None

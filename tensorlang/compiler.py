@@ -730,6 +730,18 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             kernels.append(kernel_info)
                             cuda_code += kernel
 
+                        elif expr.get("type") == "embedding":
+                            idx_name, weight_name = expr["args"]
+                            num_indices = int(np.prod([int(dim) for dim in env[idx_name]["shape"]]))
+                            vocab, dim = (int(d) for d in env[weight_name]["shape"])
+                            kernel, kernel_info = generator.embedding(
+                                expr["type"], name, idx_name, weight_name, num_indices, vocab, dim,
+                                dtype=env[weight_name].get("dtype", "f32")
+                            )
+                            kernels.append(kernel_info)
+                            cuda_code += kernel
+                            self._record_operation("embedding", name, [idx_name, weight_name])
+
                         elif expr.get("type") == "mse_loss":
                             pred_name, target_name = expr["args"]
                             pred_shape = env[pred_name]["shape"]
