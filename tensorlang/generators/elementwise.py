@@ -47,7 +47,10 @@ extern "C" void launch_{op_type}_{name}({ctype}* A, {ctype}* B, {ctype}* C, int 
         ctype = self._ctype(dtype)
         include = self._include(dtype)
 
-        if shape1[0] == shape2[0] or (len(shape1) >= 1 and len(shape2) >= 1 and shape1[0] == shape2[0]):
+        # A 1-D operand broadcasts NumPy-style: it aligns with the LAST axis, so it is read per column (B[j]).
+        # The type checker only admits a vector of length cols (or 1). The per-row read B[i] below is kept only
+        # for a vector whose length is not cols; the old test (shape1[0] == shape2[0]) chose it for every square matrix.
+        if len(shape2) == 1 and shape2[0] != cols:
             a_read = self._read(dtype, "A", "i * cols + j")
             b_read = self._read(dtype, "B", "i")
             result = self._write(dtype, f"{a_read} {op_symbol} {b_read}")
@@ -309,10 +312,12 @@ extern "C" void launch_fused_elementwise_{name}({param_str}) {{
                 return "identity"
             # 2D-specific optimizations
             if len(output_shape) == 2 and len(inp_shape) == 1:
-                if inp_shape[0] == output_shape[0]:
-                    return "row"
+                # NumPy aligns a 1-D input with the last axis, so test the column count first: for a square
+                # output both tests are true and the vector must be read per column.
                 if inp_shape[0] == output_shape[1]:
                     return "col"
+                if inp_shape[0] == output_shape[0]:
+                    return "row"
             # N-D: trailing broadcast (input is suffix of output shape)
             if len(inp_shape) < ndim and tuple(inp_shape) == tuple(output_shape[-len(inp_shape):]):
                 return "trailing"

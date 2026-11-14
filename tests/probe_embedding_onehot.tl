@@ -1,21 +1,16 @@
-// Probe 3: embedding lookup as one-hot @ W. Forward + backward.
-// The one-hot is prepared outside (a (seq, vocab) f32 matrix). This probe
-// confirms matmul carries gradients through a one-hot input, which is the
-// property that makes the external-preparation workaround viable for a
-// forward-only demo. Generation still needs a real embedding/gather op.
+// tests/probe_embedding_onehot.tl
+// Probe 3: embedding as one_hot @ W with a REAL one-hot (tokens 2, 5, 2, 7).
+// Forward gathers rows of w_emb; backward must accumulate: token 2 appears twice, so
+// w_emb_grad[2] = 2 in every column, rows 5 and 7 = 1, the rest 0.
+//
+// @EXPECTED
+// {"emb": [[0.8, 0.9, 1.0, 1.1], [2.0, 2.1, 2.2, 2.3], [0.8, 0.9, 1.0, 1.1], [2.8, 2.9, 3.0, 3.1]], "w_emb_grad": [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [2.0, 2.0, 2.0, 2.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0]]}
 
-let one_hot: Tensor[f32, (4, 8)] = fill(0.0, (4, 8)) with grad
-// row 0 -> token 2, row 1 -> token 5, etc. (hand-set via literals is tedious;
-// use a uniform fill for the probe and accept a degenerate embedding)
-let w_emb: Tensor[f32, (8, 4)] = fill(0.1, (8, 4)) with grad
+let one_hot: Tensor[f32, (4, 8)] = [[0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00], [0.00, 0.00, 0.00, 0.00, 0.00, 1.00, 0.00, 0.00], [0.00, 0.00, 1.00, 0.00, 0.00, 0.00, 0.00, 0.00], [0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 1.00]]
+let w_emb: Tensor[f32, (8, 4)] = [[0.00, 0.10, 0.20, 0.30], [0.40, 0.50, 0.60, 0.70], [0.80, 0.90, 1.00, 1.10], [1.20, 1.30, 1.40, 1.50], [1.60, 1.70, 1.80, 1.90], [2.00, 2.10, 2.20, 2.30], [2.40, 2.50, 2.60, 2.70], [2.80, 2.90, 3.00, 3.10]] with grad
 
 let emb = matmul(one_hot, w_emb)
-
 let loss = sum(emb)
 backward(loss)
 
 emb
-
-// @EXPECTED
-// {"emb": [[0.0, 0.0, 0.0, 0.0], ...]}
-

@@ -6,7 +6,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 
 > **Status:** v0.5.6 released (closing the v0.5.5 gaps: shape and dtype guards for comparisons and `f64`, `batch_norm` `gamma`/`beta` with N-D and gradient fixes, an undeclared float64 `load()` inferred as f32, and two loop fixes found by a new acceptance app). Core suite: 294/294 `.tl` tests + 31/31 Python tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.7 — to be scoped. Candidates: the loss-scaling overflow skip for an optimiser step inside an `if`, an `isnan()` operation, f16 comparison kernels, and self-contained `load_*` tests.
+> **Current focus:** v0.5.7 — a transformer forward pass built from existing operations. Phase A (probes) is done; next are small language changes (`embedding`/gather, `where`, `fill` as an operand) and a host-side generation demo. See [Future Work](#future-work).
 
 ---
 
@@ -110,6 +110,7 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Comparison operators as expressions** — `let m = x >= y`, `let m = x != 2.0` (lowered to the named operations; chained comparisons such as `a > b > c` are a syntax error)
 * **`backward()` inside branches** — in any `if`, `elif` or `else` branch, including nested branches (two levels and deeper); each `backward()` runs where it appears, several may appear in one branch, and the loss may depend on values computed before the branch or in an enclosing branch
 * **Stable diagnostic codes** — see [Diagnostics](#diagnostics)
+* **Transformer building blocks** — a one-layer GPT-2-style forward pass (token and positional embedding, layer norm, causal attention, residual connections, gelu FFN, output projection) is written with existing operations only, at toy size (seq 4, d 4, vocab 8), and reproduces a NumPy reference within 1.73e-7 (`probe_gpt2_forward`). The causal mask, layer norm, gelu and N-D broadcasting are also checked in isolation (`probe_causal_mask`, `probe_layernorm`, `probe_gelu`, `probe_broadcast`). The causal mask is built without a dedicated op: `(rows, 1) - (1, cols)` broadcast, `>= 0.0`, then an additive `-1e9`
 
 ### Known limitations
 
@@ -122,6 +123,11 @@ TensorLang is usable for small-to-medium static-shape ML programs, but several f
 * **Axis support is limited** for several normalisations.
 * **`batch_norm`** normalises with the *given* `running_mean`/`running_var`: it does not compute batch statistics or update running statistics (training-mode batch norm is not implemented). `gamma`/`beta` are optional, both or neither. The channel is dimension 1 (NCHW); the running statistics, `gamma` and `beta` must be f32 (`[E-BATCH-NORM-DTYPE]`) with shape `(C,)`.
 * **`instance_norm`** N-D uses simplified spatial-dim flattening.
+* **Growing a tensor in a loop:** a rebind whose new value has a different shape (for example `tokens = concat(tokens, new)`) is skipped with a diagnostic at run time. The type checker does not check rebinds, so the program type-checks. Autoregressive generation therefore runs on the host: Python drives the loop and the `.tl` program computes one forward pass. Test: `probe_growing_concat_loop`.
+* **No gather / `embedding`:** turning token ids into rows needs an index lookup, which does not exist yet (planned). A one-hot matrix prepared outside the program works with `matmul`, but an in-language loop cannot turn the `argmax` of one step into the next step's input.
+* **`fill` takes one scalar:** `fill(value, shape)` gives a constant tensor. For varied values use tensor literals (1-D or 2-D) or `load()`. `fill` is not accepted as an operand inside another call (`add(fill(...), x)` is a syntax error); bind it with its own `let`.
+* **Redefining a name:** defining the same name twice with `let` passes type checking. The compiler then uses the shape from the *last* definition, so a redefinition with a different shape fails at compile time (for example `matmul inner dimension mismatch`), and a redefinition with the same shape is not a supported pattern. Use distinct names; mutation is what rebinds are for. A diagnostic for this is proposed (see [Future Work](#future-work)).
+* **Constant test inputs hide errors:** layer norm of constant rows is zero (so everything after it is zero) and a softmax over constant values is uniform, so a constant-fill probe can give all-zero or all-equal output whether or not a mask, scale or matmul is right. Use distinct values (literals or `load()`) and check against a NumPy reference.
 * **Dev mode hot reload** is not implemented.
 * **`--transpile` (WGSL)** is exposed but not currently functional.
 * **NumPy interop is CPU-side only** — GPU-side zero-copy requires CUDA unified memory (deferred).
@@ -1050,6 +1056,7 @@ The suite covers:
 * `any()` / `all()` reductions (`any_all_*`)
 * Functions, pipelines, portfolio-style examples
 * Load/save, including float16 (`load_f16_*`) and float64 (`load_f64_*`) fixtures
+* Transformer building blocks (`probe_*`): causal mask, layer norm, gelu, broadcasting, one-hot embedding, the shape-stability guard, and a one-layer GPT-2-style forward pass checked against a NumPy reference
 * Mixed precision (f16 basic, matmul, autograd, training)
 * N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
 * Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
@@ -1212,6 +1219,31 @@ Focus: harden what already exists rather than add another broad parity release.
 **Also under consideration**
 * Make `load_basic`, `load_dynamic`, and `load_inferred` self-contained with committed fixtures
 * Dynamic loss scaling: make the growth interval configurable (otherwise deferred)
+
+### v0.5.7 (in progress) — a transformer forward pass, then the gaps it shows
+
+**Phase A — probes (done)**
+* Done: the pieces of a transformer block run with existing operations (no attention primitive): batched `matmul`, `transpose(axes=...)`, `softmax(axis=)`, `layer_norm`, `gelu`, `slice`, `concat`, N-D broadcasting
+* Done: a one-layer forward pass matches a NumPy reference within 1.73e-7; the causal mask recipe, `layer_norm`, `gelu` and broadcasting are checked in isolation
+* Found: in-language generation is blocked (a growing rebind is skipped at run time); there is no gather; `fill` is scalar-only and not an operand; redefining a `let` name is accepted by the type checker and then fails or misbehaves later; constant test inputs hide errors (see [Known limitations](#known-limitations))
+* Open: gradients through attention are exercised by `probe_attention_block` but are not yet checked against a reference
+
+**Phase B — small language changes (planned)**
+* `embedding(indices, weight)`: gather rows by index
+* `where(cond, a, b)`: elementwise select, for clean masking
+* Allow `fill` (and other special forms) as an operand inside another call
+* Proposed: a coded diagnostic for a repeated top-level `let` of the same name (loop bodies, and the same name in sibling branches, stay legal), after a sweep of the existing tests and apps
+* Document: distinct names versus rebinds
+
+**Phase C — demo (planned)**
+* C1: the forward pass with real weights loaded from `.npy`, logits compared with a reference implementation within a tolerance (not token equality: float32 differences can flip a close `argmax`). `gelu` here is the erf form and GPT-2 uses the tanh approximation, so the comparison needs the tanh form built from existing operations
+* C2: host-side autoregressive generation (Python drives the loop, the `.tl` program is one forward pass)
+
+**Phase D — only with evidence (deferred)**
+* A fused attention kernel, if profiling shows the composed version is the bottleneck
+* Quantised inference (needs a packed or ternary dtype and a checkpoint loader)
+* CUDA backward, if training throughput is the goal (the backward pass is NumPy on the CPU today)
+* `arange` / `linspace` for creating varied tensors
 
 ### Short Term
 
