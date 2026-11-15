@@ -845,7 +845,6 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
             if isinstance(child, Token) and child.type == 'STRING':
                 # Remove quotes from string
                 file_path = child.value.strip('"').strip("'")
-                print(f"[AST] build expression: {tree.data} {file_path}")
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] {tree.data} file_path: {file_path}")
         return {'type': 'load', 'file_path': file_path}
