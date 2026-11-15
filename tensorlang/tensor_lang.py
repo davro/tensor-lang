@@ -13,8 +13,8 @@ import argparse
 
 class TensorLang:
     """Main utility and setup class for the TensorLang runtime."""
-    
-    version = "0.5.7"
+
+    version = "0.5.8"
     width   = 80
 
     def __init__(self):
@@ -59,19 +59,19 @@ Examples:
   # Run a .tl file
   python tensorlang.py script.tl
   python tensorlang.py --file script.tl
-  
+
   # Run core tests
   python tensorlang.py --test
   python tensorlang.py --test --filter matrix
-  
+
   # List available apps
   python tensorlang.py --list-apps
   python tensorlang.py --list-apps --category ml
-  
+
   # Run an app
   python tensorlang.py --app web/dynamic/bitcoin
   python tensorlang.py --app ml/training/mnist --benchmark
-  
+
   # Run app tests
   python tensorlang.py --app web/dynamic/bitcoin --test
             """
@@ -83,7 +83,7 @@ Examples:
             nargs="?",
             help="TensorLang source file or test directory"
         )
-        
+
         # Main execution modes
         parser.add_argument(
             "--test",
@@ -100,7 +100,7 @@ Examples:
             action="store_true",
             help="List all available applications"
         )
-        
+
         # Debug and compilation options
         parser.add_argument(
             "--debug",
@@ -171,7 +171,7 @@ Examples:
             default=None,
             help="Filter tests by name pattern"
         )
-        
+
         # App-specific options
         parser.add_argument(
             "--category",
@@ -208,23 +208,23 @@ Examples:
         )
 
         args = parser.parse_args()
-        
+
         # Validation: some options only make sense with specific modes
         if args.category and not args.list_apps:
             parser.error("--category requires --list-apps")
-        
+
         if (args.dev or args.benchmark) and not args.app:
             parser.error("--dev and --benchmark require --app")
 
         if args.step and not args.app:
             parser.error("--step requires --app")
-        
+
         if args.app_args and not args.app:
             parser.error("--app-args requires --app")
-        
+
         self.config = args
         return args
-    
+
     # ---------------------------------------------------------------------
     # Internal Helpers
     # ---------------------------------------------------------------------
