@@ -68,7 +68,9 @@ def reference_logits(wdir, cfg, ids):
 
 
 # ------------------------------------------------------------------ program generator
-def emit_program(cfg, ids, wdir, logits_path):
+def emit_program(cfg, ids, wdir, logits_path, tokens_file=None, next_path=None):
+    """tokens_file: read the token ids from this .npy (so the program text does not change between steps).
+    next_path: save the per-position argmax here instead of the full logits (generation mode)."""
     L, D, H, V = cfg["n_layer"], cfg["n_embd"], cfg["n_head"], cfg["vocab"]
     HD, S, F = D // H, len(ids), 4 * D
     scale = f"{1.0 / math.sqrt(HD):.10f}"
@@ -158,7 +160,10 @@ def emit_program(cfg, ids, wdir, logits_path):
         for n in ["ln1_g", "ln1_b", "qkv_w", "qkv_b", "proj_w", "proj_b", "ln2_g", "ln2_b", "fc_w", "fc_b", "out_w", "out_b"]:
             load(f"h{i}_{n}", shapes[n])
     w("")
-    w(f"let tokens: Tensor[f32, ({S},)] = [" + ", ".join(f"{int(t)}.0" for t in ids) + "]")
+    if tokens_file:
+        w(f'let tokens: Tensor[f32, ({S},)] = load("{tokens_file}")')
+    else:
+        w(f"let tokens: Tensor[f32, ({S},)] = [" + ", ".join(f"{int(t)}.0" for t in ids) + "]")
     w(f"let positions: Tensor[f32, ({S},)] = [" + ", ".join(f"{i}.0" for i in range(S)) + "]")
     w("let neg: Tensor[f32, (1,)] = [-1000000000.0]")
     w("let one: Tensor[f32, (1,)] = [1.0]")
@@ -185,9 +190,14 @@ def emit_program(cfg, ids, wdir, logits_path):
     w("let hf = add(nfg, lnf_b)")
     w("let wte_t = transpose(wte, axes=(1, 0))")
     w("let logits = matmul(hf, wte_t)")
-    w(f'save(logits, "{logits_path}")')
-    w(f"let last_logits = logits[{S - 1}:{S}, :]")
-    w("let next_token = argmax(last_logits, axis=1)")
+    if next_path:
+        w("// generation mode: the argmax of every position; the host reads row (real_length - 1)")
+        w("let next_all = argmax(logits, axis=1)")
+        w(f'save(next_all, "{next_path}")')
+    else:
+        w(f'save(logits, "{logits_path}")')
+        w(f"let last_logits = logits[{S - 1}:{S}, :]")
+        w("let next_token = argmax(last_logits, axis=1)")
     return "\n".join(out) + "\n"
 
 
