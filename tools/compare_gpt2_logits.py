@@ -4,7 +4,7 @@
     python3 tools/compare_gpt2_logits.py [--logits build/gpt2_logits.npy] [--ref build/gpt2_ref_logits.npy]
 
 Passes when there are no NaN/inf values, the argmax agrees at every position, and the largest absolute
-difference is below --tol. The tolerance is a judgement call: GPT-2 logits are large (tens in magnitude)
+difference is below --tol (default 1e-2; measured 1.1e-4 for GPT-2 small on a GTX 1080 Ti). GPT-2 logits are large (~80 in magnitude)
 and float32 accumulates rounding over 12 layers, so look at the reported numbers, not only the verdict.
 """
 import argparse
@@ -18,7 +18,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--logits", default="build/gpt2_logits.npy")
     ap.add_argument("--ref", default="build/gpt2_ref_logits.npy")
-    ap.add_argument("--tol", type=float, default=0.05)
+    ap.add_argument("--tol", type=float, default=1e-2)
     ap.add_argument("--program", default="build/gpt2_forward.tl", help="program name, for locating its cache/ directory")
     ap.add_argument("--tokenizer", default="build/gpt2/tokenizer.json")
     args = ap.parse_args()
