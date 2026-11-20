@@ -329,6 +329,14 @@ class CodegenMixin:
             result_dtype = env[tensor_name].get("dtype", "f32")
             return generator.layer_norm(expr["type"], kernel_name, tensor_name, axis, eps, input_shape, dtype=result_dtype)
 
+        if expr.get("type") == "softmax_cross_entropy":
+            logits_name, target_name = expr["args"]
+            logits_shape = [int(d) for d in env[logits_name]["shape"]]
+            rows = int(np.prod(logits_shape[:-1]))
+            self._record_operation("softmax_cross_entropy", name, [logits_name, target_name])
+            return generator.softmax_cross_entropy(expr["type"], kernel_name, logits_name, target_name, rows, logits_shape[-1],
+                                                   dtype=env[logits_name].get("dtype", "f32"))
+
         if expr.get("type") == "cross_entropy":
             pred_name, target_name = expr["args"]
             pred_shape = env[pred_name]["shape"]

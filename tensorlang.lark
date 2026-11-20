@@ -96,6 +96,7 @@ expr: tensor_literal
     | batch_norm_call
     | instance_norm_call
     | cross_entropy_call
+    | softmax_cross_entropy_call
     | mse_loss_call
     | embedding_call
     | transpose_call
@@ -239,6 +240,7 @@ instance_norm_call: "instance_norm" "(" NAME ["," "eps" "=" NUMBER] ")"
 // Loss functions
 ////////////////////////////////////////////////////////////////////////////////
 cross_entropy_call: "cross_entropy" "(" NAME "," NAME ")"
+softmax_cross_entropy_call: "softmax_cross_entropy" "(" NAME "," NAME ")"
 mse_loss_call: "mse_loss" "(" NAME "," NAME ")"
 embedding_call: "embedding" "(" NAME "," NAME ")"
 

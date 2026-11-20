@@ -8,7 +8,7 @@ from tensorlang.type_checker import type_checker
 def main(path):
     with open('tensorlang.lark') as f:
         grammar = f.read()
-    parser = Lark(grammar, start='program', parser='lalr', propagate_positions=True)
+    parser = Lark(grammar, start='program', parser='lalr', propagate_positions=True, cache=True)
 
     with open(path) as f:
         code = f.read()

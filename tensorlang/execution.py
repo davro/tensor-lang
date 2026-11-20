@@ -148,6 +148,9 @@ class ExecutionMixin:
                     "t": 0,
                 })
                 state["t"] += 1
+                # bias corrections in float64 from the float32-rounded betas (what the kernel multiplies by)
+                bc1 = 1.0 - float(np.float32(beta1)) ** state["t"]
+                bc2 = 1.0 - float(np.float32(beta2)) ** state["t"]
 
                 if master_name is not None:
                     getattr(lib, f"launch_adam_update_{kernel_func_name}")(
@@ -161,6 +164,8 @@ class ExecutionMixin:
                         c_float(beta2),
                         c_float(eps),
                         c_int(state["t"]),
+                        c_float(bc1),
+                        c_float(bc2),
                         c_int(size),
                     )
                 else:
@@ -174,6 +179,8 @@ class ExecutionMixin:
                         c_float(beta2),
                         c_float(eps),
                         c_int(state["t"]),
+                        c_float(bc1),
+                        c_float(bc2),
                         c_int(size),
                     )
 
@@ -574,6 +581,26 @@ class ExecutionMixin:
                 c_int(size), c_float(eps),
             )
 
+        elif op_type == "softmax_cross_entropy":
+            rows, num_classes = dims
+            # Targets are f32 class indices; a bad one would read outside the row, so check them here
+            # where a clear error is possible. The copy is `rows` floats.
+            tgt_host = np.empty(rows, dtype=np.float32)
+            cuda.memcpy_dtoh(tgt_host, gpu_allocs[arg2])
+            bad = ~np.isfinite(tgt_host) | (tgt_host != np.floor(tgt_host)) | (tgt_host < 0) | (tgt_host >= num_classes)
+            if bad.any():
+                first = int(np.argmax(bad))
+                raise TensorLangRuntimeError(
+                    f"[RUNTIME] error: [E-SCE-TARGET] softmax_cross_entropy('{arg1}', '{arg2}'): {int(bad.sum())} of "
+                    f"{rows} targets are not integers in [0, {num_classes}); the first is {tgt_host[first]!r} "
+                    f"at flat position {first}.")
+            getattr(lib, f"launch_softmax_cross_entropy_{kernel_func_name}")(
+                c_void_p(int(gpu_allocs[arg1])),
+                c_void_p(int(gpu_allocs[arg2])),
+                c_void_p(int(gpu_allocs[tensor_name])),
+                c_int(rows), c_int(num_classes),
+            )
+
         elif op_type == "cross_entropy":
             batch_size, num_classes = dims
             getattr(lib, f"launch_cross_entropy_{kernel_func_name}")(
@@ -748,7 +775,7 @@ class ExecutionMixin:
         elif expr.get("type") == "load":
             loaded_data, metadata = self._load_data_file(expr["file_path"], expr.get("array_name"))
             target_dtype = self._np_dtype(env, name)
-            tensors[name] = loaded_data.astype(target_dtype)
+            tensors[name] = loaded_data.astype(target_dtype, copy=False)
         else:
             return
         # Validate loaded/literal data against the declared shape (loop bodies skip

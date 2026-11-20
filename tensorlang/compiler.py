@@ -144,7 +144,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
             # parser = Lark(grammar, start="program", parser="lalr")
             # parser = Lark(grammar, start="program", parser="lalr", keep_all_tokens=True)
             # parser = Lark(grammar, start="program", parser="earley")
-            parser = Lark(grammar, start="program", parser="lalr", propagate_positions=True)
+            # cache=True stores the analysed LALR tables in the temp dir, keyed on the grammar text,
+            # the options and the Lark version, so editing tensorlang.lark rebuilds automatically.
+            parser = Lark(grammar, start="program", parser="lalr", propagate_positions=True, cache=True)
 
             if self.debug_mode:
                 self.tensorlang.print(type="[COMPILER]", message=f"Loaded Lark Grammar file: {grammar_file}")
@@ -384,7 +386,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                         "metadata": metadata,
                                     }
                                 target_dtype = dtype_numpy(env[name].get("dtype", "f32"))
-                                tensors[name] = loaded_data.astype(target_dtype)
+                                tensors[name] = loaded_data.astype(target_dtype, copy=False)
                                 if self.cache_layers:
                                     cache_npy_path = cache_file_dir / f"{name}.npy"
                                     np.save(cache_npy_path, tensors[name])
@@ -714,6 +716,18 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                             self._record_operation("layer_norm", name, [tensor_name], metadata={"axis": axis, "eps": eps})
                             kernel, kernel_info = generator.layer_norm(
                                 expr["type"], name, tensor_name, axis, eps, input_shape, dtype=env[tensor_name].get("dtype", "f32")
+                            )
+                            kernels.append(kernel_info)
+                            cuda_code += kernel
+
+                        elif expr.get("type") == "softmax_cross_entropy":
+                            logits_name, target_name = expr["args"]
+                            logits_shape = [int(d) for d in env[logits_name]["shape"]]
+                            rows = int(np.prod(logits_shape[:-1]))
+                            self._record_operation("softmax_cross_entropy", name, [logits_name, target_name])
+                            kernel, kernel_info = generator.softmax_cross_entropy(
+                                expr["type"], name, logits_name, target_name, rows, logits_shape[-1],
+                                dtype=env[logits_name].get("dtype", "f32")
                             )
                             kernels.append(kernel_info)
                             cuda_code += kernel

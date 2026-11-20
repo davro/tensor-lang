@@ -635,6 +635,74 @@ extern "C" void launch_cross_entropy_{name}({ctype}* predictions, {ctype}* targe
 """
         return kernel, (f"{op_type}", name, pred_name, target_name, batch_size, num_classes)
 
+    def softmax_cross_entropy(self, op_type, name, logits_name, target_name, rows, num_classes, dtype="f32"):
+        """Fused, numerically stable softmax + negative log likelihood over class-index targets.
+
+        One block per row: block-wide max, then sum of exp(x - max), then loss = log(sum) + max - x[target].
+        Each row adds loss / rows into one float with atomicAdd, so the output is the mean. Float accumulation
+        regardless of the logits dtype (f16 logits are read through the dtype cast). A target outside
+        [0, num_classes) writes NaN into the loss (the host checks first, see execution.py).
+        """
+        ctype = self._ctype(dtype)
+        include = self._include(dtype)
+        read = lambda idx: self._read(dtype, "logits", idx)
+
+        kernel = include + f"""
+__global__ void softmax_cross_entropy_kernel_{name}(const {ctype}* logits, const float* targets,
+                                                    float* output, int rows, int num_classes) {{
+    extern __shared__ float sdata[];
+    int row = blockIdx.x;
+    int tid = threadIdx.x;
+    size_t base = (size_t)row * num_classes;
+
+    float m = -INFINITY;
+    for (int c = tid; c < num_classes; c += blockDim.x) {{
+        m = fmaxf(m, {read("base + c")});
+    }}
+    sdata[tid] = m;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        __syncthreads();
+    }}
+    float row_max = sdata[0];
+    __syncthreads();
+
+    float sum = 0.0f;
+    for (int c = tid; c < num_classes; c += blockDim.x) {{
+        sum += expf({read("base + c")} - row_max);
+    }}
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {{
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }}
+
+    if (tid == 0) {{
+        int t = (int)targets[row];
+        float loss;
+        if (t < 0 || t >= num_classes) {{
+            loss = nanf("");
+        }} else {{
+            loss = logf(sdata[0]) + row_max - {read("base + t")};
+        }}
+        atomicAdd(output, loss / (float)rows);
+    }}
+}}
+extern "C" void launch_softmax_cross_entropy_{name}({ctype}* logits, float* targets,
+                                                    float* output, int rows, int num_classes) {{
+    cudaMemset(output, 0, sizeof(float));
+    dim3 block(256);
+    dim3 grid(rows);
+    int shared_size = block.x * sizeof(float);
+    softmax_cross_entropy_kernel_{name}<<<grid, block, shared_size>>>(logits, targets, output, rows, num_classes);
+    cudaDeviceSynchronize();
+    {self.cuda_debug()}
+}}
+"""
+        return kernel, (f"{op_type}", name, logits_name, target_name, int(rows), int(num_classes))
+
     def mse_loss(self, op_type, name, pred_name, target_name, total_elements, dtype="f32"):
         ctype = self._ctype(dtype)
         include = self._include(dtype)

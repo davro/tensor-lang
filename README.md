@@ -368,6 +368,7 @@ A top-level `let a = z` makes `a` another name for `z`. After execution the comp
 |---|---|---|
 | `mse_loss` | Supported | N-D; predictions and targets must have the same shape. Result is a `(1,1)` tensor, not a bare scalar — use `.item()` in Python. |
 | `cross_entropy` | Supported | N-D; probability inputs and class-index targets (last dim = classes) |
+| `softmax_cross_entropy(logits, targets)` | Supported | Fused, stable loss on logits (f32 or f16, N-D, last dim = classes); targets are `f32` class indices of shape `logits.shape[:-1]`; result is an f32 scalar, the mean over rows. Gradient `(softmax - onehot)/N`. Bad targets are a run-time error, `[E-SCE-TARGET]` |
 
 ### Comparisons
 
@@ -527,6 +528,7 @@ Tested: separate parameters with an update after each pass, separate parameters 
 | `batch_norm` | Yes | `dx`, `dgamma`, `dbeta` for the given-statistics forward |
 | `instance_norm` | Yes | Simplified spatial-dim flattening |
 | `cross_entropy` | Yes | Probability inputs, class-index targets |
+| `softmax_cross_entropy` | Yes | Logit inputs, class-index targets; `(softmax - onehot)/N`, computed in float64 on the CPU |
 | `gelu` | Yes | |
 | `swish` | Yes | |
 | `reshape` | Yes | N-D (gradient reshaped to input shape) |
@@ -548,6 +550,7 @@ Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computatio
 * `matmul` gradients support 2D and batched N-D operands (broadcast dims handled via `_unbroadcast`).
 * Broadcast-aware gradient reduction is implemented via `_unbroadcast()`.
 * `cross_entropy` expects probability tensors, not logits.
+* `cross_entropy` is not for training after `softmax`: its backward is `(p - onehot)/N`, the gradient with respect to *logits*, but it receives probabilities, so `softmax` -> `cross_entropy` back-propagates a wrong gradient (`tests/softmax_cross_entropy_chain.tl`). Train with `softmax_cross_entropy(logits, targets)` instead.
 * `argmax`/`argmin` gradients use one-hot scatter (non-standard but useful for hard selection).
 * `max`/`min` reduction gradients flow to all tied extrema (not divided).
 * `instance_norm` gradients are simplified (see [Known limitations](#known-limitations)).

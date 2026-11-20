@@ -85,6 +85,8 @@ __global__ void adam_update_kernel_{name}(
     float beta2,
     float eps,
     int t,
+    float bc1,
+    float bc2,
     int size
 ) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -100,8 +102,8 @@ __global__ void adam_update_kernel_{name}(
         m[idx] = {self._write(dtype, "m_val")};
         v[idx] = {self._write(dtype, "v_val")};
 
-        float m_hat = m_val / (1.0f - powf(beta1, (float)t));
-        float v_hat = v_val / (1.0f - powf(beta2, (float)t));
+        float m_hat = m_val / bc1;
+        float v_hat = v_val / bc2;
 
         param[idx] = {self._write(dtype, f"{param_read} - lr * m_hat / (sqrtf(v_hat) + eps)")};
     }}
@@ -116,12 +118,14 @@ extern "C" void launch_adam_update_{name}(
     float beta2,
     float eps,
     int t,
+    float bc1,
+    float bc2,
     int size
 ) {{
     dim3 block(256);
     dim3 grid((size + block.x - 1) / block.x);
     adam_update_kernel_{name}<<<grid, block>>>(
-        param, grad, m, v, lr, beta1, beta2, eps, t, size
+        param, grad, m, v, lr, beta1, beta2, eps, t, bc1, bc2, size
     );
     cudaDeviceSynchronize();
     {self.cuda_debug()}
@@ -145,6 +149,8 @@ __global__ void adam_update_kernel_{name}(
     float beta2,
     float eps,
     int t,
+    float bc1,
+    float bc2,
     int size
 ) {{
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -161,8 +167,8 @@ __global__ void adam_update_kernel_{name}(
         m[idx] = m_val;
         v[idx] = v_val;
 
-        float m_hat = m_val / (1.0f - powf(beta1, (float)t));
-        float v_hat = v_val / (1.0f - powf(beta2, (float)t));
+        float m_hat = m_val / bc1;
+        float v_hat = v_val / bc2;
 
         master_val = master_val - lr * m_hat / (sqrtf(v_hat) + eps);
         master[idx] = master_val;
@@ -180,12 +186,14 @@ extern "C" void launch_adam_update_{name}(
     float beta2,
     float eps,
     int t,
+    float bc1,
+    float bc2,
     int size
 ) {{
     dim3 block(256);
     dim3 grid((size + block.x - 1) / block.x);
     adam_update_kernel_{name}<<<grid, block>>>(
-        param, grad, master, m, v, lr, beta1, beta2, eps, t, size
+        param, grad, master, m, v, lr, beta1, beta2, eps, t, bc1, bc2, size
     );
     cudaDeviceSynchronize();
     {self.cuda_debug()}

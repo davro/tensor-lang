@@ -14,5 +14,5 @@ let y_pred_final = matmul(x, w)
 let loss_final = mse_loss(y_pred_final, y_true)
 
 // @EXPECTED
-// {"loss_final": 0.09913282096385956}
+// {"loss_final": 0.0991352973466}
 

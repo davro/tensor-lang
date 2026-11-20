@@ -544,7 +544,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             "any", "all",
             "greater", "less", "equal", "greater_equal", "less_equal", "not_equal",
             "linear", "layer_norm", "batch_norm", "instance_norm",
-            "cross_entropy", "mse_loss",
+            "cross_entropy", "softmax_cross_entropy", "mse_loss",
             "embedding",
             "transpose", "reshape", "concat", "slice",
             "sgd", "adam", "sgd_update", "adam_update",
@@ -1176,6 +1176,38 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
                             f"(f16 cannot represent token ids above 2048 exactly), got {idx_tensor['dtype']}"))
                         return False, env
                     env[name] = {"dtype": weight_tensor["dtype"], "shape": idx_shape + (weight_shape[1],)}
+                    if DEBUG_INFO:
+                        print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
+                    continue
+
+                if expr["type"] == "softmax_cross_entropy":
+                    if len(args) != 2:
+                        tensorlang.print(message="[TYPE CHECKER] error: [E-SCE-ARGS] softmax_cross_entropy requires exactly 2 arguments: softmax_cross_entropy(logits, targets)")
+                        return False, env
+                    logits_tensor, targets_tensor = args
+                    logits_shape = tuple(logits_tensor["shape"])
+                    targets_shape = tuple(targets_tensor["shape"])
+                    if len(logits_shape) < 2:
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-SCE-SHAPE] softmax_cross_entropy: logits {arg_names[0]!r} must be at least 2-D "
+                            f"(..., classes), got shape {logits_shape}"))
+                        return False, env
+                    if targets_shape != logits_shape[:-1]:
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-SCE-SHAPE] softmax_cross_entropy: targets {arg_names[1]!r} must be class indices "
+                            f"of shape {logits_shape[:-1]} (logits shape without the last dimension), got {targets_shape}"))
+                        return False, env
+                    if targets_tensor["dtype"] != "f32":
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-SCE-DTYPE] softmax_cross_entropy: targets {arg_names[1]!r} must be f32 class "
+                            f"indices (f16 cannot represent ids above 2048 exactly), got {targets_tensor['dtype']}"))
+                        return False, env
+                    if logits_tensor["dtype"] not in ("f32", "f16"):
+                        tensorlang.print(message=(
+                            f"[TYPE CHECKER] error: [E-SCE-DTYPE] softmax_cross_entropy: logits {arg_names[0]!r} must be f32 or f16, "
+                            f"got {logits_tensor['dtype']}"))
+                        return False, env
+                    env[name] = {"dtype": "f32", "shape": ()}
                     if DEBUG_INFO:
                         print(f"[INFO] Type {expr['type']} assigned for {name}: {env[name]}")
                     continue

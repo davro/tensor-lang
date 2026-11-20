@@ -1,0 +1,1 @@
+{"layers": 2, "dim": 8, "seq": 6, "vocab": 12, "ff_mult": 2, "steps": 3, "lr": 0.02, "seed": 3, "init_std": 0.4, "out_tl": "tests/probe_micro_gpt_train.tl", "weights": "tests/fixtures/micro_gpt"}

@@ -7,6 +7,7 @@ File: tensorlang/autograd.py
 
 import numpy as np
 
+from tensorlang import gpu_backward as _gpu_backward
 from tensorlang.tensor_lang import TensorLang
 
 
@@ -258,6 +259,8 @@ class ComputationGraph:
         # Losses
         elif ot == 'embedding':
             self._backward_embedding(node, output_grad)
+        elif ot == 'softmax_cross_entropy':
+            self._backward_softmax_cross_entropy(node, output_grad)
         elif ot in ('mse_loss', 'mse'):
             self._backward_mse_loss(node, output_grad)
         elif ot in ('cross_entropy', 'ce', 'crossentropy'):
@@ -390,8 +393,12 @@ class ComputationGraph:
         b_val = self.tensors[b]
         og = np.asarray(output_grad)
 
-        grad_a = og @ b_val.swapaxes(-2, -1)
-        grad_b = a_val.swapaxes(-2, -1) @ og
+        gpu = _gpu_backward.matmul_backward(a_val, b_val, og) if _gpu_backward.enabled() else None
+        if gpu is not None:
+            grad_a, grad_b = gpu
+        else:
+            grad_a = og @ b_val.swapaxes(-2, -1)
+            grad_b = a_val.swapaxes(-2, -1) @ og
 
         self._accumulate_grad(a, grad_a)
         self._accumulate_grad(b, grad_b)
@@ -419,6 +426,10 @@ class ComputationGraph:
     def _backward_gelu(self, node, output_grad):
         inp = node.inputs[0]
         x = self.tensors[inp]
+        gpu = _gpu_backward.gelu_backward(x, output_grad) if _gpu_backward.enabled() else None
+        if gpu is not None:
+            self._accumulate_grad(inp, gpu)
+            return
         import math
         erf_vec = np.vectorize(math.erf)
         cdf = (0.5 * (1.0 + erf_vec(x / np.sqrt(2.0)))).astype(np.float32)
@@ -839,6 +850,22 @@ class ComputationGraph:
         grad_w = np.zeros(weight.shape, dtype=np.float32)
         np.add.at(grad_w, idx, og)
         self._accumulate_grad(weight_name, grad_w)
+
+    def _backward_softmax_cross_entropy(self, node, output_grad):
+        """d loss / d logits = (softmax(logits) - one_hot(target)) / N, times the incoming scalar gradient.
+        Computed in float64 from the max-shifted logits. Nothing flows to the targets."""
+        logits_name, target_name = node.inputs
+        logits = np.asarray(self.tensors[logits_name], dtype=np.float64)
+        num_classes = logits.shape[-1]
+        flat = logits.reshape(-1, num_classes)
+        rows = flat.shape[0]
+        idx = np.asarray(self.tensors[target_name]).reshape(-1).astype(np.int64)
+        shifted = flat - flat.max(axis=1, keepdims=True)
+        p = np.exp(shifted)
+        p /= p.sum(axis=1, keepdims=True)
+        p[np.arange(rows), idx] -= 1.0
+        scale = np.asarray(output_grad, dtype=np.float64).item()
+        self._accumulate_grad(logits_name, (p * (scale / rows)).reshape(logits.shape).astype(np.float32))
 
     def _backward_mse_loss(self, node, output_grad):
         pred, target = node.inputs

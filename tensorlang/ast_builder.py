@@ -642,6 +642,12 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
             tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
         return {'type': 'cross_entropy', 'args': args}
 
+    elif tree.data == 'softmax_cross_entropy_call':
+        args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
+        if DEBUG_INFO:
+            tensorlang.print(message=f"[AST] Expression {tree.data} args: {args}")
+        return {'type': 'softmax_cross_entropy', 'args': args}
+
     elif tree.data == 'mse_loss_call':
         args = [child.value for child in tree.children if isinstance(child, Token) and child.type == 'NAME']
         if DEBUG_INFO:
