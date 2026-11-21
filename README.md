@@ -1101,6 +1101,10 @@ HuggingFace.
 
 ### Development Tools
 
+- `tools/weight_edit.py` — search/replace weight editor for GPT-2 (bias or rank-one mode, with `--auto` layer/alpha search)
+- `tools/demo_weight_edit.sh` — one-liner demo: edit → compile → run → compare
+
+
 A GPU-free helper is available for quick checks:
 
 ```bash
@@ -1112,6 +1116,17 @@ python3 check.py path/to/file.tl
 v0.5.7 broadcast bug, and the GPT-2 demo scripts (see [Running GPT-2](#running-gpt-2)).
 
 `check.py` is a fast way to confirm a new test parses and type-checks before running it on the GPU. It cannot catch runtime problems (for example, a kernel that is generated but never executed), so a test also needs a real GPU run.
+
+### Weight-Space Programming (GPT-2)
+
+TensorLang can load and execute edited GPT-2 weights. See
+[docs/weight_space_programming.md](docs/weight_space_programming.md) for
+details, tools, and experimental results.
+
+**Quick demo:**
+```bash
+./tools/demo_weight_edit.sh
+```
 
 ### Multi-GPU Test Execution
 

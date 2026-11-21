@@ -6,6 +6,9 @@ Execution helpers for TensorCompiler.
 File: tensorlang/execution.py
 """
 
+import atexit
+import os
+
 import numpy as np
 import pycuda.driver as cuda
 from ctypes import c_float, c_int, c_void_p
@@ -58,8 +61,7 @@ class ExecutionMixin:
         if size_bytes == 0:
             size_bytes = np_dtype.itemsize
         alloc = cuda.mem_alloc(size_bytes)
-        zeros = np.zeros(shape if shape else (1,), dtype=np_dtype)
-        cuda.memcpy_htod(alloc, zeros)
+        cuda.memset_d8(alloc, 0, size_bytes)     # zero on the device: no host array, no PCIe copy
         return alloc
 
     def _execute_single_kernel(self, kernel_info, lib, gpu_allocs, env, tensors, cache_file_dir, cuda):
@@ -140,13 +142,18 @@ class ExecutionMixin:
                 eps = self._eval_scalar(kernel_info[9], env, tensors, 1e-8)
 
                 state_dtype = "f32" if master_name is not None else self._tl_dtype(env, param_name)
-                state = self.optimizer_state.setdefault(param_name, {
-                    "m": self._allocate_zeros(env[param_name]["shape"], cuda,
-                                             dtype_name=state_dtype),
-                    "v": self._allocate_zeros(env[param_name]["shape"], cuda,
-                                             dtype_name=state_dtype),
-                    "t": 0,
-                })
+                # NOT setdefault(key, {...allocate...}): the default is evaluated on every call, so the buffers
+                # would be allocated, zero-filled and thrown away each step. Create the state once, when missing.
+                state = self.optimizer_state.get(param_name)
+                if state is None:
+                    state = {
+                        "m": self._allocate_zeros(env[param_name]["shape"], cuda,
+                                                 dtype_name=state_dtype),
+                        "v": self._allocate_zeros(env[param_name]["shape"], cuda,
+                                                 dtype_name=state_dtype),
+                        "t": 0,
+                    }
+                    self.optimizer_state[param_name] = state
                 state["t"] += 1
                 # bias corrections in float64 from the float32-rounded betas (what the kernel multiplies by)
                 bc1 = 1.0 - float(np.float32(beta1)) ** state["t"]
@@ -752,6 +759,62 @@ class ExecutionMixin:
 
         self._save_kernel_result(tensor_name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda)
 
+    def _refresh_host_tensors(self, for_node, gpu_allocs, env, tensors, cuda):
+        """Make sure `tensors` has a host value for every tensor of the loop body before the backward pass.
+
+        Default: download a body tensor only if the host has no entry for it. Kernel results are copied right after
+        their kernel (_save_kernel_result), optimizer updates likewise, and a rebind moves the host entry with the device
+        pointer, so host copies are current; what is missing are tensors defined after backward() on the first iteration,
+        whose (still empty) device buffers are fetched as placeholders so that autograd can register the whole graph.
+        TENSORLANG_HOST_SYNC=full re-downloads everything (the old behaviour); =check does that and compares each
+        download with the host copy it replaces, reporting stale ones at exit."""
+        mode = os.environ.get("TENSORLANG_HOST_SYNC", "")
+        full = mode in ("full", "check")
+        check = mode == "check"
+        fetched = set()
+
+        def fetch(name):
+            shape = tuple(int(d) for d in env[name]["shape"])
+            fresh = np.empty(shape, dtype=self._np_dtype(env, name))
+            cuda.memcpy_dtoh(fresh, gpu_allocs[name])
+            if check:
+                self._record_host_sync(name, tensors.get(name), fresh)
+            tensors[name] = fresh
+            fetched.add(name)
+
+        for _, body_node in for_node["_flat_items"]:
+            if body_node["type"] != "let":
+                continue
+            name = body_node["name"]
+            if name in gpu_allocs and name in env and (full or name not in tensors):
+                fetch(name)
+        if not full:
+            return
+        for name in list(tensors.keys()):
+            if name in fetched:
+                continue              # just downloaded above; nothing runs between the two sweeps
+            if name in gpu_allocs and name in env:
+                fetch(name)
+
+    def _record_host_sync(self, name, old, fresh):
+        stats = getattr(self, "_host_sync_stats", None)
+        if stats is None:
+            stats = self._host_sync_stats = {"compared": 0, "stale": {}, "missing": set()}
+
+            def report():
+                bad = len(stats["stale"]) + len(stats["missing"])
+                print(f"[HOST SYNC CHECK] {stats['compared']} downloads compared; "
+                      f"{len(stats['stale'])} stale, {len(stats['missing'])} missing on the host"
+                      + (f" (stale: {sorted(stats['stale'])[:8]}, missing: {sorted(stats['missing'])[:8]})" if bad else ""))
+            atexit.register(report)
+        if old is None:
+            stats["missing"].add(name)
+            return
+        stats["compared"] += 1
+        old = np.asarray(old)
+        if old.shape != fresh.shape or not np.array_equal(old, fresh, equal_nan=True):
+            stats["stale"][name] = "shape" if old.shape != fresh.shape else float(np.nanmax(np.abs(old.astype(np.float64) - fresh)))
+
     def _save_kernel_result(self, name, op_type, env, gpu_allocs, tensors, cache_file_dir, cuda):
         if name in env:
             shape = tuple(int(dim) for dim in env[name]["shape"])
@@ -913,24 +976,7 @@ class ExecutionMixin:
             if backward_node is not None:
                 loss_name = backward_node["loss_tensor"]
 
-                for idx, body_node in for_node["_flat_items"]:
-                    if body_node["type"] != "let":
-                        continue
-                    bname = body_node["name"]
-                    if bname in gpu_allocs and bname in env:
-                        bshape = tuple(int(d) for d in env[bname]["shape"])
-                        bnp_dtype = self._np_dtype(env, bname)
-                        barr = np.empty(bshape, dtype=bnp_dtype)
-                        cuda.memcpy_dtoh(barr, gpu_allocs[bname])
-                        tensors[bname] = barr
-
-                for tname in list(tensors.keys()):
-                    if tname in gpu_allocs and tname in env:
-                        tshape = tuple(int(d) for d in env[tname]["shape"])
-                        tnp_dtype = self._np_dtype(env, tname)
-                        tarr = np.empty(tshape, dtype=tnp_dtype)
-                        cuda.memcpy_dtoh(tarr, gpu_allocs[tname])
-                        tensors[tname] = tarr
+                self._refresh_host_tensors(for_node, gpu_allocs, env, tensors, cuda)
 
                 for tname, tval in tensors.items():
                     requires_grad = tname in self.requires_grad_tensors
