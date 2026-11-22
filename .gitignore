@@ -15,5 +15,4 @@ __pycache__/
 *.pyc
 cache/
 python-env/
-code.txt
 build/

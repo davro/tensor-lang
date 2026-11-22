@@ -1,3 +1,5 @@
+# FILE: README.md
+================================================================================
 # TensorLang: A Native AI/ML Language
 
 TensorLang is an open-source, native machine-learning language designed to compile tensor operations into GPU-accelerated CUDA kernels.
@@ -6,7 +8,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 
 > **Status:** v0.5.9 released (training you can trust: `softmax_cross_entropy`, an Adam precision fix, an opt-in GPU backward for `matmul` and `gelu`, and the tools that found them; a 162M-parameter GPT runs three Adam steps on one 11 GB card). v0.5.8 added `embedding` and real GPT-2 small, whose logits match a float64 NumPy reference to 1.1e-4. Core suite: 319/319 `.tl` tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.10 — training that stays on the GPU (gradients and activations resident, no round trip per op), a multi-head training program for GPT-2 small, and `load()` indexed by the loop counter so a loop can see different batches; then the earlier list (generation inside the language, `where`, `fill` as an operand, a diagnostic for a redefined `let` name). See [Future Work](#future-work).
+> **Current focus:** v0.5.10 — training that stays on the GPU (gradients and activations resident, no round trip per op), a multi-head training program for GPT-2 small, and `load()` indexed by the loop counter so a loop can see different batches; then the earlier list (generation inside the language, `where`, `fill` as an operand, a diagnostic for a redefined `let` name). See [Future Work](#future-work); earlier releases are in [RELEASES.md](RELEASES.md).
 
 ---
 
@@ -22,7 +24,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [Operations](#operations)
 * [Control Flow](#control-flow)
 * [Automatic Differentiation](#automatic-differentiation)
-* [Loss Scaling](#loss-scaling)
+* [Mixed Precision](#mixed-precision)
 * [Training Loops](#training-loops)
 * [Optimizers](#optimizers)
 * [File I/O](#file-io)
@@ -208,6 +210,10 @@ The README is the language reference. Longer guides live in `docs/`.
 | [docs/training.md](docs/training.md) | Training loops, choosing a loss (`softmax_cross_entropy` vs `cross_entropy`), optimizers, the opt-in GPU backward, profiling, and how a training program is verified |
 | [docs/gpt2_demo.md](docs/gpt2_demo.md) | Running real GPT-2 small: requirements, the steps, what each one writes, timings and what was verified |
 | [docs/weight_space_programming.md](docs/weight_space_programming.md) | Editing GPT-2's weights and running the edited model, with the experiments and their limits |
+| [docs/apps.md](docs/apps.md) | Writing an application: directory layout, `app.toml`, requirements, and app tests |
+| [docs/mixed_precision.md](docs/mixed_precision.md) | Loss scaling (static, auto, dynamic), FP32 master weights for f16 parameters, and how they combine in training loops |
+| [docs/testing.md](docs/testing.md) | Test annotations (`@EXPECTED`, `@EXPECT_FAILURE`), tensor verification, what the suite covers, helper tools, multi-GPU test runs |
+| [RELEASES.md](RELEASES.md) | Release history, newest first: what each version added, found and fixed |
 | [docs/social/0.5.9/RELEASE_NOTES_v0.5.9.md](docs/social/0.5.9/RELEASE_NOTES_v0.5.9.md) | What changed in v0.5.9, with the measurements |
 
 ## Repository Layout
@@ -569,121 +575,22 @@ Autograd works with both `f32` and `f16` tensors. For `f16`, gradient computatio
 
 ---
 
-## Loss Scaling
+## Mixed Precision
 
-TensorLang supports **static and dynamic loss scaling** for mixed-precision (FP16) training stability. Loss scaling prevents gradient underflow by scaling the loss (and thus all gradients) by a large factor during backward, then unscaling before the optimizer step.
+FP16 training uses two features. Both are described in full, with the algorithm, Python API and limitations, in [docs/mixed_precision.md](docs/mixed_precision.md).
 
-### How It Works
-
-1. During `backward()`, the loss gradient is seeded with `scale` instead of `1.0`
-2. All gradients are scaled by `scale` during backpropagation
-3. Before the optimizer step, gradients are divided by `scale` (unscaled)
-4. If the scale exceeds FP16 max (~65504), gradients are automatically upcast to FP32
-5. **Dynamic mode:** overflow (inf/nan in gradients) is detected after backward; scale is halved and optimizer step is skipped; after N successful steps, scale is doubled
-
-### Configuration
-
-**Via pragma (in `.tl` file):**
+* **Loss scaling** scales the loss during `backward()` so small FP16 gradients do not underflow, then unscales before the optimizer step. It is off by default (scale `1.0`) and is set per file with a pragma:
 
 ```text
 # loss_scale: 65536
-let x: Tensor[f16, (4,)] = [1.0, 2.0, 3.0, 4.0] with grad
-let y = mult(x, x)
-let loss = sum(y)
-backward(loss)
-```
-
-**Auto-detect:**
-
-```text
 # loss_scale: auto
-```
-
-Auto-detect checks if any tensor in the graph is FP16 and selects `65536.0`; otherwise uses `1.0`.
-
-**Dynamic scaling:**
-
-```text
 # loss_scale: dynamic [init_scale] [patience]
 ```
 
-Enables dynamic scaling with optional initial scale (default: auto-detected) and patience (default: 2000 successful steps before doubling).
+  `auto` picks `65536.0` if any tensor in the graph is f16 and `1.0` otherwise. `dynamic` halves the scale and skips the optimizer step on overflow, and doubles it after `patience` clean steps (default 2000).
+* **FP16 master weights** need no configuration. An f16 parameter declared `with grad` gets an FP32 master copy; `sgd` and `adam` update the master (with FP32 `m` and `v`) and cast the result back to f16 for the forward pass. FP32 parameters are unaffected.
 
-**Via Python API:**
-
-```python
-compiler = TensorCompiler(loss_scale=65536.0)
-compiler = TensorCompiler(dynamic_loss_scale=True, loss_scale_patience=100)
-compiler.compile_and_execute("model.tl")
-```
-
-**Default:** `1.0` (no scaling). Existing tests and FP32 programs are unaffected.
-
-### Supported Scales
-
-| Dtype | Default Scale | Notes |
-|---|---|---|
-| `f32` | `1.0` | No scaling needed |
-| `f16` | `65536.0` (2^16) | Auto-detected or explicit; gradients upcast to FP32 |
-
-### Loss Scaling in Training Loops
-
-Loss scaling works inside `for` loops. The scale is applied per-backward-call and unscaled before the optimizer step:
-
-```text
-# loss_scale: 65536
-let w: Tensor[f16, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
-
-for epoch in range(10) {
-    let y = matmul(x, w)
-    let loss = mse_loss(y, y_true)
-    backward(loss)
-    sgd(w, w_grad, 0.01)
-}
-```
-
-### Limitations
-
-* **Multiple `backward()` statements** — the interaction of loss scaling with more than one `backward()` in a file is not yet tested.
-* **FP16 master weights** — ✅ supported (see below).
-
----
-
-## FP16 Master Weights
-
-TensorLang supports **FP32 master weights** for FP16 parameters. When an FP16 tensor has `with grad`, the compiler automatically allocates an FP32 master weight buffer. The optimizer (Adam/SGD) computes updates in FP32 (m, v buffers in FP32) and casts the result back to FP16 for the forward pass.
-
-### How It Works
-
-1. When an FP16 tensor is declared with `with grad`, an FP32 master weight buffer (`{name}_master`) is allocated
-2. Master is initialized from the FP16 param (cast FP16 → FP32)
-3. During the optimizer statement (`sgd` or `adam`), the optimizer updates the master weight (FP32) with FP32 m/v buffers
-4. After update, master is cast to FP16 and written to the param buffer
-5. The forward pass uses the FP16 param as before
-
-### Usage
-
-No configuration needed — master weights are automatic for FP16 params with grad:
-
-```text
-let w: Tensor[f16, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
-
-for epoch in range(100) {
-    let y = matmul(x, w)
-    let loss = mse_loss(y, y_true)
-    backward(loss)
-    adam(w, w_grad, 0.01)  // updates master (FP32), casts to w (FP16)
-}
-```
-
-FP32 params continue to use the original (non-master) code path. No extra memory or overhead for FP32 training.
-
-### Benefits
-
-* **Better precision** — optimizer state (m, v) computed in FP32 instead of FP16
-* **No underflow** — weight updates in FP32 prevent FP16 underflow in small gradients
-* **Transparent** — no API changes; automatic for FP16 params with grad
-* **Compatible with loss scaling** — works with both static and dynamic loss scaling
+Both work inside `for` loops. One gap: loss scaling with more than one `backward()` in a file is not yet tested.
 
 ---
 
@@ -1028,129 +935,9 @@ source build.sh --test --filter control_flow
 
 `--filter` matches on the test name, so tests are named by feature: `control_flow_*`, `for_loop_*`, `autograd_*`, `load_*`, `any_all_*`, and so on. Do not prefix tests with a version number.
 
-### Test Annotations
+A GPU-free helper, `python3 check.py path/to/file.tl`, parses and type-checks a file without running it.
 
-Expected results:
-
-```text
-// @EXPECTED
-// {"loss_final": 0.0164794921875}
-```
-
-Negative tests (the program must fail to compile or run):
-
-```text
-// @EXPECT_FAILURE: [E-SHAPE-MISMATCH]
-// @EXPECT_FAILURE: Inner dimensions must match
-```
-
-A negative test passes only if the compiler exits non-zero **and** its output contains every `@EXPECT_FAILURE:` text. Put a diagnostic code first (see [Diagnostics](#diagnostics)) and, optionally, a short phrase. Rules:
-
-* The marker must be the first thing on a comment line. A line that merely mentions `@EXPECT_FAILURE` in prose is ignored.
-* Several `@EXPECT_FAILURE:` lines may be stacked; all must be present in the output.
-* A bare `// @EXPECT_FAILURE` (no text) is still accepted but passes on any clean non-zero exit, fails if the output contains a Python traceback, and is listed in a warning at the end of the run so it can be pinned.
-
-### Tensor Verification
-
-```bash
-python3 tensorlang.py --test --verify-tensors
-```
-
-Tensor verification is performed by the test runner, not the compiler. It checks NaN/Inf, extreme values, expected values, and cached `.npy` files.
-
-### Test Inventory
-
-The suite covers:
-
-* Basics, arithmetic, broadcasting (N-D)
-* Activations (relu, sigmoid, tanh, softmax, gelu, swish)
-* Reductions, slicing, reshape, transpose, concat (N-D)
-* Linear layers, MLP, neural nets
-* Normalisations (layer/batch/instance, N-D)
-* Losses (mse, cross-entropy, N-D)
-* Autograd (basic, chain, broadcast, relu, sigmoid, tanh, weight update, linear, layer_norm, batch_norm, instance_norm, cross_entropy, gelu, swish, reshape, transpose, slice, concat, max, min, argmax, greater, batched matmul, multiple backward passes: sequential, deferred updates, unreached parameters, several per loop body)
-* Training loops (`for_loop_*`, `training_pipeline`, `linear_regression`, …), including `load()`, tensor literals, user-defined functions, and f16 loads in loop bodies
-* Comparison operations (`comparison_*`, `autograd_comparison_ops`, `for_loop_comparison_ops`): the named operations, the operator forms, literals against 1-D, 2-D and 3-D tensors, zero gradients
-* Condition semantics (`control_flow_condition_*`, `control_flow_nan_condition_*`): `-0.0`, f16 underflow, infinity, all-nonzero, empty tensors (compile error), `NaN` (run-time error, loaded from a fixture)
-* Autograd in branches (`autograd_branch_*`): `if`/`elif`/`else` taken and not taken, nested branches (then/then, then/else, inside an `elif`), a loss through a value computed outside the branch, several `backward()` statements in one branch, `backward()` followed by `sgd`
-* Control flow (`control_flow_*`): tensor-valued conditions, comparison operators, scalar literals in `if`/`elif`, branch consistency (positive and negative), `if` inside `for` (including a condition that flips between iterations), alias semantics
-* `any()` / `all()` reductions (`any_all_*`)
-* Functions, pipelines, portfolio-style examples
-* Load/save, including float16 (`load_f16_*`) and float64 (`load_f64_*`) fixtures
-* Transformer building blocks (`probe_*`): causal mask, layer norm, gelu, broadcasting, one-hot embedding, the shape-stability guard, attention gradients, and a one-layer pre-LN GPT-2-style forward pass with seeded distinct weights, generated by `make_gpt2_probe.py` together with its float64 expected values
-* Gather and GPT-2: `embedding_gather`, `embedding_grad`, `embedding_token_position`, `probe_gpt2_multihead` (two heads, fused QKV, `embedding`), `gelu_tanh`, and the `diagnostics_embedding_*` negative tests
-* Mixed precision (f16 basic, matmul, autograd, training)
-* N-dimensional (elementwise, reductions, matmul, linear, slice, concat, softmax, layer_norm, cross_entropy)
-* Loss scaling (basic, FP16 upcast, auto-detect, dynamic, training loop)
-* FP16 master weights (Adam optimizer)
-* For-loop body parity (`for_loop_body_parity.tl`)
-* Diagnostics (`diagnostics_*`): one negative test per error code, plus nested-expression, suggestion, condition, and branch-label messages
-* Negative tests (`@EXPECT_FAILURE`)
-
-Full list is available via `ls tests/`. A plain-Python unittest suite also lives under `tests/python/`. Small input fixtures (such as `tests/for_loop_load_data.npy` and `tests/load_f16_data.npy`) live next to the tests that use them.
-
-### Running GPT-2
-
-The real GPT-2 small runs from a generated TensorLang program. It needs `pip install safetensors huggingface_hub tokenizers` and about 500 MB of disk. Requirements, what each step writes and timings are in [docs/gpt2_demo.md](docs/gpt2_demo.md).
-
-```bash
-python3 tools/export_gpt2_weights.py                          # downloads the checkpoint, writes one .npy per tensor to build/gpt2/
-python3 tools/make_gpt2_demo.py --prompt "The Eiffel Tower is located in the city of"   # writes build/gpt2_forward.tl and a float64 reference
-python3 tensorlang.py build/gpt2_forward.tl                   # prints the predicted next-token id, saves the logits
-python3 tools/compare_gpt2_logits.py                          # TensorLang logits vs the reference (PASS needs identical argmax and diff < 1e-2)
-python3 tools/gpt2_generate.py --prompt "The capital of France is" --tokens 20 --check-reference
-```
-
-Measured on a GTX 1080 Ti (prompt "The capital of France is"): max absolute logit difference 1.1e-4 on logits averaging 83 in magnitude, argmax identical
-at every position, identical top-5. Twenty greedy tokens are identical to the float64 reference. Greedy GPT-2 small repeats itself ("the capital of the
-French Republic, and the capital of the French Republic ..."); the reference does the same.
-
-The program is generated and unrolled because `load()` takes a string literal; GPT-2's tanh-approximation GELU is a user-defined function built from
-`mult`, `add` and `tanh` (see `tests/gelu_tanh.tl`). Generation fixes the sequence length (prompt plus new tokens) and reads the token ids from a `.npy`,
-so the compiled kernels are reused between steps. The NumPy reference is a reimplementation checked against an independent per-head loop, not against
-HuggingFace.
-
-### Development Tools
-
-- `tools/weight_edit.py` — search/replace weight editor for GPT-2 (bias or rank-one mode, with `--auto` layer/alpha search)
-- `tools/demo_weight_edit.sh` — one-liner demo: edit → compile → run → compare
-- `tools/profile_train_step.py` — where a training run spends its time (GPU wait, copies, backward); see [docs/training.md](docs/training.md)
-- `tools/make_micro_gpt_train.py`, `tools/compare_micro_gpt.py`, `tools/check_adam_bias.py` — a GPT training-program generator with a float64 reference and mutation check, a GPU-versus-reference comparison, and an Adam bias-correction check
-
-
-A GPU-free helper is available for quick checks:
-
-```bash
-# Parse + typecheck any .tl file (no GPU needed)
-python3 check.py path/to/file.tl
-```
-
-`tools/` holds the probe generators (`make_gpt2_probe.py`, `make_gpt2_mha_probe.py`), the scanners and kernel checkers used to find and fix the
-v0.5.7 broadcast bug, and the GPT-2 demo scripts (see [Running GPT-2](#running-gpt-2)).
-
-`check.py` is a fast way to confirm a new test parses and type-checks before running it on the GPU. It cannot catch runtime problems (for example, a kernel that is generated but never executed), so a test also needs a real GPU run.
-
-### Weight-Space Programming (GPT-2)
-
-TensorLang can load and execute edited GPT-2 weights. See
-[docs/weight_space_programming.md](docs/weight_space_programming.md) for
-details, tools, and experimental results.
-
-**Quick demo:**
-```bash
-./tools/demo_weight_edit.sh
-```
-
-### Multi-GPU Test Execution
-
-```bash
-python3 tensorlang.py --list-gpus
-python3 tensorlang.py --test
-python3 tensorlang.py --test --gpu 1
-python3 tensorlang.py --no-gpu-pinning
-```
-
-This is process-level pinning only. A single TensorLang program does not span multiple GPUs. Round-robin pinning is real but modest on the small/fast correctness suite; heavier concurrent GPU workloads are the better use case.
+Test annotations (`@EXPECTED`, `@EXPECT_FAILURE`), tensor verification, the test inventory, the helper tools and multi-GPU test execution are in [docs/testing.md](docs/testing.md). Running real GPT-2 is in [docs/gpt2_demo.md](docs/gpt2_demo.md), and editing its weights is in [docs/weight_space_programming.md](docs/weight_space_programming.md).
 
 ---
 
@@ -1165,55 +952,7 @@ python3 tensorlang.py --app examples/decision_boundary
 python3 tensorlang.py --app games/2048 --app-args <16 numbers>
 ```
 
-### App Layout
-
-```
-apps/
-└── [<category>/]
-    └── <app-name>/
-        ├── app.toml
-        ├── <entry>.tl
-        └── tests/
-            └── *.tl
-```
-
-### Minimal `app.toml`
-
-```toml
-[app]
-name = "hello_mlp"
-description = "Minimal 2-layer MLP training example"
-
-[requirements]
-gpus = 1
-memory_gb = 4
-
-[entry_points]
-main = "main.tl"
-```
-
-### App Requirements
-
-`app.toml` may declare:
-
-```toml
-[requirements]
-gpus = 1
-packages = ["pygame"]
-```
-
-* `requirements.gpus` is enforced via least-utilized GPU selection and process pinning.
-* `requirements.packages` are auto-installed if missing.
-* `cuda_version` and `memory_gb` are display-only.
-* `[gpu] device = N` can pin an app to a specific GPU.
-
-### App Tests
-
-```bash
-python3 tensorlang.py --app examples/hello_mlp --test
-```
-
-App tests run sequentially.
+Layout, the `app.toml` format, requirements and app tests are in [docs/apps.md](docs/apps.md).
 
 ### Notable Apps
 
@@ -1227,93 +966,7 @@ App tests run sequentially.
 
 ## Future Work
 
-### v0.5.5 (released) — robustness, not breadth
-
-Focus: harden what already exists rather than add another broad parity release.
-
-**Phase 0 — test harness and regression guards (done)**
-* Stable diagnostic codes in the type checker
-* `@EXPECT_FAILURE` pins required output text; existing negative tests migrated
-* Test runner clears each test's own cache directory before running it
-* Regression tests for the seams that broke during v0.5.4: branch consistency, scalar literals in `elif`, `load()` and tensor literals in loop bodies, f16 `load()`, alias semantics, `if` inside `for`
-
-**Phase 1 — small cleanups (done)**
-* Removed dead, shadowed duplicates in `io.py` (`_ensure_gpu_alloc`, `_allocate_zeros`, `_load_data_file`)
-* Removed a duplicated `_inline_user_functions_in_nodes` call
-* `autograd_multiple_backward` now uses a nonzero learning rate so it can detect wrong gradients
-* Multi-pass gradient semantics: a `backward()` pass no longer zeroes the gradients of parameters its loss does not reach (found by the deferred-update test)
-
-**Phase 2 — diagnostics (done)**
-* Errors name the expression involved instead of compiler temporaries (`__tmp_N`)
-* `[E-SCALAR-LITERAL]` distinguishes a bare number from an undefined tensor; a bare numeric `let` is now an error instead of being skipped silently
-* "Did you mean" suggestions for undefined names; branch mismatches name the branches and both types
-* Parse errors show the source line with a caret (`[E-SYNTAX]`), with no traceback unless `--debug`
-* Still open: better debug output for loop and branch execution
-
-**Phase 3 — control-flow edge cases (done)**
-* Done: condition semantics (`NaN` is a run-time error, an empty tensor is a compile error, `-0.0` and f16 underflow are falsy)
-* Done: `greater_equal`, `less_equal`, `not_equal` and the operators `>`, `<`, `==`, `>=`, `<=`, `!=` as values
-* Done: numeric literals in comparisons take the shape of the other operand (the comparison kernels cannot broadcast a `(1,)` operand)
-* Done: `backward()` in an `elif` and in nested branches, plus bugs this exposed: a loss through a value computed outside the branch gave silent zero gradients; only the first `backward()` in a branch ran; the pass ran after the branch's other statements instead of in order; top-level `if` statements (and `if` inside loop bodies) ran their branch without its autograd path, so a backward pass included the nodes of every branch; and sibling branches shared one kernel scope, so same-named kernels collided as duplicate CUDA symbols (each branch now has its own scope)
-* Done: a `for` loop body now runs every `backward()` it contains, in order (it used to run only the first and skip the rest silently)
-* Found along the way, carried to v0.5.6: general N-D broadcasting in the comparison kernels (currently equal shapes or `(rows, cols)` vs `(cols,)`); f16 operands in comparison kernels; an explicit `isnan()` operation, since a deliberate check for `NaN` is impossible while any condition on a `NaN` is an error
-
-### v0.5.6 (released) — close the gaps found in v0.5.5
-
-**Phase 1 — comparison and dtype guards (done)**
-* Done: comparison operand shapes the kernels cannot run (anything other than equal shapes, or a `(rows, cols)` tensor against a `(cols,)` or `(1, cols)` row) are `[E-SHAPE-MISMATCH]`, for comparison `let` operations (annotated ones included) and for `if`/`elif` conditions; `tools/scan_comparison_shapes.py` found no affected comparison in the existing tests, apps or examples
-* Done: f16 operands in comparisons, including against a numeric literal, are `[E-COMPARISON-DTYPE]`: the kernels are generated for f32 only. No existing test or app compared f16 (`tools/scan_comparison_dtypes.py`). Real f16 comparison support is deferred
-* Done: a tensor declared as `f64` is `[E-UNSUPPORTED-DTYPE]`. f64 never had code generation support (operations raised `KeyError: 'f64'`) and comparisons misread it silently. The two `apps/trading` indicator apps now declare their window as `f32`
-* Done: an undeclared `load()` of a float64 `.npy` or `.npz` is inferred as f32 and converted on load. It used to be inferred as f64 and failed with `KeyError: 'f64'` at the first operation that used it. NumPy writes float64 by default, so rejecting it would have been hostile. `tools/scan_load_f64.py` lists the undeclared loads in a codebase that this affects (none in the existing tests, apps or examples). Test: `load_f64_inferred`
-
-**Phase 2 — one normalisation slice (done)**
-* Done: `batch_norm(x, mean, var, gamma, beta)` with optional `gamma`/`beta` (both or neither), type checking with stable codes (`[E-SHAPE-MISMATCH]`, `[E-UNDEFINED-TENSOR]`, `[E-BATCH-NORM-DTYPE]`) and gradients for `x`, `gamma` and `beta`
-* Found and fixed by it: the N-D forward took each element's channel as `idx % C`, which is wrong for NCHW (only half the elements got the right channel), and the backward used batch statistics while the forward uses the given ones (a gradient near zero where it should be 0.5 to 4). Both gave wrong results with no error. Regression tests: `batch_norm_nchw`, `autograd_batchnorm_given_stats`
-* Deferred: training-mode batch statistics and running-statistics updates, an `axis=` option, and an `instance_norm` rework
-
-**Phase 3 — application acceptance test (done)**
-* Done: `apps/examples/adaptive_lr` — an `if loss > threshold` learning-rate step and two losses with separate optimisers, with the branch taken in some iterations and not others, pinned against hand-derived values
-* Found and fixed by it: an `if` placed after the first `backward()` in a `for` body was silently never executed (a branch `sgd` did not run), and every statement after a loop containing an `if` ran the wrong kernel (the loop's kernels were miscounted). Regression tests: `for_loop_if_after_backward_sgd`, `for_loop_if_then_statement_after`
-* Open: an optimiser step inside an `if` does not honour the loss-scaling overflow skip (f16 with dynamic loss scaling); the same already held for a `backward()` and `sgd` in one branch
-
-**Also under consideration**
-* Make `load_basic`, `load_dynamic`, and `load_inferred` self-contained with committed fixtures
-* Dynamic loss scaling: make the growth interval configurable (otherwise deferred)
-
-### v0.5.7 (released) — a transformer forward pass, and the broadcast bug it found
-
-**Phase A — probes (done)**
-* Done: the pieces of a transformer block are expressible with existing operations (no attention primitive): batched `matmul`, `transpose(axes=...)`, `softmax(axis=)`, `layer_norm`, `gelu`, `slice`, `concat`, N-D broadcasting; a one-layer forward pass compiles and runs
-* Done: the causal mask recipe (`(rows, 1) - (1, cols)` broadcast, `>= 0.0`, additive `-1e9`) matches its exact expected matrix on the GPU
-* Found: in-language generation is blocked (a growing rebind is skipped at run time); there is no gather; `fill` is scalar-only and not an operand; redefining a `let` name is accepted by the type checker and then fails later; constant test inputs hide errors (see [Known limitations](#known-limitations))
-* Found: the first forward-pass probe was degenerate. Its weights were constant down each column, so the true logits are exactly zero and the GPU and NumPy values (about 1e-8) were two roundoff results; no mutation of the block changed them. It is replaced by a generated probe with seeded distinct weights, a real one-hot input and a built-in sensitivity check (the mask, scale, residual, bias placement and activation each move the logits by at least 0.1)
-* Done: the replacement probe matches its float64 reference on the GPU, and `probe_attention_block` matches NumPy for `out` and all three gradients
-* Fixed: the probe exposed a silent wrong-answer bug that exists in every earlier version, including v0.5.6. `add`, `minus`, `mult` and `div` of a square `(n, n)` tensor with an `(n,)` vector read the vector per row instead of per column, in both the unfused and the fused kernel (non-square shapes were always correct). Square weights with a bias, or a layer-norm gamma/beta, gave plausible but wrong numbers with no error. Three existing tests had pinned the wrong values (`fusion_broadcast`, `fusion_broadcast_guard`, `mlp`) and were corrected; regression test `broadcast_vector_square`. `tools/scan_square_vector_broadcast.py` lists the affected programs in a codebase and `tools/check_broadcast_kernels.py` checks the kernels against NumPy without a GPU
-
-### v0.5.8 (released) — `embedding`, and real GPT-2 running end to end
-
-**Phase B — language changes**
-* Done: `embedding(indices, weight)` — gather rows, scatter-add gradient, run-time index check, three diagnostic codes (indices are `f32`: there is no integer dtype)
-* Done: a two-head probe (`probe_gpt2_multihead`: fused QKV by slicing, head split and merge, batched attention, `embedding`) with a generator that refuses to write unless nine head-handling bugs each change the logits
-* Done: tanh-GELU built from existing operations (`gelu_tanh`), values and gradient checked against float64 NumPy
-* Fixed: `load()` printed a line per call regardless of the debug flags
-
-**Phase C — demo**
-* Done (C1): the real GPT-2 small (124M parameters) runs from a generated program; logits match a float64 reference to 1.1e-4, argmax identical
-* Done (C2): host-driven greedy generation with a fixed-length program and the token ids read from a `.npy` (compile once: ~21 s, then ~2.9 s per token); 20 tokens identical to the reference
-* Found: a run costs ~3 s even when warm, of which reading all the weight files is only ~0.4 s, so the rest is the load and copy path and process start (to profile)
-
-### v0.5.9 (released) — training you can trust
-
-* Done: `softmax_cross_entropy(logits, targets)` — fused, stable, N-D, `(softmax - onehot)/N` gradient, four diagnostic codes; four tests
-* Found and documented: `softmax` followed by `cross_entropy` back-propagates a wrong gradient (`cross_entropy` takes probabilities but its backward is the logits gradient). `cross_entropy` is unchanged
-* Fixed: Adam's bias correction `1 - beta^t` was computed with a float32 `powf` on the device and was off by up to 6e-5 relative for `beta2 = 0.999`; it is now computed on the host in float64. The stored expected value of `optimizer_adam_linear` was a product of the old kernel and is now the float64 reference
-* Fixed: Adam's `m` and `v` buffers were allocated, zero-uploaded and discarded every step (`setdefault` evaluates its default eagerly)
-* Fixed: a loop downloaded every tensor to the host about three times per step before `backward()`; it now downloads only what the host lacks (`TENSORLANG_HOST_SYNC=check` found no stale host copy in the suite)
-* Done: parser tables are cached; `load()` no longer copies data that already has the target dtype
-* Done (opt-in): `TENSORLANG_GPU_BACKWARD=1` runs the `matmul` and `gelu` backward on the GPU. 20 Adam steps of a 4-layer, 868K-parameter GPT: 5.5 s to 1.9 s with the other fixes
-* Done: tools to profile, generate and verify training programs (`docs/training.md`); a 162M-parameter GPT ran three Adam steps on one 11 GB card (about 10.8 s per step, random weights, not compared with a reference)
-* Found, not fixed: `--cache-layers` does not overwrite an existing cache file; the README described an `opt.step()` syntax that the grammar does not accept (the Optimizers, loss-scaling and FP16 master-weight sections now use the statement form)
+Shipped releases are recorded in [RELEASES.md](RELEASES.md). This section is for work that has not shipped.
 
 ### v0.5.10 (planned) — training that stays on the GPU, and the smaller gaps
 
@@ -1384,3 +1037,6 @@ Original author: davro (David). Related projects of interest: `workspace` (PyQt6
 ## License
 
 Licensed under the GNU Lesser General Public License v3 (LGPL-3.0). See `LICENSE` for details.
+
+
+================================================================================

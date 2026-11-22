@@ -5,7 +5,9 @@ An uploaded file lets the assistant run the real parser, AST builder and type ch
 
     python3 tools/collector.py > code.txt                  # preset "core" (the default)
     python3 tools/collector.py --preset probes > probes.txt
+    python3 tools/collector.py --preset docs > docs.txt    # README, RELEASES and docs/*.md
     python3 tools/collector.py tensorlang/compiler.py tests/mlp.tl > some.txt   # explicit files
+    python3 tools/collector.py "docs/social/**/*.md" > social.txt               # globs are expanded
     python3 tools/collector.py --list                      # show the presets and what is missing
     python3 tools/collector.py --out code.txt              # write the file directly
 
@@ -23,6 +25,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BAR = "=" * 80
+GLOB_CHARS = set("*?[")
+
+
+def glob(pattern):
+    """Sorted repo-relative paths of the files matching a pattern (empty if none or no such dir)."""
+    return sorted(str(p.relative_to(ROOT)) for p in ROOT.glob(pattern) if p.is_file())
+
 
 PRESETS = {
     # Everything needed to run the parser, AST builder, type checker and to read codegen/execution.
@@ -47,8 +56,22 @@ PRESETS = {
         "tools/make_gpt2_probe.py", "tools/compare_probe_intermediates.py",
     ],
     # The sweep / check scripts (so a new chat can see how each was written).
-    "tools": sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tools").glob("*.py")) if (ROOT / "tools").is_dir() else [],
+    "tools": glob("tools/*.py"),
+    # The README, the release history and the guides in docs/ (top level only: docs/social and
+    # docs/handovers are left out; use the "handovers" preset or an explicit glob for those).
+    "docs": ["README.md", "RELEASES.md"] + glob("docs/*.md"),
+    # Session handover notes.
+    "handovers": glob("docs/handovers/*.md"),
 }
+
+
+def expand(args):
+    """Expand glob patterns in explicit arguments; a pattern with no match is kept so it shows as MISSING."""
+    files = []
+    for a in args:
+        found = glob(a) if GLOB_CHARS & set(a) else []
+        files.extend(found or [a])
+    return files
 
 
 def render(files):
@@ -68,7 +91,8 @@ def render(files):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("files", nargs="*", help="explicit files (relative to the repo root); overrides --preset")
+    ap.add_argument("files", nargs="*",
+                    help="explicit files or glob patterns (relative to the repo root); overrides --preset")
     ap.add_argument("--preset", choices=sorted(PRESETS), default="core")
     ap.add_argument("--list", action="store_true", help="list the presets and flag missing files, then exit")
     ap.add_argument("--out", help="write to this file instead of stdout")
@@ -80,7 +104,7 @@ def main():
             print(f"{name}: {len(fs)} files" + (f", MISSING: {', '.join(gone)}" if gone else ""))
         return 0
 
-    files = a.files or PRESETS[a.preset]
+    files = expand(a.files) if a.files else PRESETS[a.preset]
     text, missing, total = render(files)
     if a.out:
         Path(a.out).write_text(text, encoding="utf-8")
