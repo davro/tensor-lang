@@ -4,9 +4,9 @@ TensorLang is an open-source, native machine-learning language designed to compi
 
 This project addresses pain points in Python-based ML frameworks by offering a streamlined, hardware-aware alternative for high-performance tensor computations. The compiler is implemented in Python, but the hot path — tensor operations — runs as compiled CUDA kernels.
 
-> **Status:** v0.5.8 released (`embedding`, a gather with a scatter-add gradient, and the real 124M-parameter GPT-2 small running from a TensorLang program: its logits match a float64 NumPy reference to 1.1e-4 and 20 greedy tokens are identical). Core suite: 311/311 `.tl` tests + 31/31 Python tests passing.
+> **Status:** v0.5.9 released (training you can trust: `softmax_cross_entropy`, an Adam precision fix, an opt-in GPU backward for `matmul` and `gelu`, and the tools that found them; a 162M-parameter GPT runs three Adam steps on one 11 GB card). v0.5.8 added `embedding` and real GPT-2 small, whose logits match a float64 NumPy reference to 1.1e-4. Core suite: 319/319 `.tl` tests passing.
 > **Hardware validated on:** 2× NVIDIA GTX 1080 Ti (Pascal, sm_61).
-> **Current focus:** v0.5.9 — generation inside the language (weights resident, one process), then `where`, `fill` as an operand, a diagnostic for a redefined `let` name, and `load()` selecting an array by name. See [Future Work](#future-work).
+> **Current focus:** v0.5.10 — training that stays on the GPU (gradients and activations resident, no round trip per op), a multi-head training program for GPT-2 small, and `load()` indexed by the loop counter so a loop can see different batches; then the earlier list (generation inside the language, `where`, `fill` as an operand, a diagnostic for a redefined `let` name). See [Future Work](#future-work).
 
 ---
 
@@ -16,6 +16,7 @@ This project addresses pain points in Python-based ML frameworks by offering a s
 * [Current Status and Limitations](#current-status-and-limitations)
 * [Setup](#setup)
 * [Quick Start](#quick-start)
+* [Documentation](#documentation)
 * [Repository Layout](#repository-layout)
 * [Language Overview](#language-overview)
 * [Operations](#operations)
@@ -197,6 +198,17 @@ python3 tensorlang.py --test --filter autograd
 ```
 
 ---
+
+## Documentation
+
+The README is the language reference. Longer guides live in `docs/`.
+
+| Guide | Covers |
+|---|---|
+| [docs/training.md](docs/training.md) | Training loops, choosing a loss (`softmax_cross_entropy` vs `cross_entropy`), optimizers, the opt-in GPU backward, profiling, and how a training program is verified |
+| [docs/gpt2_demo.md](docs/gpt2_demo.md) | Running real GPT-2 small: requirements, the steps, what each one writes, timings and what was verified |
+| [docs/weight_space_programming.md](docs/weight_space_programming.md) | Editing GPT-2's weights and running the edited model, with the experiments and their limits |
+| [docs/social/0.5.9/RELEASE_NOTES_v0.5.9.md](docs/social/0.5.9/RELEASE_NOTES_v0.5.9.md) | What changed in v0.5.9, with the measurements |
 
 ## Repository Layout
 
@@ -503,7 +515,7 @@ sgd(w1, w1_grad, 0.01)   // still the gradient from loss1
 sgd(w2, w2_grad, 0.01)   // gradient from loss2
 ```
 
-There is no implicit gradient zeroing. If you call `sgd` or `opt.step()` on a parameter after a pass that did not reach it, its previous gradient is applied again, as in PyTorch without `zero_grad()`. Gradients written by a run do not carry over to the next compile.
+There is no implicit gradient zeroing. If you call `sgd(...)` or `adam(...)` on a parameter after a pass that did not reach it, its previous gradient is applied again, as in PyTorch without `zero_grad()`. Gradients written by a run do not carry over to the next compile.
 
 Tested: separate parameters with an update after each pass, separate parameters with both updates deferred, and a parameter that no loss reaches (`autograd_multiple_backward`, `autograd_multiple_backward_deferred`, `autograd_unreached_param`).
 
@@ -626,7 +638,7 @@ for epoch in range(10) {
     let y = matmul(x, w)
     let loss = mse_loss(y, y_true)
     backward(loss)
-    opt.step()
+    sgd(w, w_grad, 0.01)
 }
 ```
 
@@ -645,7 +657,7 @@ TensorLang supports **FP32 master weights** for FP16 parameters. When an FP16 te
 
 1. When an FP16 tensor is declared with `with grad`, an FP32 master weight buffer (`{name}_master`) is allocated
 2. Master is initialized from the FP16 param (cast FP16 → FP32)
-3. During `opt.step()`, the optimizer updates the master weight (FP32) with FP32 m/v buffers
+3. During the optimizer statement (`sgd` or `adam`), the optimizer updates the master weight (FP32) with FP32 m/v buffers
 4. After update, master is cast to FP16 and written to the param buffer
 5. The forward pass uses the FP16 param as before
 
@@ -655,13 +667,12 @@ No configuration needed — master weights are automatic for FP16 params with gr
 
 ```text
 let w: Tensor[f16, (2, 2)] = [[0.5, 0.5], [0.5, 0.5]] with grad
-let opt = adam([w], lr=0.01)
 
 for epoch in range(100) {
     let y = matmul(x, w)
     let loss = mse_loss(y, y_true)
     backward(loss)
-    opt.step()  // updates master (FP32), casts to w (FP16)
+    adam(w, w_grad, 0.01)  // updates master (FP32), casts to w (FP16)
 }
 ```
 
@@ -678,7 +689,7 @@ FP32 params continue to use the original (non-master) code path. No extra memory
 
 ## Training Loops
 
-TensorLang supports multi-step gradient descent via `for` loops, including nested loops.
+TensorLang supports multi-step gradient descent via `for` loops, including nested loops. For losses, optimizers, the opt-in GPU backward and how to verify a training program, see [docs/training.md](docs/training.md).
 
 ```text
 for epoch in range(5) {
@@ -774,34 +785,34 @@ This swaps GPU buffer pointers rather than copying memory.
 
 ## Optimizers
 
-TensorLang provides first-class built-in optimizers (`sgd`, `adam`) with compiler-managed state. Instead of hand-writing `w = w - lr * grad` for every parameter, declare an optimizer over a list of parameters and call `opt.step()`.
+TensorLang provides built-in optimizers (`sgd`, `adam`) with compiler-managed state. An optimizer is a statement in the loop body, placed after `backward()`; it updates the parameter in place from its gradient `<name>_grad`.
 
 ### Syntax
 
+Arguments are positional: `sgd(param, param_grad, lr)` and `adam(param, param_grad, lr, beta1, beta2, eps)`, where `beta1`, `beta2` and `eps` default to 0.9, 0.999 and 1e-8.
+
 ```text
-let opt = adam([w1, w2], lr=0.01, beta1=0.9, beta2=0.999, eps=1e-8)
+let w: Tensor[f32, (1, 1)] = [[0.0]] with grad
 
 for epoch in range(100) {
-    let y_pred = matmul(x, w1)
+    let y_pred = matmul(x, w)
     let loss = mse_loss(y_pred, y_true)
     backward(loss)
-    opt.step()
+    adam(w, w_grad, 0.01)
 }
 ```
 
 SGD is used the same way:
 
 ```text
-let opt = sgd([w], lr=0.01)
+    sgd(w, w_grad, 0.01)
 ```
 
 ### Features
 
-* **Compiler-managed state** — Adam allocates and persists `m` and `v` buffers across iterations
-* **Multi-parameter** — a single optimizer can update several parameters at once
-* **Reuses pointer-swap rebinding** — parameter updates swap GPU buffer pointers (no copy)
-* **Gradient zeroing / accumulation semantics** supported
-* **FP32 master weights** — for FP16 params, optimizer computes in FP32 with FP32 m/v buffers, casts to FP16 for forward pass
+* **Compiler-managed state** — Adam allocates its `m` and `v` buffers once per parameter and keeps them across iterations
+* **FP32 master weights** — for FP16 params, the optimizer computes in FP32 with FP32 `m`/`v` buffers and casts to FP16 for the forward pass
+* **Bias correction** — computed on the host in float64 (v0.5.9; earlier versions computed `1 - beta^t` in float32 on the device, which was off by up to 6e-5 for `beta2 = 0.999`)
 
 ### Optimizer Names
 
@@ -1080,7 +1091,7 @@ Full list is available via `ls tests/`. A plain-Python unittest suite also lives
 
 ### Running GPT-2
 
-The real GPT-2 small runs from a generated TensorLang program. It needs `pip install safetensors huggingface_hub tokenizers` and about 500 MB of disk.
+The real GPT-2 small runs from a generated TensorLang program. It needs `pip install safetensors huggingface_hub tokenizers` and about 500 MB of disk. Requirements, what each step writes and timings are in [docs/gpt2_demo.md](docs/gpt2_demo.md).
 
 ```bash
 python3 tools/export_gpt2_weights.py                          # downloads the checkpoint, writes one .npy per tensor to build/gpt2/
@@ -1103,6 +1114,8 @@ HuggingFace.
 
 - `tools/weight_edit.py` — search/replace weight editor for GPT-2 (bias or rank-one mode, with `--auto` layer/alpha search)
 - `tools/demo_weight_edit.sh` — one-liner demo: edit → compile → run → compare
+- `tools/profile_train_step.py` — where a training run spends its time (GPU wait, copies, backward); see [docs/training.md](docs/training.md)
+- `tools/make_micro_gpt_train.py`, `tools/compare_micro_gpt.py`, `tools/check_adam_bias.py` — a GPT training-program generator with a float64 reference and mutation check, a GPU-versus-reference comparison, and an Adam bias-correction check
 
 
 A GPU-free helper is available for quick checks:
@@ -1290,10 +1303,25 @@ Focus: harden what already exists rather than add another broad parity release.
 * Done (C2): host-driven greedy generation with a fixed-length program and the token ids read from a `.npy` (compile once: ~21 s, then ~2.9 s per token); 20 tokens identical to the reference
 * Found: a run costs ~3 s even when warm, of which reading all the weight files is only ~0.4 s, so the rest is the load and copy path and process start (to profile)
 
-### v0.5.9 (planned) — generation inside the language, and the smaller gaps
+### v0.5.9 (released) — training you can trust
+
+* Done: `softmax_cross_entropy(logits, targets)` — fused, stable, N-D, `(softmax - onehot)/N` gradient, four diagnostic codes; four tests
+* Found and documented: `softmax` followed by `cross_entropy` back-propagates a wrong gradient (`cross_entropy` takes probabilities but its backward is the logits gradient). `cross_entropy` is unchanged
+* Fixed: Adam's bias correction `1 - beta^t` was computed with a float32 `powf` on the device and was off by up to 6e-5 relative for `beta2 = 0.999`; it is now computed on the host in float64. The stored expected value of `optimizer_adam_linear` was a product of the old kernel and is now the float64 reference
+* Fixed: Adam's `m` and `v` buffers were allocated, zero-uploaded and discarded every step (`setdefault` evaluates its default eagerly)
+* Fixed: a loop downloaded every tensor to the host about three times per step before `backward()`; it now downloads only what the host lacks (`TENSORLANG_HOST_SYNC=check` found no stale host copy in the suite)
+* Done: parser tables are cached; `load()` no longer copies data that already has the target dtype
+* Done (opt-in): `TENSORLANG_GPU_BACKWARD=1` runs the `matmul` and `gelu` backward on the GPU. 20 Adam steps of a 4-layer, 868K-parameter GPT: 5.5 s to 1.9 s with the other fixes
+* Done: tools to profile, generate and verify training programs (`docs/training.md`); a 162M-parameter GPT ran three Adam steps on one 11 GB card (about 10.8 s per step, random weights, not compared with a reference)
+* Found, not fixed: `--cache-layers` does not overwrite an existing cache file; the README described an `opt.step()` syntax that the grammar does not accept (the Optimizers, loss-scaling and FP16 master-weight sections now use the statement form)
+
+### v0.5.10 (planned) — training that stays on the GPU, and the smaller gaps
+
+* Stage 2 of the GPU backward: keep gradients and activations on the device between ops (today each `matmul` backward uploads three arrays and downloads two, and every kernel result is copied to the host); then the per-launch `cudaDeviceSynchronize` can be made optional
+* A multi-head training generator (fused QKV, slicing, like `probe_gpt2_multihead`), and `load()` indexed by the loop counter, as the two prerequisites for fine-tuning GPT-2 small
+* Elementwise `sqrt`, `rsqrt`, `exp`, `log` (needed for RMSNorm and so for LLaMA-style models), with gradients
 
 * In-language generation: keep the weights resident and run the whole loop in one process (a fixed-length padded token tensor, row selection and update by one-hot arithmetic, no growing rebind)
-* Profile the ~2.5 s fixed cost per run
 * `where(cond, a, b)`: elementwise select, for clean masking
 * Allow `fill` (and other special forms) as an operand inside another call
 * Proposed: a coded diagnostic for a repeated top-level `let` of the same name (loop bodies, and the same name in sibling branches, stay legal), after a sweep of the existing tests and apps
@@ -1303,7 +1331,7 @@ Focus: harden what already exists rather than add another broad parity release.
 **Phase D — only with evidence (deferred)**
 * A fused attention kernel, if profiling shows the composed version is the bottleneck
 * Quantised inference (needs a packed or ternary dtype and a checkpoint loader)
-* CUDA backward, if training throughput is the goal (the backward pass is NumPy on the CPU today)
+* CUDA backward for the remaining ops, if training throughput is the goal (`matmul` and `gelu` can run on the GPU since v0.5.9; the rest is NumPy on the CPU)
 * `arange` / `linspace` for creating varied tensors
 
 ### Short Term
