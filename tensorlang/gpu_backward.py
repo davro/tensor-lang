@@ -5,6 +5,8 @@ runner's subprocesses, so  TENSORLANG_GPU_BACKWARD=1 python3 tensorlang.py --tes
 TENSORLANG_GPU_BACKWARD=2 does the same and prints one summary line at exit ("[GPU BACKWARD] used for N matmul and M gelu
 backward calls"), which also shows up in the test runner's per-test logs, so a suite run can be checked for really using it.
 TENSORLANG_GPU_BACKWARD_MIN=<n> skips the GPU for operands smaller than n elements (default 0: always use it).
+TENSORLANG_GPU_BACKWARD_POOL=0 turns off the device-memory pool (default on). Every call used to cudaMalloc and cudaFree its five
+buffers, about 260 microseconds per matmul backward; the pool reuses them. Results are identical either way.
 
 Stage 1 keeps autograd's host-side bookkeeping: the operands go up, the gradients come back as NumPy arrays and are
 accumulated by the existing code. Every function returns None whenever it cannot handle a case (non-float32 operands,
@@ -18,6 +20,7 @@ import numpy as np
 
 ENV = "TENSORLANG_GPU_BACKWARD"
 MIN_ENV = "TENSORLANG_GPU_BACKWARD_MIN"
+POOL_ENV = "TENSORLANG_GPU_BACKWARD_POOL"
 TILE = 16
 
 SOURCE = r"""
@@ -89,17 +92,23 @@ class _Device:
         import pycuda.driver as cuda
         from pycuda.compiler import SourceModule
         self.cuda = cuda
+        self.pool = None
+        if os.environ.get(POOL_ENV, "1") != "0":
+            from pycuda.tools import DeviceMemoryPool
+            self.pool = DeviceMemoryPool()
+            atexit.register(self.pool.stop_holding)   # runs before pycuda.autoinit destroys the context
         mod = SourceModule(SOURCE)
         self._gemm = mod.get_function("gemm")
         self._gelu_bw = mod.get_function("gelu_backward")
 
     def upload(self, arr):
-        ptr = self.cuda.mem_alloc(arr.nbytes)
+        ptr = self.alloc(arr.nbytes)
         self.cuda.memcpy_htod(ptr, arr)
         return ptr
 
     def alloc(self, nbytes):
-        return self.cuda.mem_alloc(nbytes)
+        # pooled: free() hands the block back to the pool instead of calling cudaFree
+        return self.pool.allocate(nbytes) if self.pool else self.cuda.mem_alloc(nbytes)
 
     def download(self, ptr, shape):
         out = np.empty(shape, dtype=np.float32)
