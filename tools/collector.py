@@ -40,7 +40,7 @@ PRESETS = {
         "tensorlang/ast_builder.py", "tensorlang/type_checker.py", "tensorlang/codegen.py",
         "tensorlang/compiler.py", "tensorlang/execution.py", "tensorlang/autograd.py", "tensorlang/io.py",
         "tensorlang/constants.py", "tensorlang/tensor_lang.py", "tensorlang/fusion.py",
-        "tensorlang/kernel_generator.py", "tensorlang/interop.py",
+        "tensorlang/kernel_generator.py", "tensorlang/interop.py", "tensorlang/gpu_backward.py",
         "tensorlang/test_runner.py", "tensorlang/tensor_verifier.py",
         "tensorlang/generators/base.py", "tensorlang/generators/nn.py", "tensorlang/generators/shapes.py",
         "tensorlang/generators/comparisons.py", "tensorlang/generators/elementwise.py",
