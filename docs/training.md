@@ -60,8 +60,6 @@ For the example above, replace the two update lines with `adam(W, W_grad, 0.1)` 
 
 * Adam's `m` and `v` buffers are allocated once per parameter and persist across iterations.
 * For an `f16` parameter the optimizer keeps float32 master weights and float32 `m` and `v`, and casts back to f16.
-* The `let opt = adam([w1, w2], ...)` / `opt.step()` form that older README text described is not accepted by the current
-  grammar. Use the statement form.
 
 **Adam and tight tolerances.** Adam divides each gradient by its own size, so float32 noise on a near-zero gradient becomes a
 full-size step. A parameter whose true gradient is exactly zero (for example the key bias in attention: softmax ignores a
@@ -74,23 +72,51 @@ These are environment variables; nothing changes unless you set them.
 
 | Variable | Effect |
 |---|---|
-| `TENSORLANG_GPU_BACKWARD=1` | Runs the `matmul` and `gelu` backward on the GPU. Everything else still runs in NumPy on the CPU. `=2` also prints a usage line at exit. `TENSORLANG_GPU_BACKWARD_MIN=<n>` skips operands smaller than n elements |
+| `TENSORLANG_GPU_BACKWARD=1` | Runs the `matmul` and `gelu` backward on the GPU. Everything else still runs in NumPy on the CPU. `=2` also prints a usage line at exit. `TENSORLANG_GPU_BACKWARD_MIN=<n>` skips operands smaller than n elements. `TENSORLANG_GPU_BACKWARD_POOL=0` turns off the device-memory pool (on by default; results are identical either way) |
 | `TENSORLANG_HOST_SYNC=full` | Restores the old behaviour of re-downloading every tensor before each loop's backward pass. The default downloads only what the host does not have. `=check` does the full download and reports any stale host copy at exit |
 
-On a 4-layer GPT (868K parameters, sequence 64, width 128), 20 Adam steps, warm: **5.5 s with the NumPy backward, 1.9 s** with
-`TENSORLANG_GPU_BACKWARD=1` and the other fixes in v0.5.9. The backward alone went from about 3.5 s to 0.85 s. The GPU backward is
-"stage 1": operands go up and gradients come back for each `matmul`, which still costs about a fifth of the run. Gradients agree
-with a float64 reference to about 1e-6 norm-wise. The backward `matmul` uses a simple tiled kernel, not cuBLAS.
+On a 4-layer GPT (867K parameters, sequence 64, width 128), 20 Adam steps, warm, measured on a GTX 1080 Ti (v0.5.9 plus the
+device-memory pool): **4.8 s with the NumPy backward, 1.85 s** with `TENSORLANG_GPU_BACKWARD=1`. The backward alone went from 3.7 s
+to 0.83 s. The GPU backward is "stage 1": operands go up and gradients come back for each `matmul`, which costs about 0.2 s of the
+1.85 s run. Counting the forward results that are copied to the host after every kernel as well, copies come to about 0.5 s, more
+than a quarter of the run. Before the pool, each `matmul` backward allocated and freed five device buffers, about 0.26 ms per call
+(0.17 s per run); the pool reuses them, and the run went from 2.03 s to 1.85 s.
+Gradients agree with a float64 reference to about 1e-6 norm-wise. The backward `matmul` uses a simple tiled kernel, not cuBLAS.
 
 ### Where does the time go?
 
 ```bash
-TENSORLANG_GPU_BACKWARD=1 python3 tools/profile_train_step.py my_program.tl            # run twice: the first run may compile
-TENSORLANG_GPU_BACKWARD=1 python3 tools/profile_train_step.py my_program.tl --cprofile 25
+# generate a program to profile (see "Checking that a training program is right" below)
+mkdir -p build
+python3 tools/make_micro_gpt_train.py --perf --dim 128 --seq 64 --layers 4 --vocab 256 --ff-mult 4 --steps 20 \
+    --out-tl build/micro_gpt_perf.tl --weights build/micro_gpt_perf
+
+# run twice: the first run compiles kernels (about 8.7 s here), so keep the second
+TENSORLANG_GPU_BACKWARD=1 python3 tools/profile_train_step.py build/micro_gpt_perf.tl
+TENSORLANG_GPU_BACKWARD=1 python3 tools/profile_train_step.py build/micro_gpt_perf.tl --cprofile 25
 ```
 
 It prints GPU wait, device-to-host and host-to-device copies, and the backward (with its own copies shown underneath); "rest"
-is everything else (launches, optimizer kernels, loading, printing). Run with debug flags off.
+is everything else (launches, optimizer kernels, loading, printing). Run with debug flags off. `--cprofile` made this run about
+three times slower (6.3 s against about 2 s), so use it to rank functions, not to time phases.
+
+A warm run of the program above (v0.5.9 plus the device-memory pool, GTX 1080 Ti):
+
+```text
+phase                seconds    share   calls        MB
+GPU wait               0.020     1.1%    3720      0.00
+copy GPU->host         0.166     9.0%    3720    163.09
+copy host->GPU         0.136     7.4%    5102    170.05
+backward (total)       0.828    44.7%      20      0.00
+  of which copies      0.200    10.8%    3540    258.21
+  of which compute     0.629    33.9%
+rest                   0.703    37.9%
+TOTAL wall             1.854
+```
+
+Without `TENSORLANG_GPU_BACKWARD=1` the same run takes 4.84 s, of which the backward is 3.74 s (77%) and "rest" is 0.77 s, close to
+the 0.70 s above. The GPU wait is small because the kernels are short, so GPU arithmetic is not the bottleneck; the time goes to copies,
+Python-side launches, and the backward's NumPy ops and bookkeeping.
 
 ## Checking that a training program is right
 
@@ -124,6 +150,8 @@ is everything else (launches, optimizer kernels, loading, printing). Run with de
 | Tool | Purpose |
 |---|---|
 | `tools/profile_train_step.py` | Where a run spends its time |
+| `tools/profile_backward_ops.py` | Backward time by op type, plus the work `backward()` does outside the nodes |
+| `tools/bench_gpu_backward.py` | One GPU `matmul` backward call split into allocation, copies and kernels |
 | `tools/make_micro_gpt_train.py` | Training-program generator with a float64 reference and a mutation check |
 | `tools/compare_micro_gpt.py` | GPU results against the reference (final weights, or `--grads`) |
 | `tools/check_adam_bias.py` | Accuracy of Adam's bias correction on your GPU |

@@ -1,5 +1,3 @@
-# FILE: README.md
-================================================================================
 # TensorLang: A Native AI/ML Language
 
 TensorLang is an open-source, native machine-learning language designed to compile tensor operations into GPU-accelerated CUDA kernels.
@@ -1037,6 +1035,3 @@ Original author: davro (David). Related projects of interest: `workspace` (PyQt6
 ## License
 
 Licensed under the GNU Lesser General Public License v3 (LGPL-3.0). See `LICENSE` for details.
-
-
-================================================================================
