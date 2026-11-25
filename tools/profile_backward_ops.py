@@ -7,7 +7,7 @@
 Runs the program once and times every call of ComputationGraph._backward_node, grouped by the node's op type, plus the work
 backward() does outside the nodes: the zero-filled gradient for every tensor in the graph, the np.all checks (the zero-gradient skip
 before each node and the overflow scan at the end), np.isfinite, and what is left (the loop itself and the `output_grad == 0`
-comparison made before each node).
+comparison, or its `.any()` replacement, made before each node).
 
 Nothing in the repo is edited: the timers are patched in for this process only. The first --skip backward passes (default 1) are
 left out, because the first call of the GPU backward builds the device and its kernels once. Run from anywhere; the program path is
@@ -115,7 +115,7 @@ def main():
             return getattr(self._real, name)
 
     proxy = NumpyProxy(real_np)
-    for fname in ("zeros_like", "all", "isfinite"):
+    for fname in ("zeros_like", "zeros", "all", "isfinite"):
         setattr(proxy, fname, timed_np(getattr(real_np, fname), fname))
 
     G._backward_node = timed_node
@@ -176,13 +176,19 @@ def main():
         print("  GPU backward was requested but not used (see any message above); everything ran in NumPy")
 
     print("\noutside the nodes, inside backward():")
+    print(f"  {'total, outside the nodes':<44}{'':>7}{total - in_nodes:>9.3f}{(total - in_nodes) / total:>8.1%}"
+          f"   ({(total - in_nodes) / measured * 1e3:.1f} ms per pass)")
     labels = {"zeros_like": "gradient for every tensor (np.zeros_like)",
+              "zeros": "gradient for every tensor (np.zeros)",
               "all": "np.all (zero-skip check, overflow scan)",
               "isfinite": "np.isfinite (overflow scan)"}
     for key, text in labels.items():
-        calls, secs = outside.get(key, (0, 0.0))
-        print(f"  {text:<44}{calls:>7}{secs:>9.3f}{secs / total:>8.1%}")
-    print(f"  {'the rest (loop, `== 0` before each node, ...)':<44}{'':>7}{other:>9.3f}{other / total:>8.1%}")
+        if key not in outside:
+            continue
+        calls, secs = outside[key]
+        print(f"    {text:<42}{calls:>7}{secs:>9.3f}{secs / total:>8.1%}")
+    print(f"    {'the rest (loop, zero-skip test, `.any()`, ...)':<42}{'':>7}{other:>9.3f}{other / total:>8.1%}")
+    print("  (compare the 'total, outside the nodes' line between runs: the rows below it depend on which numpy calls the code uses)")
     return 0
 
 

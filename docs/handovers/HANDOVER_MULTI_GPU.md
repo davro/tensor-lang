@@ -1,8 +1,17 @@
 # TensorLang Multi-GPU Design Handover
 
-**Date:** 2026-10-23
+**Date:** 2026-10-23, revised 2026-11-24
 **Status:** Design (not yet implemented). Supersedes the 2026-10-22 draft.
-**Goal:** Add opt-in data-parallel training (DDP) across multiple GPUs with **zero change** to single-GPU behaviour. All 109 existing tests must keep passing untouched. Leave a clear path to explicit collectives and, much later, FSDP.
+**Goal:** Add opt-in data-parallel training (DDP) across multiple GPUs with **zero change** to single-GPU behaviour. All 319 existing tests must keep passing untouched. Leave a clear path to explicit collectives and, much later, FSDP.
+
+**Revision notes (2026-11-24), after the v0.5.9 / v0.5.10 work.** The design stands; these facts changed or were found:
+
+- **Test count** is 319, not 109.
+- **Backward is no longer pure NumPy.** `matmul` and `gelu` can run a GPU backward (`TENSORLANG_GPU_BACKWARD=1`), but every gradient is still a host array when `ComputationGraph.backward` returns, so host-side averaging at that point is still correct and NCCL is still deferred.
+- **The two backward sites moved.** They are in `tensorlang/execution.py` (`_execute_for_loop`, around line 985, and the top-level `backward`, around line 1430), not `compiler.py` (section 2 and 6.2 updated).
+- **New, a correctness requirement:** the overflow flag must be made identical on every rank (section 6.2). Without it ranks can diverge.
+- **The payoff check was run** and is positive (section 1, "Measured").
+- The GPU backward's device-memory pool is per process, so each rank has its own; nothing to change.
 
 This document is self-contained. It records what the codebase actually does (verified by reading the sources), the resulting design, and the order to build it.
 
@@ -21,6 +30,8 @@ This document is self-contained. It records what the codebase actually does (ver
 
 **Expected payoff (confirm before investing heavily).** Backward runs on the host in NumPy, and section 18.3 of HANDOVER.md measured the machine as already close to CPU-core-bound (about 4.6-5x observed parallelism out of 8 jobs). Two ranks therefore run two host backward passes, so scaling is limited by CPU cores and per-step host/device copies, not by GPU count. Before building steps 5 onward, measure one real training workload: what fraction of an iteration is host backward plus the device-to-host and host-to-device copies? If it dominates, moving backward onto the GPU is worth more than DDP, and it is also the precondition for NCCL being useful (section 6.6). Steps 1 to 4 are cheap and low-risk either way.
 
+**Measured (2026-11-24, two GTX 1080 Ti).** Two independent processes, one pinned to each card, each running the 4-layer micro-GPT perf program (20 Adam steps, GPU backward on): `TOTAL wall` 1.99 s and 2.05 s. One process alone took 1.85 s with the same tool; the later `backward()` trimming brought a single run to about 1.75 s (measured with a different tool). So each process is 7-11% slower than the 1.85 s run (14-17% against 1.75 s), and two cards do about 1.7-1.8x the work of one in that time, before any gradient exchange. The two runs overlapped for about 85% of their length (their CUDA contexts started 0.28 s apart), so full overlap may cost a little more. At this scale the CPU is not the bottleneck. The gradient exchange adds to it: about 3.5 MB per step for this model (867K float32 parameters), an estimated 5-10% per step over the host backend, so the expectation for DDP on two cards is roughly 1.5-1.7x. That exchange cost is an estimate; step 6 should measure it.
+
 ---
 
 ## 2. What the Codebase Does Today (verified facts)
@@ -32,7 +43,7 @@ These drive every decision below.
 | Entry (`tensorlang.py`) | `compiler.compile_and_execute(file)` parses, type-checks, generates CUDA, runs `nvcc`, loads the `.so` and executes, all in one process. | "Specialise at launch" is nearly free: read env, then compile. |
 | GPU binding | `pycuda.autoinit` is imported lazily in the execution phase, after `nvcc`. The context binds to whatever `CUDA_VISIBLE_DEVICES` was at that moment, for the life of the process. | Pinning must be in the worker's environment at exec time. Inside a worker the device is always index 0. |
 | `gpu.py` | Never imports pycuda; shells out to `nvidia-smi`. `pin_env()` / `pin_current_process()` set `CUDA_VISIBLE_DEVICES`. | Safe for a launcher parent process to import. |
-| Backward | `ComputationGraph.backward` is pure NumPy. Per iteration the compiler copies all tensors device-to-host, runs backward on the host, then uploads `NAME_grad` tensors with `memcpy_htod` (for-loop path around `compiler.py` lines 237-285; top-level `backward` around lines 1686-1715). | Gradient averaging fits between `comp_graph.backward(...)` and the upload. No NCCL needed. |
+| Backward | `ComputationGraph.backward` runs mostly in NumPy; `matmul` and `gelu` can use a GPU backward (`TENSORLANG_GPU_BACKWARD=1`), but every gradient is a host array when it returns. Per iteration the compiler copies tensors device-to-host, runs backward, then uploads `NAME_grad` tensors with `memcpy_htod` (`tensorlang/execution.py`: `_execute_for_loop` around line 985, top-level `backward` around line 1430). | Gradient averaging fits between `comp_graph.backward(...)` and the upload. No NCCL needed. |
 | Kernel cache | Every run writes `cache/<file>/kernel.cu`, `kernel.so` and `*.npy` outputs into one shared directory. `nvcc` is skipped only if the generated source is byte-identical to the cached copy. | N ranks would race on `kernel.so` and on output files. See section 6. |
 | Kernel generation | `kernel_generator.py` emits one CUDA kernel per op. Collectives are not CUDA kernels. | No kernel-generator changes. |
 | Non-kernel nodes | `backward`, `save`, `rebind` are skipped by the kernel loops; for-loop `_flat_items` carries `None` as the kernel index for them. | Explicit collectives slot in as host-op nodes of the same kind. |
@@ -219,13 +230,17 @@ A literal in source (if ever added) is an assertion that must match the environm
 
 ### 6.2 Gradient averaging at `backward`
 
-At both backward sites in `compiler.py` (for-loop and top-level), after `comp_graph.backward(loss_name)` and before the `memcpy_htod`:
+At both backward sites in `tensorlang/execution.py` (for-loop and top-level), after `comp_graph.backward(loss_name)` and before the executor reads `comp_graph.overflow_detected` and before the `memcpy_htod`:
 
 1. Collect `NAME` for `NAME in comp_graph.requires_grad` that has an entry in `comp_graph.gradients`, **sorted by name** so every rank uses the same order.
-2. Flatten to one float32 buffer, send one message per backward, receive the averaged buffer, unpack.
-3. Continue with the existing upload.
+2. Flatten to one float32 buffer and **append this rank's overflow flag as the last element** (1.0 if `comp_graph.overflow_detected`, else 0.0).
+3. Send one message per backward, receive the summed buffer, divide the gradient part by `world_size`, unpack.
+4. **Set `comp_graph.overflow_detected = (flag_sum > 0)`**, so every rank sees the same flag.
+5. Continue with the existing upload.
 
 Guarded by `world_size > 1`; otherwise the code path is unchanged.
+
+**Why step 4 is required.** `overflow_detected` is computed inside `ComputationGraph.backward` from this rank's local gradients, and the executor acts on it straight away: on overflow it skips the optimizer step and halves the loss scale (`_current_scale`, `_scale_growth_counter`), in every run, not only FP16 ones. If one rank sees a non-finite gradient and another does not, one skips the step and the other applies it, the weights silently differ, and the ranks have diverged. Sharing the flag keeps single-process semantics exactly (any rank overflowing means all skip) and keeps the loss-scale state identical across ranks, since it evolves only from the flag. The flag travels in the same message as the gradients, so it costs one extra float. Scanning the averaged buffer instead would be simpler but is not equivalent: the existing flag also covers non-parameter gradients, which the averaged buffer does not contain.
 
 ### 6.3 Host backend (`tensorlang/dist.py`)
 
@@ -283,11 +298,12 @@ Collectives are the easy part. FSDP additionally needs per-layer parameter lifec
 - **Concrete equivalence fixture:** the README's `y = 2x` example (`x = [1,2,3,4]`, `lr = 0.1`, `w` starting at 0.5) has a published trajectory (`w` after each update: 2.75, 1.625, 2.1875, 1.90625, 2.046875). Split `x`/`y` into two shards of two rows (`x_0.npy`, `x_1.npy`, and so on) and run `--ddp --nproc 2`. The averaged gradient equals the full-batch gradient (first step: shard gradients -7.5 and -37.5 average to the full-batch -22.5), so `w` must follow the same table. Per-rank printed losses will differ (5.625 and 28.125 in step 1), which is expected.
 - **Equivalence test (the key one):** train N ranks on equal shards, and compare final weights against a single-process run on the concatenated full batch. They should match to float tolerance, given equal shards and a mean loss.
 - **Ordering and mismatch:** a test where ranks disagree on a collective's shape must fail fast with the hash-mismatch message, not hang.
+- **Overflow agreement:** put a NaN in one rank's shard. Every rank must skip that optimizer step, and the weights must still be identical across ranks afterwards (and equal to a single-process run that skips the same step).
 - **Failure propagation:** a test where one rank exits non-zero must make the launcher terminate the others.
 - **Separate category:** DDP tests run serially and are excluded from the parallel pool, since they occupy all GPUs. `pin_env()` should remove `RANK`, `LOCAL_RANK` and `WORLD_SIZE` so stray DDP variables never leak into ordinary tests.
 - **Plain-Python unit tests:** put `dist.py` and `launcher.py` tests in `tests/python/` (the plain-`unittest` convention from HANDOVER.md section 18.1, run with `python3 -m unittest discover -s tests/python -v`). The host backend can be tested with subprocesses and no GPU; the launcher with a mocked `Popen`.
 - **GPU-free shape checks:** `check.py` (parse + type-check) and `verify.py` (NumPy-interpret a `.tl` AST) already exist at the repo root. They were not reviewed for this design, but are the natural way to test `world_size`-dependent shape inference (`WORLD_SIZE=2 python check.py file.tl`) and to simulate N-rank averaging in NumPy for the equivalence test.
-- **Regression:** the existing 109 tests, run without `--ddp`, must pass unchanged. Steps 1 to 4 should be verifiable by that alone.
+- **Regression:** the existing 319 tests, run without `--ddp`, must pass unchanged. Steps 1 to 4 should be verifiable by that alone.
 
 ---
 

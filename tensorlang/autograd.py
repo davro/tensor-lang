@@ -125,8 +125,12 @@ class ComputationGraph:
 
         for tensor_name in tensors_needing_gradients:
             if tensor_name in self.tensors:
-                self.gradients[tensor_name] = np.zeros_like(
-                    self.tensors[tensor_name], dtype=grad_dtype)
+                t = self.tensors[tensor_name]
+                if type(t) is np.ndarray and t.flags.c_contiguous:
+                    # same shape, dtype and (C) layout as np.zeros_like gives here, without its per-call overhead
+                    self.gradients[tensor_name] = np.zeros(t.shape, dtype=grad_dtype)
+                else:
+                    self.gradients[tensor_name] = np.zeros_like(t, dtype=grad_dtype)
                 if self.debug_mode:
                     self.tensorlang.print(message=f"[AUTOGRAD] Initialized gradient for '{tensor_name}' to zero")
 
@@ -154,7 +158,7 @@ class ComputationGraph:
 
             output_grad = self.gradients[node.output_name]
 
-            if np.all(output_grad == 0):
+            if not np.asarray(output_grad).any():     # same as np.all(output_grad == 0), without the temporary (NaN counts as non-zero in both)
                 if self.debug_mode:
                     self.tensorlang.print(message=f"[AUTOGRAD] -> Skipping {node.output_name} - zero gradient")
                 continue
@@ -165,7 +169,7 @@ class ComputationGraph:
         self.overflow_detected = False
         for name in self.gradients:
             grad = self.gradients[name]
-            if not np.all(np.isfinite(grad)):
+            if not np.isfinite(grad).all():
                 self.overflow_detected = True
                 if self.debug_mode:
                     self.tensorlang.print(
