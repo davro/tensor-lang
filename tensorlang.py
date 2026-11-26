@@ -2,14 +2,21 @@ import os
 import sys
 
 from tensorlang.tensor_lang import TensorLang
-from tensorlang.compiler import TensorCompiler
-from tensorlang.test_runner import TestRunner
-from tensorlang.app_runner import AppRunner
 from tensorlang.gpu import detect_gpus, pin_current_process
+from tensorlang.launcher import maybe_launch
+
+# The compiler, the test runner and the app runner are imported inside the branches that use them.
+# tensorlang.compiler imports pycuda.autoinit at module level, and that creates a CUDA context on whichever GPU
+# CUDA_VISIBLE_DEVICES names at that moment. Importing it up here would bind every run to GPU 0 before --gpu is
+# applied, and would give the --ddp launcher (the parent of the workers) a context of its own.
 
 def main():
     tensorlang = TensorLang()
     args = tensorlang.parse_arguments()
+
+    # --ddp: the parent starts the workers and exits when they finish (this call does not return). A worker (RANK is
+    # set and CUDA_VISIBLE_DEVICES is already pinned by the launcher) falls through and runs like any other process.
+    maybe_launch(args)
 
     try:
         if getattr(args, 'gpu', None) is not None:
@@ -17,10 +24,10 @@ def main():
             if available and args.gpu not in {g['index'] for g in available}:
                 print(f"Warning: --gpu {args.gpu} not among detected GPUs "
                       f"({sorted(g['index'] for g in available)}); proceeding anyway.")
-            # Must happen before the first `import pycuda.autoinit` inside
-            # compiler.py's execution path — that import creates a CUDA
-            # context bound to whatever CUDA_VISIBLE_DEVICES says at that
-            # moment, and the binding can't be changed for the rest of
+            # Must happen before tensorlang.compiler is imported (below, in the
+            # branch that needs it) — compiler.py imports pycuda.autoinit, which
+            # creates a CUDA context bound to whatever CUDA_VISIBLE_DEVICES says
+            # at that moment, and the binding can't be changed for the rest of
             # this process's lifetime.
             pin_current_process(args.gpu)
 
@@ -38,6 +45,7 @@ def main():
 
         # App Mode: Run applications from apps/ directory
         if getattr(args, 'app', None) or getattr(args, 'list_apps', False):
+            from tensorlang.app_runner import AppRunner
             runner = AppRunner(
                 debug_mode=args.debug,
                 cache_layers=args.cache_layers,
@@ -62,6 +70,7 @@ def main():
 
         elif args.test:
             # Test Mode: Run core test suite
+            from tensorlang.test_runner import TestRunner
             runner = TestRunner(
                 parallel=not args.no_parallel,
                 jobs=args.jobs,
@@ -96,6 +105,7 @@ def main():
                 print("Run 'python tensorlang.py --help' for usage information")
                 sys.exit(1)
 
+            from tensorlang.compiler import TensorCompiler
             compiler = TensorCompiler(
                 debug_mode=args.debug,
                 debug_info=args.debug_info,

@@ -28,6 +28,7 @@ from tensorlang.codegen import CodegenMixin
 from tensorlang.constants import (OPTIMIZER_NAMES, dtype_numpy, promote_dtype,
                                  DEFAULT_LOSS_SCALE_FP32, DEFAULT_LOSS_SCALE_FP16)
 
+from tensorlang.dist import env_info
 from tensorlang.execution import ExecutionMixin, TensorLangRuntimeError
 from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.io import IOMixin
@@ -79,6 +80,13 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
         self.transpile = transpile
         self.tensorlang = TensorLang()
         self.version = self.tensorlang.version
+
+        # Distributed environment (the defaults describe an ordinary single process): see tensorlang/dist.py
+        try:
+            self.rank, self.world_size, self.local_rank = env_info()
+        except ValueError as exc:
+            print(f"[COMPILER] Error: {exc}")
+            sys.exit(1)
 
         self.comp_graph = ComputationGraph(debug_mode=debug_mode)
         self.requires_grad_tensors = set()
@@ -234,7 +242,7 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                     self.tensorlang.print(message=f"[COMPILER] Functions: {functions_called}")
                 self.tensorlang.print(message=f"[COMPILER] Output Tensor: {output_tensor}")
 
-            success, env = type_checker(ast, {}, self.debug_info, self.debug_mode)
+            success, env = type_checker(ast, {}, self.debug_info, self.debug_mode, world_size=self.world_size)
             self.env = env
             self.env = env
 

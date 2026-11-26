@@ -241,7 +241,9 @@ def _validate_optimizer_call(node_or_expr, env):
 
     return True
 
-def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
+def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False, world_size=1):
+    # world_size is the number of data-parallel ranks (1 for an ordinary run). Nothing reads it yet; it is threaded
+    # through the recursion now so shape rules that depend on it (all_gather) can be added without touching the calls.
     def _count_backward(nodes):
         count = 0
         for n in nodes:
@@ -265,7 +267,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             for synth in list(node.get("_condition_synthetics", [])) + [
                 s for e in node.get("elifs", []) for s in e.get("_condition_synthetics", [])
             ]:
-                success, env = type_checker([synth], env, DEBUG_INFO, DEBUG_MODE)
+                success, env = type_checker([synth], env, DEBUG_INFO, DEBUG_MODE, world_size=world_size)
                 if not success:
                     return False, env
 
@@ -386,7 +388,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             branch_envs = []
             for branch in branch_specs:
                 branch_env = copy.deepcopy(env)
-                success, branch_env = type_checker(branch, branch_env, DEBUG_INFO, DEBUG_MODE)
+                success, branch_env = type_checker(branch, branch_env, DEBUG_INFO, DEBUG_MODE, world_size=world_size)
                 if not success:
                     return False, env
                 branch_envs.append(branch_env)
@@ -426,7 +428,7 @@ def type_checker(ast, env, DEBUG_INFO=False, DEBUG_MODE=False):
             continue
 
         if node.get("type") == "for":
-            success, env = type_checker(node["body"], env, DEBUG_INFO, DEBUG_MODE)
+            success, env = type_checker(node["body"], env, DEBUG_INFO, DEBUG_MODE, world_size=world_size)
             if not success:
                 return False, env
             continue

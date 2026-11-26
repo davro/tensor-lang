@@ -5,16 +5,17 @@ GPU detection and process-level pinning for TensorLang.
 This module is deliberately kept separate from anything that touches
 pycuda: it shells out to `nvidia-smi` to enumerate devices, and never
 imports `pycuda.driver` or `pycuda.autoinit`. That matters because
-`compiler.py` creates its CUDA context lazily, the first time
-`pycuda.autoinit` is imported inside the execution path — and that
+`compiler.py` imports `pycuda.autoinit` at module level, so its CUDA
+context is created the first time that module is imported — and that
 context is a singleton for the lifetime of the process. Whatever
 `CUDA_VISIBLE_DEVICES` says at that moment is what the process is stuck
-with. So the pattern this module supports is:
+with. (tensorlang.py therefore imports the compiler only after any
+pinning or --ddp launching.) So the pattern this module supports is:
 
     1. Detect available GPUs (this module — no CUDA context created).
     2. Decide, per subprocess/app-run, which single device it should see.
     3. Set CUDA_VISIBLE_DEVICES in that process's environment *before*
-       tensorlang.py (and therefore pycuda.autoinit) ever runs.
+       the compiler (and therefore pycuda.autoinit) is imported.
 
 This gives every independent tensorlang process its own GPU, without any
 cross-device copies, peer access, or NVLink requirement. It does NOT let
@@ -26,6 +27,10 @@ this module is for.
 import functools
 import os
 import subprocess
+
+# Variables that belong to one --ddp launch (see tensorlang/launcher.py). pin_env() removes them so that a child
+# process, such as a test, never inherits a rank it was not given.
+DDP_ENV_VARS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "TENSORLANG_DDP_WORKER")
 
 
 @functools.lru_cache(maxsize=1)
@@ -92,8 +97,14 @@ def pin_env(device_index, base_env=None):
     Pass the result as the `env=` kwarg of subprocess.run — the child
     process will see only `device_index` as "device 0", so its own
     (unmodified) `pycuda.autoinit` call binds to that physical GPU.
+
+    The distributed-run variables in DDP_ENV_VARS are removed from the
+    copy, so stray values never leak into an ordinary child process; the
+    --ddp launcher sets them again for each worker after calling this.
     """
     env = dict(base_env if base_env is not None else os.environ)
+    for name in DDP_ENV_VARS:
+        env.pop(name, None)
     env["CUDA_VISIBLE_DEVICES"] = str(device_index)
     return env
 

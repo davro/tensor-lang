@@ -166,6 +166,24 @@ Examples:
             help="List detected NVIDIA GPUs (via nvidia-smi) and exit"
         )
         parser.add_argument(
+            "--ddp",
+            action="store_true",
+            help="Data-parallel run: start --nproc workers of this command, one per GPU, and average the gradients "
+                 "across them at every backward. Needs a .tl file; the launcher picks each worker's GPU."
+        )
+        parser.add_argument(
+            "--nproc",
+            type=int,
+            default=None,
+            metavar="N",
+            help="Number of workers for --ddp (default 2)"
+        )
+        parser.add_argument(
+            "--ddp-same-gpu",
+            action="store_true",
+            help="With --ddp, run every worker on the same GPU (development and CI only)"
+        )
+        parser.add_argument(
             "--filter",
             type=str,
             default=None,
@@ -221,6 +239,23 @@ Examples:
 
         if args.app_args and not args.app:
             parser.error("--app-args requires --app")
+
+        if args.nproc is not None and not args.ddp:
+            parser.error("--nproc requires --ddp")
+
+        if args.ddp_same_gpu and not args.ddp:
+            parser.error("--ddp-same-gpu requires --ddp")
+
+        if args.ddp:
+            if args.test or args.app or args.list_apps or args.list_gpus or args.gpu is not None:
+                parser.error("--ddp cannot be combined with --test, --app, --list-apps, --list-gpus or --gpu "
+                             "(the launcher chooses each worker's GPU)")
+            if not args.file:
+                parser.error("--ddp requires a .tl file to run")
+            if args.nproc is None:
+                args.nproc = 2
+            if args.nproc < 1:
+                parser.error("--nproc must be at least 1")
 
         self.config = args
         return args

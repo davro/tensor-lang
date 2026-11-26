@@ -7,6 +7,7 @@ File: tensorlang/ast_builder.py
 from lark import Token, Tree
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.constants import OPTIMIZER_NAMES
+from tensorlang.dist import expand_placeholders
 
 tensorlang = TensorLang()
 
@@ -851,6 +852,9 @@ def build_expression(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict:
             if isinstance(child, Token) and child.type == 'STRING':
                 # Remove quotes from string
                 file_path = child.value.strip('"').strip("'")
+        if file_path is not None:
+            # {rank} and {world_size} become this process's values (0 and 1 when not distributed)
+            file_path = expand_placeholders(file_path)
         if DEBUG_INFO:
             tensorlang.print(message=f"[AST] {tree.data} file_path: {file_path}")
         return {'type': 'load', 'file_path': file_path}
@@ -1248,6 +1252,9 @@ def build_save_statement(tree: Tree, DEBUG_MODE=False, DEBUG_INFO=False) -> dict
             elif child.type == 'STRING':
                 # Remove quotes
                 file_path = child.value.strip('"').strip("'")
+
+    if file_path:
+        file_path = expand_placeholders(file_path)      # {rank} and {world_size}, as for load()
 
     if DEBUG_MODE:
         tensorlang.print(message=f"[AST] save: {tensor_name} -> {file_path}")
