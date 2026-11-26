@@ -318,3 +318,29 @@ Collectives are the easy part. FSDP additionally needs per-layer parameter lifec
 ---
 
 **End of Multi-GPU Design Handover**
+
+---
+
+## 11. Implementation Status (2026-11-24)
+
+Steps 1 to 4 are done, and the gradient-averaging helper for step 6 exists and is tested. Nothing in `execution.py` has changed yet, so a `--ddp` run today starts the workers, each pinned to its own GPU with its own `RANK`, but they do not exchange gradients: it behaves like N independent runs. `python3 -m unittest discover -s tests/python -v` runs 99 tests for this work (36 host backend, 29 launcher, 17 flags/placeholders/type-checker keyword, 17 entry point and `pin_env`); none needs a GPU.
+
+| Step | State | Where |
+|---|---|---|
+| 1. Launcher, `--ddp`, `--nproc`, `--ddp-same-gpu` | Done: launcher, flags, the `maybe_launch(args)` call in `tensorlang.py`, and `pin_env()` removing the distributed variables (`gpu.DDP_ENV_VARS`) | `tensorlang/launcher.py`, `tensorlang/tensor_lang.py`, `tensorlang.py`, `tensorlang/gpu.py` |
+| 2. Environment and `world_size` keyword | Done | `tensorlang/compiler.py`, `tensorlang/type_checker.py` |
+| 3. `{rank}` / `{world_size}` placeholders | Done | `tensorlang/ast_builder.py`, `tensorlang/dist.py` (`expand_placeholders`) |
+| 4. Host backend | Done: `init`, `all_reduce` (sum, mean, max, min), `broadcast`, `all_gather`, `barrier`, plus `average_gradients` | `tensorlang/dist.py` |
+| 5. Cache layout | Not started | |
+| 6. Gradient averaging at both backward sites | Not started (the helper `dist.average_gradients(comm, grads, overflow)` does the packing, the sum, the overflow flag and the unpacking described in 6.2) | |
+
+**Where the code differs from the text above**
+
+- `--nproc` defaults to `None` and becomes 2 when `--ddp` is given, so that `--nproc` without `--ddp` can be rejected. `--ddp` is also rejected together with `--list-apps` and `--list-gpus`, and it requires a file.
+- The launcher adds `TENSORLANG_DDP_WORKER=1` to every worker. A worker gets the parent's argv unchanged, `--ddp` included, so without a marker it could not tell itself from a parent that happens to have `RANK` exported. `maybe_launch` is silent for a marked worker and prints a note for an unmarked `RANK`.
+- `{rank}` and `{world_size}` are expanded in every run, with 0 and 1 when not distributed, so one program can be run both ways. Only those two exact tokens are replaced.
+- `TensorCompiler.__init__` exits with `[COMPILER] Error: invalid distributed environment: ...` when `RANK` and `WORLD_SIZE` disagree (for example a stale `RANK=3` left exported in a shell with no `WORLD_SIZE`). A stale `RANK=0` alone is harmless.
+- `compiler.py` imports `pycuda.autoinit` at module level (line 22), not lazily as section 6.3 assumed. The launcher parent must therefore never import `tensorlang.compiler`, and `tensorlang.py` must import it only after `maybe_launch`. `dist.py` and `launcher.py` import no CUDA code. `dist.init()` can run anywhere, but it should still be called at the start of execution so that the wait for peers includes their compile time (the 120 s default timeout covers an `nvcc` run).
+- The host backend computes sums in rank order on rank 0, so results are bit-identical on every rank. A mismatch, a dead peer or a timeout raises `DistError` on every live rank with a message naming the rank and the collective.
+- **`tensorlang.py` now imports the compiler, the test runner and the app runner inside the branches that use them.** Before, it imported `TensorCompiler` at the top of the script, and `compiler.py` imports `pycuda.autoinit` at module level, so every invocation created a CUDA context on GPU 0 before `main()` ran. For `--ddp` that would have given the parent a context of its own. A side effect, which I believe but have not confirmed on a GPU, is that `--gpu N` on a single file used to take effect too late (the context already existed) and now takes effect before the compiler is imported; `--test` and `--app` were not affected because they pin their child processes through `pin_env()`. `--list-gpus` no longer needs pycuda at all. A sandbox run of the real script confirmed that with `--ddp --nproc 2` only the two workers import `pycuda.autoinit` (with ranks 0 and 1) and the parent imports nothing CUDA.
+- `pin_env()` removes `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT` and `TENSORLANG_DDP_WORKER`, so a stale or inherited rank can never reach a test or app subprocess; the launcher sets them again for each worker after calling it.
