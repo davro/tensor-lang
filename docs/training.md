@@ -155,3 +155,4 @@ Python-side launches, and the backward's NumPy ops and bookkeeping.
 | `tools/make_micro_gpt_train.py` | Training-program generator with a float64 reference and a mutation check |
 | `tools/compare_micro_gpt.py` | GPU results against the reference (final weights, or `--grads`) |
 | `tools/check_adam_bias.py` | Accuracy of Adam's bias correction on your GPU |
+| `tools/ddp_check.py` | Data-parallel training against whole-batch training: same final weights on every rank and as one process (see `docs/handovers/HANDOVER_MULTI_GPU.md`) |
