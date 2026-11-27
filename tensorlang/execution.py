@@ -14,6 +14,7 @@ import pycuda.driver as cuda
 from ctypes import c_float, c_int, c_void_p
 from pathlib import Path
 
+from tensorlang import dist
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.constants import dtype_numpy, OPTIMIZER_NAMES
 
@@ -988,6 +989,11 @@ class ExecutionMixin:
                 self.comp_graph.backward(loss_name, scale=scale)
                 reached = self.comp_graph.reachable_tensors(loss_name)
 
+                if self.world_size > 1:
+                    # Data-parallel run: average the gradients across ranks and agree on the overflow flag, before
+                    # anything below reads either (see tensorlang/dist.py, sync_gradients).
+                    self._ddp_sync_gradients(reached)
+
                 # Overflow detection
                 overflow = self.comp_graph.overflow_detected
                 if overflow:
@@ -1384,6 +1390,18 @@ class ExecutionMixin:
                 names |= self._collect_executed_output_names(node.get("_selected_branch_flat_items", []))
         return names
 
+    def _ddp_comm(self):
+        """The communicator of a data-parallel run, created on first use (the parameter broadcast at start-up)."""
+        if getattr(self, "_dist_comm", None) is None:
+            self._dist_comm = dist.init()
+        return self._dist_comm
+
+    def _ddp_sync_gradients(self, reached):
+        dist.sync_gradients(self._ddp_comm(), self.comp_graph, reached)
+
+    def _ddp_broadcast_parameters(self, tensors):
+        dist.broadcast_parameters(self._ddp_comm(), tensors, self.requires_grad_tensors)
+
     def _execute_backward_pass(self, loss_name, tensors, gpu_allocs, env, cache_file_dir, cuda, sync_names=None, active_branch_path=None):
         if sync_names is None:
             names_to_sync = set(gpu_allocs.keys()) & set(env.keys())
@@ -1411,6 +1429,9 @@ class ExecutionMixin:
             self.comp_graph.gradients = {}
             self.comp_graph.backward(loss_name, scale=scale, active_branch_path=self.comp_graph.active_branch_path)
             reached = self.comp_graph.reachable_tensors(loss_name, self.comp_graph.active_branch_path)
+
+            if self.world_size > 1:
+                self._ddp_sync_gradients(reached)       # before the gradients are cached, scaled or checked below
 
             for grad_name in self.comp_graph.requires_grad:
                 if grad_name not in self.comp_graph.gradients:
@@ -1485,4 +1506,3 @@ class ExecutionMixin:
             import traceback
             if self.debug_mode:
                 traceback.print_exc()
-

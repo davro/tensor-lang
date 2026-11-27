@@ -472,3 +472,33 @@ def average_gradients(comm, grads, overflow=False):
         out[n] = mean[pos:pos + a.size].reshape(a.shape).astype(a.dtype)
         pos += a.size
     return out, any_overflow
+
+
+def sync_gradients(comm, graph, reached):
+    """The data-parallel step after a backward pass: average the gradients the executor is about to use across all
+    ranks, and make the graph's overflow flag the same on every rank.
+
+    `graph` is the autograd graph (it needs `requires_grad`, `gradients`, `keeps_previous_gradient(name, reached)` and
+    `overflow_detected`). The gradients exchanged are the ones the executor will write: those of `requires_grad`
+    tensors that have a gradient and are not kept from an earlier pass. Every rank must reach this call the same number
+    of times with the same set, which holds when all ranks run the same program; a rank that does not fails with a
+    DistError naming the mismatch. Averaging happens before the loss scale is divided out, which is fine because the
+    scale evolves only from the shared flag and so is identical on every rank.
+
+    Returns the sorted names that were exchanged."""
+    names = sorted(n for n in graph.requires_grad
+                   if n in graph.gradients and not graph.keeps_previous_gradient(n, reached))
+    averaged, any_overflow = average_gradients(
+        comm, {n: graph.gradients[n] for n in names}, overflow=graph.overflow_detected)
+    graph.gradients.update(averaged)
+    graph.overflow_detected = any_overflow
+    return names
+
+
+def broadcast_parameters(comm, tensors, names):
+    """Replace this rank's value of each named tensor by rank 0's, so ranks cannot start out of step.
+
+    Names missing from `tensors` are skipped; the order is sorted so every rank sends the same sequence of messages."""
+    for name in sorted(names):
+        if name in tensors:
+            tensors[name] = comm.broadcast(np.asarray(tensors[name]), src=0)

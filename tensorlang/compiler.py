@@ -28,11 +28,12 @@ from tensorlang.codegen import CodegenMixin
 from tensorlang.constants import (OPTIMIZER_NAMES, dtype_numpy, promote_dtype,
                                  DEFAULT_LOSS_SCALE_FP32, DEFAULT_LOSS_SCALE_FP16)
 
-from tensorlang.dist import env_info
+from tensorlang.dist import DistError, env_info
 from tensorlang.execution import ExecutionMixin, TensorLangRuntimeError
 from tensorlang.fusion import fuse_elementwise_chains
 from tensorlang.io import IOMixin
 from tensorlang.interop import InteropMixin
+from tensorlang.kernel_cache import KernelCacheError, build_kernel_shared, cache_dirs
 from tensorlang.kernel_generator import KernelGenerator
 from tensorlang.tensor_lang import TensorLang
 from tensorlang.type_checker import _is_scalar_shape, type_checker
@@ -216,7 +217,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                 self.tensorlang.separator()
 
             cache_base = Path("cache")
-            cache_file_dir = cache_base / file_path
+            # An ordinary run uses one directory for everything, as always (kernel_dir is cache_file_dir). A data-parallel
+            # run shares one kernel in cache/<file>/ws{N}/ and gives each rank its own cache/<file>/ws{N}/rank{r}/ for
+            # tensors, save() targets and layer caches, so ranks never overwrite each other (see kernel_cache.py).
+            kernel_dir, cache_file_dir = cache_dirs(cache_base, file_path, self.rank, self.world_size)
             cache_file_dir.mkdir(parents=True, exist_ok=True)
 
             if self.debug_mode:
@@ -840,14 +844,33 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                     if self.debug_mode:
                         self.tensorlang.print(message="[COMPILER] KERNEL CUDA!")
 
-                    kernel_cu_path = cache_file_dir / "kernel.cu"
-                    kernel_so_path = cache_file_dir / "kernel.so"
+                    kernel_cu_path = kernel_dir / "kernel.cu"
+                    kernel_so_path = kernel_dir / "kernel.so"
 
-                    already_compiled = (
-                        kernel_so_path.exists()
-                        and kernel_cu_path.exists()
-                        and kernel_cu_path.read_text() == cuda_code
-                    )
+                    if self.world_size > 1:
+                        # Data-parallel run: every rank generates the same code; the first to get the lock builds it,
+                        # the others reuse it. After this call the kernel is complete, whoever built it.
+                        def _nvcc(cu, so):
+                            subprocess.run(
+                                ["nvcc", "-o", so, "--shared", "-Xcompiler", "-fPIC", "-lcudart", "-lcublas", cu],
+                                check=True,
+                            )
+
+                        try:
+                            build_kernel_shared(kernel_dir, cuda_code, _nvcc)
+                        except subprocess.CalledProcessError as e:
+                            self.tensorlang.print(message=f"[COMPILER] CUDA Compile: error {e}")
+                            sys.exit(1)
+                        except KernelCacheError as e:
+                            self.tensorlang.print(message=f"[COMPILER] Error: {e}")
+                            sys.exit(1)
+                        already_compiled = True
+                    else:
+                        already_compiled = (
+                            kernel_so_path.exists()
+                            and kernel_cu_path.exists()
+                            and kernel_cu_path.read_text() == cuda_code
+                        )
 
                     if already_compiled:
                         if self.debug_mode:
@@ -883,9 +906,9 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
                                 self.tensorlang.print(message=f"[TRANSPILE] Reading {kernel_cu_path} for WGSL...")
                             transpiler = WGSLTranspiler(wgsl_workgroup_size=64)
                             wgsl = transpiler.transpile(cuda_code)
-                            transpiler.save(wgsl, cache_file_dir)
+                            transpiler.save(wgsl, kernel_dir)
                             if self.debug_mode:
-                                self.tensorlang.print(f"[WGSL] Saved to {cache_file_dir}")
+                                self.tensorlang.print(f"[WGSL] Saved to {kernel_dir}")
                         except (ImportError, OSError, RuntimeError, ValueError, AttributeError) as e:
                             self.tensorlang.print(message=f"[TRANSPILE] ERROR: {e}")
                             traceback.print_exc()
@@ -893,6 +916,11 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                     try:
                         lib = cdll.LoadLibrary(os.path.abspath(str(kernel_so_path)))
+
+                        if self.world_size > 1:
+                            # Data-parallel run: every rank starts from rank 0's parameters (the `with grad` tensors),
+                            # before anything is uploaded to the GPU or copied into master weights.
+                            self._ddp_broadcast_parameters(tensors)
 
                         for name, info in env.items():
                             if name.endswith("_grad"):
@@ -1064,6 +1092,10 @@ class TensorCompiler(CodegenMixin, ExecutionMixin, IOMixin, InteropMixin):
 
                     except ImportError as e:
                         self.tensorlang.print(message=f"[COMPILER] PyCUDA error: {e}. Run 'pip install pycuda' and ensure CUDA toolkit is installed.")
+                        sys.exit(1)
+                    except DistError as e:
+                        # a data-parallel failure (ranks disagree, a peer died, a timeout): the message says which
+                        self.tensorlang.print(message=f"[COMPILER] Data-parallel error on rank {self.rank}: {e}")
                         sys.exit(1)
                     except (RuntimeError, OSError, ValueError, TypeError) as e:
                         self.tensorlang.print(message=f"[COMPILER] Error executing CUDA kernel: {e}")
