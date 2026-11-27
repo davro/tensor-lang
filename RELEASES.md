@@ -4,6 +4,20 @@ Per-release history of what was done, found and fixed. For what is planned next,
 
 Newest release first.
 
+## v0.5.10 (released) — training that scales
+
+* Done: data-parallel training, `python3 tensorlang.py --ddp --nproc N file.tl` (`--ddp-same-gpu` for one card). The launcher starts one worker per GPU; after every `backward()` the workers average their gradients and share the overflow flag, and at start-up every rank takes rank 0's `with grad` tensors. `{rank}` and `{world_size}` work in `load()` and `save()` paths. The exchange is a host-side TCP backend (`tensorlang/dist.py`): ranks that disagree, a dead peer or a timeout fail on every rank with a message instead of hanging. See `docs/data_parallel.md`
+* Verified: `tools/ddp_check.py` trains a two-layer GELU network on the whole batch and on shards. Two ranks on two GTX 1080 Ti differ from one process by 5.4e-08 (NumPy backward) and 5.6e-08 (GPU backward), and every rank ends with bit-identical weights; four ranks on one GPU: 4.4e-08 and 5.7e-08. Not yet checked under data parallelism: Adam, `layer_norm`, `softmax`, `embedding`, and the speed-up with the gradient exchange included
+* Done: a shared kernel build for data-parallel runs (one `nvcc`, a file lock, the library moved into place before its source) and per-rank output directories (`cache/<file>/ws{N}/rank{r}/`); a rank that generates different code stops the run
+* Done: the launcher gives each worker its share of the CPU's BLAS threads. Two NumPy-backward workers that each used all 8 cores took 15.8 s per worker; with the cap, 4.5 s, against 4.7 s for one process. Two workers with the GPU backward ran at single-process speed (1.84 s and 2.03 s against about 1.85 s), before the gradient exchange was added
+* Done: the GPU backward reuses its device buffers instead of allocating and freeing five per call (`TENSORLANG_GPU_BACKWARD_POOL=0` turns this off): a `matmul` backward 0.26 ms faster, the 20-step micro-GPT run 2.03 s to 1.85 s
+* Done: the autograd pass zero-fills with `np.zeros`, tests for a zero gradient with `.any()` and checks overflow with an array method. Results are identical on 600 random graphs; the time outside the nodes fell from 12.0 to 9.7 ms per pass and the backward from 40.5 to 37.8 ms per pass
+* Found and fixed: `tensorlang.py` imported the compiler at the top, and the compiler creates its CUDA context on import. Every invocation therefore created a context on whichever GPU `CUDA_VISIBLE_DEVICES` named at that moment (GPU 0 by default) before `--gpu` was applied, and a `--ddp` parent would have held a context of its own. The compiler, the test runner and the app runner are now imported where they are used; `--list-gpus` no longer needs pycuda
+* Done: `tools/profile_backward_ops.py` (backward time by op type, and the work outside the nodes), `tools/bench_gpu_backward.py`, `tools/ddp_check.py`, collector presets for the new modules and for `tests/python`; 162 new Python unit tests (172 in `tests/python`)
+* Done: the README's per-release history moved to `RELEASES.md`; testing, mixed precision, applications and data parallelism have their own guides in `docs/`
+* Found, not fixed: the NumPy `gelu` backward uses `np.vectorize(math.erf)`: 13 ms per call on 32K elements, 34 times the GPU path, and 30% of the NumPy-backward run. Passing an absolute program path to the compiler fails (the cache directory becomes the program file). `tools/make_micro_gpt_train.py` writes into `tests/` by default, so a gradient-check run overwrote the committed probe test (restored); use `--out-tl` and `--weights` for check runs
+* Moved to v0.5.11: Stage 2 of the GPU backward (gradients resident on the device, then NCCL for data parallelism), the multi-head training program for GPT-2 small, `load()` indexed by the loop counter, elementwise `sqrt` / `rsqrt` / `exp` / `log`
+
 ## v0.5.9 (released) — training you can trust
 
 * Done: `softmax_cross_entropy(logits, targets)` — fused, stable, N-D, `(softmax - onehot)/N` gradient, four diagnostic codes; four tests

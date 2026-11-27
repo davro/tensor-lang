@@ -92,4 +92,4 @@ python3 tensorlang.py --test --gpu 1
 python3 tensorlang.py --no-gpu-pinning
 ```
 
-This is process-level pinning only. A single TensorLang program does not span multiple GPUs. Round-robin pinning is real but modest on the small/fast correctness suite; heavier concurrent GPU workloads are the better use case.
+This is process-level pinning only. A single TensorLang program does not span multiple GPUs; `--ddp` runs one copy of a program per GPU (see [data_parallel.md](data_parallel.md)). Round-robin pinning is real but modest on the small/fast correctness suite; heavier concurrent GPU workloads are the better use case.
