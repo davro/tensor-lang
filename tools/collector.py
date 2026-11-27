@@ -6,6 +6,7 @@ An uploaded file lets the assistant run the real parser, AST builder and type ch
     python3 tools/collector.py > code.txt                  # preset "core" (the default)
     python3 tools/collector.py --preset probes > probes.txt
     python3 tools/collector.py --preset docs > docs.txt    # README, RELEASES and docs/*.md
+    python3 tools/collector.py --preset pytests > pytests.txt   # tests/python/*.py
     python3 tools/collector.py tensorlang/compiler.py tests/mlp.tl > some.txt   # explicit files
     python3 tools/collector.py "docs/social/**/*.md" > social.txt               # globs are expanded
     python3 tools/collector.py --list                      # show the presets and what is missing
@@ -41,6 +42,8 @@ PRESETS = {
         "tensorlang/compiler.py", "tensorlang/execution.py", "tensorlang/autograd.py", "tensorlang/io.py",
         "tensorlang/constants.py", "tensorlang/tensor_lang.py", "tensorlang/fusion.py",
         "tensorlang/kernel_generator.py", "tensorlang/interop.py", "tensorlang/gpu_backward.py",
+        "tensorlang.py", "tensorlang/gpu.py",
+        "tensorlang/dist.py", "tensorlang/launcher.py", "tensorlang/kernel_cache.py",
         "tensorlang/test_runner.py", "tensorlang/tensor_verifier.py",
         "tensorlang/generators/base.py", "tensorlang/generators/nn.py", "tensorlang/generators/shapes.py",
         "tensorlang/generators/comparisons.py", "tensorlang/generators/elementwise.py",
@@ -62,6 +65,8 @@ PRESETS = {
     "docs": ["README.md", "RELEASES.md"] + glob("docs/*.md"),
     # Session handover notes.
     "handovers": glob("docs/handovers/*.md"),
+    # The plain-Python unit tests (no GPU): the data-parallel work, the collector's neighbours, and the rest.
+    "pytests": glob("tests/python/*.py"),
 }
 
 
