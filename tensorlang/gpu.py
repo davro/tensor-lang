@@ -30,7 +30,8 @@ import subprocess
 
 # Variables that belong to one --ddp launch (see tensorlang/launcher.py). pin_env() removes them so that a child
 # process, such as a test, never inherits a rank it was not given.
-DDP_ENV_VARS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "TENSORLANG_DDP_WORKER")
+DDP_ENV_VARS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "TENSORLANG_DDP_WORKER",
+                "TENSORLANG_DDP_RUN_ID")
 
 
 @functools.lru_cache(maxsize=1)

@@ -86,11 +86,11 @@ class RunWorkersTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.log_dir = os.path.join(self.tmp.name, "logs")
 
-    def run_fake(self, procs, nproc=None, same_gpu=False, environ=None, detect=lambda: [0, 1, 2, 3], **kw):
+    def run_fake(self, procs, nproc=None, same_gpu=False, environ=None, detect=lambda: [0, 1, 2, 3], pin=None, **kw):
         spawner = Spawner(procs)
         code = launcher.run_workers(
             nproc or len(procs), ["tensorlang.py", "--ddp", "--nproc", "2", "prog.tl"], same_gpu,
-            environ={} if environ is None else environ, detect=detect, pin=fake_pin, popen=spawner,
+            environ={} if environ is None else environ, detect=detect, pin=pin or fake_pin, popen=spawner,
             sleep=lambda s: None, python="PY", log_dir=self.log_dir, install_signal_handlers=False, **kw)
         return code, spawner
 
@@ -146,6 +146,32 @@ class RunWorkersTests(unittest.TestCase):
             self.assertEqual(env["MASTER_ADDR"], "127.0.0.1")
             self.assertEqual(env["TENSORLANG_DDP_WORKER"], "1")
             self.assertEqual(env["PATH"], "/bin")                              # pin_env's environment is the base
+
+    def test_every_rank_of_a_launch_shares_one_run_id_and_two_launches_differ(self):
+        _, sp = self.run_fake([FakeProc(), FakeProc(), FakeProc()])
+        ids = {c["env"]["TENSORLANG_DDP_RUN_ID"] for c in sp.calls}
+        self.assertEqual(len(ids), 1)
+        _, again = self.run_fake([FakeProc(), FakeProc()])
+        self.assertNotEqual(ids, {c["env"]["TENSORLANG_DDP_RUN_ID"] for c in again.calls})
+
+    def test_blas_threads_are_shared_out_between_the_ranks(self):
+        _, sp = self.run_fake([FakeProc(), FakeProc()], cpu_count=8)
+        for call in sp.calls:
+            for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+                self.assertEqual(call["env"][name], "4")
+
+    def test_every_rank_gets_at_least_one_blas_thread(self):
+        _, sp = self.run_fake([FakeProc()] * 4, cpu_count=2)
+        self.assertEqual({c["env"]["OMP_NUM_THREADS"] for c in sp.calls}, {"1"})
+
+    def test_blas_thread_settings_already_in_the_environment_win(self):
+        def pin(gpu):
+            return {"PATH": "/bin", "CUDA_VISIBLE_DEVICES": str(gpu), "OMP_NUM_THREADS": "2"}
+
+        _, sp = self.run_fake([FakeProc(), FakeProc()], cpu_count=8, pin=pin)
+        for call in sp.calls:
+            self.assertEqual(call["env"]["OMP_NUM_THREADS"], "2")                # the user's choice
+            self.assertEqual(call["env"]["OPENBLAS_NUM_THREADS"], "4")           # the unset ones still get the default
 
     def test_the_command_line_is_forwarded_unchanged(self):
         _, sp = self.run_fake([FakeProc(), FakeProc()])

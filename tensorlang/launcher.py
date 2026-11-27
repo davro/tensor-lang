@@ -12,6 +12,11 @@ Worker environment (the torchrun convention):
     WORLD_SIZE         N
     MASTER_ADDR/PORT   127.0.0.1 and a free port (MASTER_PORT from the parent's environment wins)
     TENSORLANG_DDP_WORKER  1, so a worker can tell it was started by this launcher
+    TENSORLANG_DDP_RUN_ID  one random id per launch, the same for every rank (tensorlang/kernel_cache.py uses it)
+    OMP_NUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS
+                       cpu cores // nproc (at least 1), unless already set. Each NumPy process otherwise starts one BLAS
+                       thread per core, and N processes doing that at once are several times slower than N processes
+                       sharing the cores: measured 16 s against 5.8 s for the same run on 8 cores with 2 ranks.
     CUDA_VISIBLE_DEVICES  this rank's GPU, from pin_env()
 
 GPU choice: if the parent's CUDA_VISIBLE_DEVICES is set, rank r takes its r-th entry; otherwise the r-th detected GPU.
@@ -26,8 +31,10 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 DEFAULT_PORT = 29500
+BLAS_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 LOG_DIR = os.path.join("cache", "ddp_logs")
 
 
@@ -70,6 +77,13 @@ def free_port(default=DEFAULT_PORT):
             return s.getsockname()[1]
 
 
+def _available_cpus():
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:                                 # not Linux
+        return os.cpu_count() or 1
+
+
 def _exit_code(returncode):
     """A shell-style exit code: a worker killed by signal n counts as 128 + n."""
     return returncode if returncode > 0 else 128 + (-returncode)
@@ -95,7 +109,7 @@ def _stop(procs, popen_grace):
 
 def run_workers(nproc, argv, same_gpu=False, *, environ=None, detect=None, pin=None, popen=subprocess.Popen,
                 sleep=time.sleep, python=None, log_dir=LOG_DIR, poll_interval=0.2, grace=5.0,
-                install_signal_handlers=True):
+                install_signal_handlers=True, cpu_count=None):
     """Run `argv` (the parent's sys.argv, script name first) as nproc ranks and return the exit code."""
     if nproc < 1:
         raise LaunchError("--nproc must be at least 1")
@@ -111,6 +125,8 @@ def run_workers(nproc, argv, same_gpu=False, *, environ=None, detect=None, pin=N
     pin = pin or _default_pin
     python = python or sys.executable
     os.makedirs(log_dir, exist_ok=True)
+    run_id = uuid.uuid4().hex
+    threads = max(1, (_available_cpus() if cpu_count is None else cpu_count) // nproc)
 
     procs, logs = [], []
     interrupted = []
@@ -128,7 +144,9 @@ def run_workers(nproc, argv, same_gpu=False, *, environ=None, detect=None, pin=N
             env = dict(pin(gpus[r]))
             env.update(RANK=str(r), LOCAL_RANK=str(r), WORLD_SIZE=str(nproc),
                        MASTER_ADDR=env_in.get("MASTER_ADDR", "127.0.0.1"), MASTER_PORT=str(port),
-                       TENSORLANG_DDP_WORKER="1")
+                       TENSORLANG_DDP_WORKER="1", TENSORLANG_DDP_RUN_ID=run_id)
+            for name in BLAS_THREAD_VARS:
+                env.setdefault(name, str(threads))             # a value already in the environment wins
             out = None
             if r > 0:
                 out = open(os.path.join(log_dir, f"rank{r}.log"), "w")

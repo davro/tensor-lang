@@ -257,10 +257,10 @@ class PinEnvTests(unittest.TestCase):
 
         launcher.run_workers(2, ["x"], environ={}, detect=lambda: [0, 1], pin=gpu.pin_env, popen=popen,
                              sleep=lambda s: None, log_dir=self.log_dir, install_signal_handlers=False)
-        set_by_launcher = {k for k in captured[0] if k in gpu.DDP_ENV_VARS or k.startswith("MASTER_")}
-        self.assertTrue({"RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT",
-                         "TENSORLANG_DDP_WORKER"} <= set(captured[0]))
-        self.assertEqual(set_by_launcher, set(gpu.DDP_ENV_VARS))
+        # what the launcher adds on top of pin_env's own result, apart from the BLAS thread caps (a tuning choice that is
+        # not stripped), must be exactly what pin_env strips
+        added = set(captured[0]) - set(gpu.pin_env(0)) - set(launcher.BLAS_THREAD_VARS)
+        self.assertEqual(added, set(gpu.DDP_ENV_VARS))
 
     def test_a_stale_rank_in_the_parent_does_not_reach_the_workers(self):
         captured = []
